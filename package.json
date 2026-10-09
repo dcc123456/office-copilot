@@ -1,0 +1,25 @@
+{
+  "name": "office-copilot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Office Copilot — AI-assisted desktop editor for Word/Excel/PDF (Word first)",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter=./apps/* run dev",
+    "dev:desktop": "pnpm --filter @office-copilot/desktop dev",
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "sideload": "office-addin-debugging start manifest/manifest.xml word",
+    "manifest:validate": "office-addin-manifest validate manifest/manifest.xml"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "office-addin-debugging": "^6.1.2",
+    "office-addin-dev-certs": "^2.0.3",
+    "office-addin-manifest": "^2.0.3",
+    "typescript": "^5.5.4"
+  }
+}

@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# oc — run the office-copilot CLI from the built dist.
+# Use `ocw` instead if you want the result opened in WPS automatically.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OC_BIN="$PROJECT_ROOT/apps/cli/dist/index.js"
+ENV_FILE="$PROJECT_ROOT/.env"
+
+if [[ ! -f "$OC_BIN" ]]; then
+  echo "[oc] CLI 还没构建，先运行：pnpm --filter @office-copilot/cli build" >&2
+  exit 1
+fi
+
+if [[ -f "$ENV_FILE" ]]; then
+  set -a; . "$ENV_FILE"; set +a
+fi
+
+exec node "$OC_BIN" "$@"

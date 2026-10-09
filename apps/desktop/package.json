@@ -1,0 +1,114 @@
+{
+  "name": "@office-copilot/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Office Copilot desktop client — edit .docx with AI",
+  "author": "Office Copilot",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build:renderer": "tsc -p tsconfig.json --noEmit && vite build",
+    "build:main": "tsc -p tsconfig.electron.json",
+    "build": "pnpm run build:main && pnpm run build:renderer",
+    "start": "electron .",
+    "test": "vitest run",
+    "pack:mac": "pnpm run build && electron-builder --mac",
+    "pack:dir": "pnpm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@office-copilot/docx-io": "workspace:*",
+    "@tiptap/core": "^2.27.2",
+    "@tiptap/extension-character-count": "^2.6.6",
+    "@tiptap/extension-link": "^2.6.6",
+    "@tiptap/extension-placeholder": "^2.6.6",
+    "@tiptap/extension-table": "^2.6.6",
+    "@tiptap/extension-table-cell": "^2.6.6",
+    "@tiptap/extension-table-header": "^2.6.6",
+    "@tiptap/extension-table-row": "^2.6.6",
+    "@tiptap/extension-text-align": "^2.6.6",
+    "@tiptap/extension-underline": "^2.6.6",
+    "@tiptap/pm": "^2.6.6",
+    "@tiptap/react": "^2.6.6",
+    "@tiptap/starter-kit": "^2.6.6",
+    "clsx": "^2.1.1",
+    "dotenv": "^16.6.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.441.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "electron": "^32.3.3",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.21",
+    "vite-plugin-electron": "^0.28.8",
+    "vite-plugin-electron-renderer": "^0.14.7",
+    "vitest": "2.1.9"
+  },
+  "build": {
+    "appId": "com.officecopilot.desktop",
+    "productName": "Office Copilot",
+    "fileAssociations": [
+      {
+        "ext": [
+          "docx"
+        ],
+        "name": "Word 文档",
+        "description": "Microsoft Word 文档",
+        "role": "Editor",
+        "rank": "Alternate"
+      }
+    ],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json",
+      "!**/node_modules/*/{CHANGELOG.md,README.md,readme.md,test,tests,__tests__}"
+    ],
+    "extraMetadata": {
+      "main": "dist-electron/main.js"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "Office Copilot",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}

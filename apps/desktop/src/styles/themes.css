@@ -1,0 +1,239 @@
+/* ============================================================
+   THEME PALETTES — six moods, swapped via <html data-theme>
+   light is the default (bound on :root so no-JS first paint
+   is already correct). Every chrome surface reads these
+   semantic tokens; paper colors stay constant (tokens.css).
+   ============================================================ */
+
+:root,
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-muted: #f3f2f1;
+  --bg-sidebar: #f7f5f2;
+  --bg-canvas: #e8e6e3;
+  --bg-input: #ffffff;
+
+  --border: #e2e0dc;
+  --border-strong: #c8c6c4;
+
+  --text: #1b1a19;
+  --text-muted: #61605c;
+  --text-faint: #99968f;
+  --text-inverse: #ffffff;
+
+  --accent: #0f6cbd;
+  --accent-hover: #0d5ea6;
+  --accent-soft: #cfe3f5;
+  --accent-tint: #e9f2fb;
+  --accent-border: #a9d2f0;
+
+  --danger: #a4262c;
+  --success: #107c10;
+  --warning: #ca5010;
+
+  --notice-bg: #fdf4d0;
+  --suggestion-bg: #fdf1c7;
+  --diff-before: #fbe4e6;
+  --diff-after: #e2f2e0;
+
+  --backdrop: rgba(28, 26, 24, 0.38);
+  --shadow-1: 0 1px 3px rgba(30, 25, 20, 0.1);
+  --shadow-2: 0 4px 14px rgba(30, 25, 20, 0.14);
+  --shadow-3: 0 12px 40px rgba(30, 25, 20, 0.22);
+  --focus-ring: rgba(15, 108, 189, 0.35);
+}
+
+:root[data-theme="dark"] {
+  --bg: #2b2a28;
+  --bg-raised: #323130;
+  --bg-muted: #383735;
+  --bg-sidebar: #232221;
+  --bg-canvas: #191817;
+  --bg-input: #201f1e;
+
+  --border: #3f3d3b;
+  --border-strong: #55524f;
+
+  --text: #f3f2f1;
+  --text-muted: #c4c2bf;
+  --text-faint: #8e8b87;
+  --text-inverse: #ffffff;
+
+  --accent: #4da3e8;
+  --accent-hover: #66b3ee;
+  --accent-soft: #2c4a66;
+  --accent-tint: #243a50;
+  --accent-border: #3e6d9c;
+
+  --danger: #e07c85;
+  --success: #78c48a;
+  --warning: #e8a557;
+
+  --notice-bg: #453f2e;
+  --suggestion-bg: #4a432e;
+  --diff-before: #5a2b30;
+  --diff-after: #2b4a31;
+
+  --backdrop: rgba(0, 0, 0, 0.55);
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 4px 14px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 12px 40px rgba(0, 0, 0, 0.6);
+  --focus-ring: rgba(77, 163, 232, 0.45);
+}
+
+/* 春 — new green, cool and airy */
+:root[data-theme="spring"] {
+  --bg: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-muted: #eaf1e6;
+  --bg-sidebar: #f4f7f0;
+  --bg-canvas: #e9efe6;
+  --bg-input: #ffffff;
+
+  --border: #d5dfd0;
+  --border-strong: #b7c7b1;
+
+  --text: #1e2a20;
+  --text-muted: #5c6b5c;
+  --text-faint: #93a091;
+  --text-inverse: #ffffff;
+
+  --accent: #2e7d5b;
+  --accent-hover: #276a4e;
+  --accent-soft: #cde5d6;
+  --accent-tint: #ecf5ee;
+  --accent-border: #a8cfba;
+
+  --danger: #b3392f;
+  --success: #2e7d32;
+  --warning: #b26a00;
+
+  --notice-bg: #f6f4d4;
+  --suggestion-bg: #f4f0c6;
+  --diff-before: #f8e3e4;
+  --diff-after: #ddf0da;
+
+  --backdrop: rgba(24, 34, 26, 0.38);
+  --shadow-1: 0 1px 3px rgba(24, 40, 28, 0.1);
+  --shadow-2: 0 4px 14px rgba(24, 40, 28, 0.14);
+  --shadow-3: 0 12px 40px rgba(24, 40, 28, 0.22);
+  --focus-ring: rgba(46, 125, 91, 0.35);
+}
+
+/* 夏 — linen warmth, terracotta sun */
+:root[data-theme="summer"] {
+  --bg: #fffdf8;
+  --bg-raised: #fffdf8;
+  --bg-muted: #f2ebdc;
+  --bg-sidebar: #f9f4ea;
+  --bg-canvas: #efe9df;
+  --bg-input: #fffdf8;
+
+  --border: #e4d9c6;
+  --border-strong: #cdbc9e;
+
+  --text: #292017;
+  --text-muted: #6f6252;
+  --text-faint: #a3968a;
+  --text-inverse: #ffffff;
+
+  --accent: #c2410c;
+  --accent-hover: #a83808;
+  --accent-soft: #f8dcc4;
+  --accent-tint: #fdeede;
+  --accent-border: #eeb28c;
+
+  --danger: #b3402a;
+  --success: #4d7c0f;
+  --warning: #b45309;
+
+  --notice-bg: #fdeecd;
+  --suggestion-bg: #fce9c9;
+  --diff-before: #f9e0dc;
+  --diff-after: #e6efdb;
+
+  --backdrop: rgba(38, 28, 18, 0.4);
+  --shadow-1: 0 1px 3px rgba(46, 30, 14, 0.12);
+  --shadow-2: 0 4px 14px rgba(46, 30, 14, 0.16);
+  --shadow-3: 0 12px 40px rgba(46, 30, 14, 0.24);
+  --focus-ring: rgba(194, 65, 12, 0.35);
+}
+
+/* 秋 — amber and umber, fallen warmth */
+:root[data-theme="autumn"] {
+  --bg: #fffbf4;
+  --bg-raised: #fffbf4;
+  --bg-muted: #ecdfcc;
+  --bg-sidebar: #f5ebe0;
+  --bg-canvas: #ece1d4;
+  --bg-input: #fffbf4;
+
+  --border: #ddccba;
+  --border-strong: #c2a98e;
+
+  --text: #2a1f16;
+  --text-muted: #6d5b49;
+  --text-faint: #a08d78;
+  --text-inverse: #ffffff;
+
+  --accent: #8a4b1f;
+  --accent-hover: #743f1a;
+  --accent-soft: #ecd6bd;
+  --accent-tint: #f7e8d6;
+  --accent-border: #d3ab7f;
+
+  --danger: #a13328;
+  --success: #5c7c2f;
+  --warning: #a05a12;
+
+  --notice-bg: #fbeec9;
+  --suggestion-bg: #f7e6bd;
+  --diff-before: #f6dfd9;
+  --diff-after: #e3eed9;
+
+  --backdrop: rgba(36, 26, 18, 0.42);
+  --shadow-1: 0 1px 3px rgba(48, 30, 16, 0.12);
+  --shadow-2: 0 4px 14px rgba(48, 30, 16, 0.16);
+  --shadow-3: 0 12px 40px rgba(48, 30, 16, 0.24);
+  --focus-ring: rgba(138, 75, 31, 0.38);
+}
+
+/* 冬 — slate frost, quiet blue-gray */
+:root[data-theme="winter"] {
+  --bg: #ffffff;
+  --bg-raised: #ffffff;
+  --bg-muted: #e6ebf1;
+  --bg-sidebar: #eef2f7;
+  --bg-canvas: #e3e8ee;
+  --bg-input: #ffffff;
+
+  --border: #ccd6e0;
+  --border-strong: #a9b7c6;
+
+  --text: #1d2430;
+  --text-muted: #5b6675;
+  --text-faint: #8f9aa8;
+  --text-inverse: #ffffff;
+
+  --accent: #2c5b8f;
+  --accent-hover: #24496f;
+  --accent-soft: #cfdfef;
+  --accent-tint: #e9f0f8;
+  --accent-border: #a5c0da;
+
+  --danger: #9d2c3c;
+  --success: #3a6b3f;
+  --warning: #9a5b12;
+
+  --notice-bg: #f3efd4;
+  --suggestion-bg: #efeada;
+  --diff-before: #f2dfe2;
+  --diff-after: #ddebdf;
+
+  --backdrop: rgba(20, 26, 38, 0.4);
+  --shadow-1: 0 1px 3px rgba(20, 30, 48, 0.1);
+  --shadow-2: 0 4px 14px rgba(20, 30, 48, 0.14);
+  --shadow-3: 0 12px 40px rgba(20, 30, 48, 0.22);
+  --focus-ring: rgba(44, 91, 143, 0.4);
+}

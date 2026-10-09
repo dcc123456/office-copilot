@@ -1,0 +1,104 @@
+/**
+ * Build a self-contained HTML document for printing / PDF export.
+ *
+ * We render the editor's current HTML (from `editor.getHTML()`) inside
+ * A4-sized `<section class="page">` blocks. Print media CSS forces
+ * page breaks after each section. Because the editor itself does
+ * visual pagination via Decoration widgets, we strip those before
+ * printing and let Chromium re-paginate natively — that produces
+ * crisp PDFs without relying on our measurement.
+ */
+
+import type { LinkStyle } from "@office-copilot/docx-io";
+
+export function buildPrintHtml(opts: {
+  bodyHtml: string;
+  headerHtml?: string;
+  footerHtml?: string;
+  pageWidthPx: number;
+  pageHeightPx: number;
+  marginTopPx: number;
+  marginRightPx: number;
+  marginBottomPx: number;
+  marginLeftPx: number;
+  headerPx: number;
+  footerPx: number;
+  link?: LinkStyle | null;
+}): string {
+  const {
+    bodyHtml,
+    headerHtml,
+    footerHtml,
+    pageWidthPx,
+    pageHeightPx,
+    marginTopPx,
+    marginRightPx,
+    marginBottomPx,
+    marginLeftPx,
+    headerPx,
+    footerPx,
+    link,
+  } = opts;
+
+  const linkColor =
+    link?.color && /^#[0-9a-f]{6}$/i.test(link.color) ? link.color : "#0563c1";
+  const linkRule = link?.underline === false ? "none" : "underline";
+
+  // Reuse the editor's stylesheet? We inline a minimal stylesheet that
+  // makes the output look close to what the user sees.
+  const css = `
+    @page { size: ${pageWidthPx}px ${pageHeightPx}px; margin: 0; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #fff; color: #000;
+      font-family: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+        "Source Han Sans SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+      font-size: 14px; line-height: 1.5; }
+    .page {
+      position: relative;
+      width: ${pageWidthPx}px;
+      height: ${pageHeightPx}px;
+      padding: ${marginTopPx}px ${marginRightPx}px ${marginBottomPx}px ${marginLeftPx}px;
+      page-break-after: always;
+      break-after: page;
+      overflow: hidden;
+    }
+    .page:last-child { page-break-after: auto; }
+    .ph { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
+           top: ${headerPx}px; font-size: 10px; color: #666; }
+    .pf { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
+           bottom: ${footerPx}px; font-size: 10px; color: #666; text-align: center; }
+    /* Editor block styles */
+    .ProseMirror { outline: none; }
+    p { margin: 0 0 6pt; }
+    h1 { font-size: 22pt; margin: 12pt 0 6pt; }
+    h2 { font-size: 16pt; margin: 10pt 0 4pt; }
+    h3 { font-size: 13pt; margin: 8pt 0 4pt; }
+    h4 { font-size: 12pt; margin: 7pt 0 3pt; }
+    h5 { font-size: 11pt; margin: 6pt 0 2pt; }
+    h6 { font-size: 10.5pt; margin: 5pt 0 2pt; }
+    ul, ol { margin: 4pt 0 4pt 24pt; padding: 0; }
+    blockquote { border-left: 3px solid #ccc; padding-left: 10px; color: #555;
+      margin: 6pt 0; }
+    table { border-collapse: collapse; }
+    table td, table th { border: 1px solid #888; padding: 4px 8px; }
+    img { max-width: 100%; }
+    a { color: ${linkColor}; text-decoration: ${linkRule}; }
+    .pm-field {
+      display: inline-block; padding: 0 4px; border-radius: 3px;
+      background: #eaf3fb; color: #0078d4;
+    }
+    /* The page-gap widgets from our editor shouldn't appear on paper. */
+    .oc-page-gap { display: none !important; }
+  `;
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><title>Print</title>
+<style>${css}</style></head>
+<body>
+  <section class="page">
+    ${headerHtml ? `<div class="ph">${headerHtml}</div>` : ""}
+    <div class="ProseMirror">${bodyHtml}</div>
+    ${footerHtml ? `<div class="pf">${footerHtml}</div>` : ""}
+  </section>
+</body></html>`;
+}

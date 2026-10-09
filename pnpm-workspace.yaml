@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  '@azure/msal-node-extensions': false
+  '@microsoft/m365agentstoolkit-cli': false
+  keytar: false
+
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+  - electron

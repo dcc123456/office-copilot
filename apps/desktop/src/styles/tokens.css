@@ -1,0 +1,56 @@
+/* ============================================================
+   DESIGN TOKENS — theme-independent scales
+   Palettes live in themes.css; this file defines typography,
+   spacing, radius, elevation, motion, and the invariant
+   "paper" colors (document pages always render as paper).
+   ============================================================ */
+
+@font-face {
+  font-family: "Fraunces";
+  font-style: normal;
+  font-weight: 500 700;
+  font-display: swap;
+  src: url("../assets/fonts/fraunces-latin.woff2") format("woff2");
+}
+
+:root {
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Palatino,
+    "Songti SC", "SimSun", serif;
+  --font-editor: "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+    "Source Han Sans SC", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+
+  --radius-xs: 3px;
+  --radius-s: 4px;
+  --radius-m: 8px;
+  --radius-l: 14px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --dur-fast: 100ms;
+  --dur: 150ms;
+
+  /* Paper invariants — document pages never re-theme (Word convention,
+     docx fidelity, and print/PDF export parity). */
+  --page-paper: #ffffff;
+  --page-side: #fafafa;
+  --editor-ink: #000000;
+  --table-line: #999999;
+  --table-head: #f5f4f2;
+  --paper-rule: #e1dfdd;
+  --paper-muted: #605e5c;
+  --paper-faint: #8a8886;
+  --paper-placeholder: #a19f9d;
+  --hf-field-bg: #eaf3fb;
+  --hf-field-fg: #0078d4;
+  --hf-hover: rgba(0, 120, 212, 0.04);
+  --selected-cell: #cfe3f5;
+}

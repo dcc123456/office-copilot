@@ -1,0 +1,200 @@
+import type JSZip from "jszip";
+import { children, firstChild, parseDocument, serialize, type Element } from "./xml.js";
+import { ooxmlToPm, pmToOoxml } from "./ooxml-pm.js";
+import type { PMDoc } from "./pm-schema.js";
+import { NumberingMap } from "./numbering.js";
+import { StyleMap } from "./styles.js";
+
+export type HeaderFooterType =
+  | "header"
+  | "firstHeader"
+  | "evenHeader"
+  | "footer"
+  | "firstFooter"
+  | "evenFooter";
+
+export interface HeaderFooterEntry {
+  type: HeaderFooterType;
+  rId: string;
+  /** Target path inside the zip, e.g. word/header1.xml. */
+  path: string;
+  pm: PMDoc;
+  /** Raw original XML so we can write it back if the user doesn't edit it. */
+  rawXml: string;
+  /** True when the user edited this header/footer and we must re-serialize pm. */
+  dirty?: boolean;
+}
+
+export interface HeaderFooterBundle {
+  /** type → entry. We only model default header/footer for now. */
+  entries: Record<string, HeaderFooterEntry>;
+}
+
+const TYPE_TAG: Record<HeaderFooterType, string> = {
+  header: "w:headerReference",
+  firstHeader: "w:headerReference",
+  evenHeader: "w:headerReference",
+  footer: "w:footerReference",
+  firstFooter: "w:footerReference",
+  evenFooter: "w:footerReference",
+};
+
+const TYPE_ATTR: Record<HeaderFooterType, string> = {
+  header: "default",
+  firstHeader: "first",
+  evenHeader: "even",
+  footer: "default",
+  firstFooter: "first",
+  evenFooter: "even",
+};
+
+/**
+ * Parse all <w:headerReference>/<w:footerReference> elements from a
+ * document's sectPr, then read and parse every referenced part.
+ *
+ * We return a map keyed by type (header/footer); even/first variants
+ * are tracked but the renderer currently uses the default everywhere.
+ */
+export async function loadHeaderFooters(
+  zip: JSZip,
+  documentXml: string,
+  relsXml: string,
+  numbering: NumberingMap,
+  styles: StyleMap,
+): Promise<HeaderFooterBundle> {
+  const bundle: HeaderFooterBundle = { entries: {} };
+  const docRoot = parseDocument(documentXml);
+  const body = firstChild(docRoot, "w:body");
+  const sectPr = body && firstChild(body, "w:sectPr");
+  if (!sectPr) return bundle;
+
+  // Build rId → target map from document.xml.rels. Tests and minimal
+  // docs may ship without a rels part; treat that as "no references".
+  const relMap = new Map<string, string>();
+  if (relsXml && /<Relationships\b/.test(relsXml)) {
+    try {
+      const relsRoot = parseDocument(relsXml);
+      for (const rel of children(relsRoot).filter(
+        (c) => c.name === "Relationship",
+      )) {
+        const id = rel.attributes?.Id as string | undefined;
+        const target = rel.attributes?.Target as string | undefined;
+        if (id && target) relMap.set(id, target);
+      }
+    } catch {
+      // Malformed rels — ignore; we just won't find header parts.
+    }
+  }
+
+  const types: HeaderFooterType[] = [
+    "header",
+    "firstHeader",
+    "evenHeader",
+    "footer",
+    "firstFooter",
+    "evenFooter",
+  ];
+  for (const type of types) {
+    const ref = children(sectPr).find(
+      (c) =>
+        c.name === TYPE_TAG[type] &&
+        (c.attributes?.["w:type"] as string | undefined) === TYPE_ATTR[type],
+    );
+    if (!ref) continue;
+    const rId = ref.attributes?.["r:id"] as string | undefined;
+    if (!rId) continue;
+    const target = relMap.get(rId);
+    if (!target) continue;
+    // Targets in document.xml.rels are relative to word/.
+    const path = target.startsWith("word/")
+      ? target
+      : target.startsWith("/")
+        ? target.slice(1)
+        : `word/${target.replace(/^\.\//, "")}`;
+    const f = zip.file(path);
+    if (!f) continue;
+    const xml = await f.async("string");
+    const pm = parseHeaderFooterXml(xml, numbering, styles);
+    bundle.entries[type] = { type, rId, path, pm, rawXml: xml };
+  }
+  return bundle;
+}
+
+function parseHeaderFooterXml(
+  xml: string,
+  numbering: NumberingMap,
+  styles: StyleMap,
+): PMDoc {
+  const root = parseDocument(xml);
+  // ooxmlToPm expects a full <w:document><w:body>…</w:body></w:document>
+  // tree; wrap the header/footer's paragraphs in one.
+  const inner = children(root).map(serialize).join("");
+  const wrapper = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${inner}</w:body></w:document>`;
+  return ooxmlToPm(wrapper, numbering, styles);
+}
+
+/**
+ * Re-serialize any dirty header/footer parts back to their full XML
+ * document. The caller writes the resulting strings to the zip.
+ *
+ * Returns a map of path → xml for every part that should be updated.
+ */
+export function serializeHeaderFooters(
+  bundle: HeaderFooterBundle,
+  numbering: NumberingMap,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const entry of Object.values(bundle.entries)) {
+    if (!entry.dirty) {
+      out.set(entry.path, entry.rawXml);
+      continue;
+    }
+    let inner = pmToOoxml(entry.pm, { numbering });
+    // Strip the <w:sectPr>…</w:sectPr> that pmToOoxml appends to every
+    // document — headers/footers must not carry their own sectPr.
+    inner = inner.replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, "");
+    // Unwrap <w:document><w:body>…</w:body></w:document> so we can place
+    // the paragraphs directly inside <w:hdr>/<w:ftr>.
+    const bodyMatch = inner.match(/<w:body[^>]*>([\s\S]*)<\/w:body>/);
+    const bodyContent = bodyMatch ? bodyMatch[1]! : inner;
+    const tag = entry.type.startsWith("footer") ? "w:ftr" : "w:hdr";
+    const xml =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<${tag} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+      `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+      bodyContent +
+      `</${tag}>`;
+    out.set(entry.path, xml);
+  }
+  return out;
+}
+
+/**
+ * If a brand-new header/footer is added (one that didn't exist in the
+ * source document), generate both its part file and a Relationship +
+ * sectPr reference. This is a helper; the DocxFile layer decides when
+ * to call it.
+ */
+export function ensureDefaultHeaderFooter(
+  bundle: HeaderFooterBundle,
+  numbering: NumberingMap,
+): { headerPath: string; footerPath: string; headerRId: string; footerRId: string } {
+  const mkPart = (kind: "header" | "footer", id: number): { path: string; rId: string } => {
+    const path = `word/${kind}${id}.xml`;
+    if (!bundle.entries[kind]) {
+      bundle.entries[kind] = {
+        type: kind,
+        rId: `rIdHf${id}`,
+        path,
+        pm: { type: "doc", content: [{ type: "paragraph", content: [] }] },
+        rawXml: "",
+        dirty: true,
+      };
+    }
+    return { path, rId: bundle.entries[kind]!.rId };
+  };
+  const h = mkPart("header", 1);
+  const f = mkPart("footer", 1);
+  void numbering;
+  return { headerPath: h.path, footerPath: f.path, headerRId: h.rId, footerRId: f.rId };
+}

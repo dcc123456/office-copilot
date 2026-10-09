@@ -1,0 +1,183 @@
+:root {
+  font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  color: #201f1e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.header {
+  padding: 10px 14px;
+  border-bottom: 1px solid #edebe9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #faf9f8;
+}
+
+.header h1 {
+  font-size: 14px;
+  margin: 0;
+  font-weight: 600;
+}
+
+.status {
+  font-size: 12px;
+  color: #605e5c;
+}
+
+.status.ok {
+  color: #107c10;
+}
+
+.status.err {
+  color: #a4262c;
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bubble {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  max-width: 92%;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: #0078d4;
+  color: #fff;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: #f3f2f1;
+  color: #201f1e;
+}
+
+.bubble.error {
+  background: #fde7e9;
+  color: #a4262c;
+}
+
+.proposal {
+  border: 1px solid #c8c6c4;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.proposal h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.edit {
+  border-top: 1px dashed #edebe9;
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.edit:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.edit-type {
+  font-size: 11px;
+  color: #605e5c;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diff-line {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.diff-line.before {
+  background: #fde7e9;
+  text-decoration: line-through;
+}
+
+.diff-line.after {
+  background: #dff6dd;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.composer {
+  border-top: 1px solid #edebe9;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #faf9f8;
+}
+
+.composer textarea {
+  resize: none;
+  width: 100%;
+  min-height: 54px;
+  border-radius: 6px;
+  border: 1px solid #c8c6c4;
+  padding: 6px 8px;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+.quick {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+pre.table-preview {
+  margin: 0;
+  background: #f3f2f1;
+  padding: 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+}

@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>AMApplicationBuild</key><string>522</string>
+  <key>AMApplicationVersion</key><integer>2.10</integer>
+  <key>AMDocumentVersion</key><integer>2</integer>
+  <key>actions</key>
+  <array>
+    <dict>
+      <key>action</key>
+      <dict>
+        <key>AMAccepts</key>
+        <dict>
+          <key>Container</key><string>List</string>
+          <key>Optional</key><true/>
+          <key>Types</key><array><string>com.apple.cocoa.path</string></array>
+        </dict>
+        <key>AMActionVersion</key><string>2.0.2</string>
+        <key>AMProvides</key>
+        <dict>
+          <key>Container</key><string>List</string>
+          <key>Types</key><array><string>com.apple.cocoa.path</string></array>
+        </dict>
+        <key>ActionName</key><string>Run AppleScript</string>
+        <key>ActionParameters</key>
+        <dict>
+          <key>ActionName</key><string>Run AppleScript</string>
+          <key>source</key>
+          <string>#!/usr/bin/env osascript
+# Finder Quick Action: "AI 改文档（Office Copilot）"
+#
+# 工作流：
+#   1. 从 Finder 右键拿到选中的 .docx
+#   2. 弹窗让用户输入自然语言指令
+#   3. 调用 oc ai -y 直接写入（原地修改，CLI 会自动生成 .bak）
+#   4. 如果 WPS 正在前台显示该文件，让它重新加载
+#   5. 否则用 WPS 打开
+#
+# 在 Automator 里：新建 "Quick Action"，工作流选择 "receives files or folders
+# in Finder"，拖一个 "Run AppleScript" 动作，粘贴本文件的全部内容，保存为
+# "AI 改文档"。之后任何 .docx 右键 → 快速操作 → AI 改文档。
+
+on run {input, parameters}
+    if (count of input) is 0 then return
+    set docxFile to item 1 of input
+    set docxPath to POSIX path of docxFile
+
+    set projectRoot to "/Users/dcc/deepseek-harness-workspece/office-copilot"
+    set ocBin to projectRoot &amp; "/apps/cli/dist/index.js"
+    set envFile to projectRoot &amp; "/.env"
+
+    tell application "System Events"
+        set ext to name extension of (disk item docxPath)
+    end tell
+    if ext is not "docx" then
+        display dialog "只支持 .docx 文件。" buttons {"好"} default button "好" with icon stop
+        return
+    end if
+
+    set instruction to text returned of ¬
+        (display dialog "告诉助手怎么改这份文档：" &amp; linefeed &amp; linefeed &amp; "📄 " &amp; (name of (info for docxFile)) default answer "" buttons {"取消", "开始"} default button "开始")
+
+    if instruction is "" then return
+
+    set shellCmd to ¬
+        "set -a; [ -f '" &amp; envFile &amp; "' ] &amp;&amp; . '" &amp; envFile &amp; "'; set +a; " &amp; ¬
+        "cd '" &amp; projectRoot &amp; "' &amp;&amp; " &amp; ¬
+        "node '" &amp; ocBin &amp; "' ai " &amp; my shq(docxPath) &amp; " " &amp; my shq(instruction) &amp; " -y 2&gt;&amp;1; " &amp; ¬
+        "echo \"\n[oc-exit:$?]\""
+
+    set output to do shell script shellCmd
+    set exitCode to last word of (last paragraph of output)
+
+    if exitCode is "0" then
+        display notification "已写入：" &amp; (name of (info for docxFile)) with title "Office 智能助手"
+        my openOrReloadInWps(docxPath)
+    else
+        display dialog "修改失败：" &amp; linefeed &amp; linefeed &amp; output buttons {"复制错误", "好"} default button "好" with icon stop
+    end if
+end run
+
+on openOrReloadInWps(docxPath)
+    tell application "System Events"
+        set wpsRunning to (exists process "wpsoffice")
+    end tell
+
+    if not wpsRunning then
+        do shell script "open -a wpsoffice " &amp; my shq(docxPath)
+        return
+    end if
+
+    -- WPS Mac 没有公开的 AppleScript 字典来"重新加载"。我们先激活它，
+    -- 如果它显示的是同一个文件，WPS 会在窗口回到前台时检测到外部改动并提示重载；
+    -- 如果不是同一个文件，就用 open 打开新文件。
+    tell application "wpsoffice" to activate
+    delay 0.4
+    do shell script "open -a wpsoffice " &amp; my shq(docxPath)
+end openOrReloadInWps
+
+on shq(s)
+    set s2 to ""
+    repeat with c in s
+        set ch to c as string
+        if ch is "'" then
+            set s2 to s2 &amp; "'\\''"
+        else
+            set s2 to s2 &amp; ch
+        end if
+    end repeat
+    return "'" &amp; s2 &amp; "'"
+end shq</string>
+        </dict>
+        <key>BundleUUID</key><string>66D11A2E-9E1F-4F99-9C9B-0D1AA5F2A111</string>
+        <key>CFBundleVersion</key><string>2.0.2</string>
+        <key>CanShowSelectedItemsWhenRun</key><false/>
+        <key>CanRunAsInputSource</key><true/>
+        <key>Class Name</key><string>RunAppleScriptAction</string>
+        <key>InputUUID</key><string>55555555-4444-4444-4444-CCCCCCCCAAAA</string>
+        <key>UUID</key><string>66D11A2E-9E1F-4F99-9C9B-0D1AA5F2A111</string>
+        <key>Version</key><string>2.0.2</string>
+        <key>WarnsWhenEmpty</key><true/>
+      </dict>
+      <key>bundleIdentifier</key><string>com.apple.runapplescript</string>
+      <key>canShowSelectedItemsWhenRun</key><false/>
+      <key>canRunAsInputSource</key><true/>
+      <key>className</key><string>RunAppleScriptAction</string>
+      <key>inputUUID</key><string>55555555-4444-4444-4444-CCCCCCCCAAAA</string>
+      <key>isViewVisible</key><integer>1</integer>
+      <key>outputUUID</key><string>66D11A2E-9E1F-4F99-9C9B-0D1AA5F2A112</string>
+      <key>showWhenRun</key><false/>
+      <key>version</key><string>2.0.2</string>
+      <key>warnsWhenEmpty</key><true/>
+    </dict>
+  </array>
+  <key>connectors</key><dict/>
+  <key>workflowMetaData</key>
+  <dict>
+    <key>workflowTypeIdentifier</key><string>com.apple.AMService</string>
+    <key>workflowServiceApplication</key>
+    <array>
+      <string>com.apple.finder</string>
+      <string>com.kingsoft.wpsoffice.mac</string>
+      <string>com.microsoft.Word</string>
+    </array>
+    <key>workflowServiceInput</key>
+    <dict>
+      <key>container</key><string>List</string>
+      <key>types</key>
+      <array>
+        <string>org.openxmlformats.wordprocessingml.document</string>
+        <string>com.microsoft.word.doc</string>
+        <string>public.data</string>
+      </array>
+    </dict>
+    <key>workflowServicePresentErrors</key><true/>
+    <key>workflowServiceProcessesInput</key><true/>
+    <key>workflowServiceReceivesInput</key><true/>
+    <key>workflowServiceReturnsOutput</key><false/>
+    <key>workflowServiceMenuItem</key>
+    <dict><key>default</key><string>AI 改文档（Office Copilot）</string></dict>
+  </dict>
+</dict>
+</plist>

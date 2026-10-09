@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ocw — office-copilot wrapper that opens the result in WPS Office for Mac.
+#
+# Usage:
+#   ocw list       <file.docx>
+#   ocw replace    <file.docx> -f 甲 -r 乙
+#   ocw insert-paragraph ...
+#   ocw insert-table ...
+#   ocw insert-image ...
+#   ocw ai         <file.docx> "自然语言指令"
+#
+# All arguments are forwarded to `oc`; after a successful write the target
+# file is opened in WPS. For commands that don't modify the file (`list`,
+# `--help`) we just run oc and don't switch to WPS.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+OC_BIN="$PROJECT_ROOT/apps/cli/dist/index.js"
+
+if [[ ! -f "$OC_BIN" ]]; then
+  echo "[ocw] CLI 还没构建，先运行：pnpm --filter @office-copilot/cli build" >&2
+  exit 1
+fi
+
+# Pass through. Load .env so LLM_API_KEY is available for `ai`.
+if [[ -f "$SCRIPT_DIR/../.env" ]]; then
+  set -a; . "$SCRIPT_DIR/../.env"; set +a
+fi
+
+# The first non-flag argument after oc's subcommand is typically the file path.
+SUBCMD="${1:-}"
+FILE_ARG=""
+NEXT_IS_FILE=0
+for arg in "$@"; do
+  if [[ $NEXT_IS_FILE -eq 1 ]]; then
+    FILE_ARG="$arg"; NEXT_IS_FILE=0; continue
+  fi
+  case "$arg" in
+    list|replace|insert-paragraph|insert-table|insert-image|ai)
+      NEXT_IS_FILE=1 ;;
+  esac
+done
+
+node "$OC_BIN" "$@"
+RC=$?
+
+if [[ $RC -ne 0 ]]; then
+  exit $RC
+fi
+
+# Open the file in WPS for write commands; skip for read-only / help.
+case "$SUBCMD" in
+    replace|insert-paragraph|insert-table|insert-image|ai)
+        if [[ -n "$FILE_ARG" && -f "$FILE_ARG" ]]; then
+            # If -o was used, open that output instead.
+            OUT_FILE="$FILE_ARG"
+            for ((i=1; i<=$#; i++)); do
+                if [[ "${!i}" == "-o" || "${!i}" == "--output" ]]; then
+                    j=$((i+1))
+                    OUT_FILE="${!j}"
+                fi
+            done
+            echo "[ocw] 用 WPS 打开：$OUT_FILE"
+            open -a wpsoffice "$OUT_FILE"
+        fi
+        ;;
+esac

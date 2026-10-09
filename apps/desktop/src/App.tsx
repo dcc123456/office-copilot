@@ -1,0 +1,752 @@
+import { useEditor } from "@tiptap/react";
+import { EDITOR_EXTENSIONS } from "./editor/extensions/editorExtensions.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FileDown } from "lucide-react";
+import { EditorContent } from "@tiptap/react";
+import { Toolbar } from "./components/Toolbar.js";
+import { Outline } from "./components/Outline.js";
+import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
+import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
+import type {
+  LinkStyle,
+  SectionGeometry,
+} from "@office-copilot/docx-io";
+import { AIPanel } from "./ai/AIPanel.js";
+import { StatusBar } from "./components/StatusBar.js";
+import { FindBar } from "./components/FindBar.js";
+import { TableBubbleMenu } from "./components/TableBubbleMenu.js";
+import { TableContextMenu } from "./components/TableContextMenu.js";
+import { AISuggestionBubble } from "./ai/AISuggestionBubble.js";
+import { PageChrome } from "./components/PageChrome.js";
+import { SettingsModal } from "./components/SettingsModal.js";
+import { HistoryPanel } from "./components/HistoryPanel.js";
+import { Welcome } from "./components/Welcome.js";
+import { EdgeResizer } from "./components/EdgeResizer.js";
+import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
+import { ToastHost, toast } from "./components/ui/Toast.js";
+import { usePanelResize } from "./hooks/usePanelResize.js";
+import { CommandPalette } from "./components/CommandPalette.js";
+import type { CommandContext } from "./commands/registry.js";
+import { useUiStore } from "./uiStore.js";
+import {
+  documentTitle,
+  runTemplate,
+  runTypography,
+} from "./editor/formatDocument.js";
+import { buildFooterDoc, buildHeaderDoc } from "./editor/templateChrome.js";
+import { mmToPx, type DocTemplate } from "./editor/templates.js";
+import { buildPrintHtml } from "./editor/printHtml.js";
+import { renderHeaderFooterHtml } from "./editor/renderHeaderFooter.js";
+
+// The exact shape of a ProseMirror document accepted by editor.commands.setContent.
+// We intentionally type loosely; TipTap accepts JSON content directly.
+type PMDoc = Record<string, unknown>;
+
+/** A4 at 96dpi — what the editor renders until 页面设置 supplies a section. */
+const FALLBACK_PAGE = { pageWidth: 794, pageHeight: 1123, header: 48, footer: 48 };
+
+const STARTER_CONTENT: PMDoc = {
+  type: "doc",
+  content: [
+    {
+      type: "heading",
+      attrs: { level: 1 },
+      content: [{ type: "text", text: "欢迎使用 Office Copilot" }],
+    },
+    {
+      type: "paragraph",
+      content: [
+        {
+          type: "text",
+          text: "这是一个独立的桌面文档编辑器，",
+        },
+        {
+          type: "text",
+          marks: [{ type: "bold" }],
+          text: "保存出的 .docx 可以直接在 Word 和 WPS 中打开。",
+        },
+      ],
+    },
+    {
+      type: "paragraph",
+      content: [
+        { type: "text", text: "试试顶部工具栏：加粗、标题、列表、表格；或者选中一段文字点右侧 AI 面板进行扩写/润色。" },
+      ],
+    },
+  ],
+};
+
+export function App() {
+  const [filePath, setFilePath] = useState<string | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [showFind, setShowFind] = useState(false);
+  const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [pageSetupOpen, setPageSetupOpen] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [aiCollapsed, setAiCollapsed] = useState(false);
+  const [showAI, setShowAI] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [editorEl, setEditorEl] = useState<HTMLElement | null>(null);
+  const [headerDoc, setHeaderDoc] = useState<Record<string, unknown> | null>(null);
+  const [footerDoc, setFooterDoc] = useState<Record<string, unknown> | null>(null);
+  const [section, setSection] = useState<SectionGeometry | null>(null);
+  // The 美化排版 template's hyperlink colours, in the same document-level slot
+  // as 页面设置: renderer through these two variables, saved into run rPr.
+  const [linkStyle, setLinkStyle] = useState<LinkStyle | null>(null);
+
+  useEffect(() => {
+    const open = () => setSettingsOpen(true);
+    const openHistory = () => setHistoryOpen(true);
+    window.addEventListener("open-settings", open);
+    window.addEventListener("open-history", openHistory);
+    return () => {
+      window.removeEventListener("open-settings", open);
+      window.removeEventListener("open-history", openHistory);
+    };
+  }, []);
+
+  const editor = useEditor({
+    extensions: EDITOR_EXTENSIONS,
+    content: STARTER_CONTENT,
+    editorProps: { attributes: { spellcheck: "false" } },
+  });
+
+  useEffect(() => {
+    if (!editor) return;
+    setEditorEl(editor.view.dom);
+    const onUpdate = () => {
+      setDirty(true);
+      setStarted(true);
+    };
+    editor.on("update", onUpdate);
+    return () => {
+      editor.off("update", onUpdate);
+    };
+  }, [editor]);
+
+  // Keep a ref so menu handlers always see the current filePath.
+  const filePathRef = useRef<string | null>(null);  useEffect(() => {
+    filePathRef.current = filePath;
+  }, [filePath]);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  // Reusable file actions (used by both menu and toolbar).
+  const handleNew = useCallback(() => {
+    if (!editor) return;
+    editor.commands.setContent({
+      type: "doc",
+      content: [
+        { type: "heading", attrs: { level: 1 }, content: [{ type: "text", text: "无标题" }] },
+        { type: "paragraph" },
+      ],
+    });
+    setHeaderDoc(null);
+    setFooterDoc(null);
+    setSection(null);
+    setLinkStyle(null);
+    setFilePath(null);
+    setDirty(false);
+    setStarted(true);
+  }, [editor]);
+
+  const handleOpen = useCallback(async () => {
+    if (!editor) return;
+    const r = await window.officeCopilot.openFile();
+    if (!r.ok) {
+      if (!r.canceled && r.message) toast(r.message, "error");
+      return;
+    }
+    editor.commands.setContent(r.doc as never);
+    setHeaderDoc((r.header as never) ?? null);
+    setFooterDoc((r.footer as never) ?? null);
+    setSection((r.section as never) ?? null);
+    setLinkStyle(null);
+    setFilePath(r.path ?? null);
+    setDirty(false);
+    setStarted(true);
+    if (r.path) window.officeCopilot.addRecent(r.path);
+    if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
+  }, [editor]);
+
+  const openPath = useCallback(
+    async (p: string, guardDirty = false) => {
+      if (!editor) return;
+      if (guardDirty && dirtyRef.current) {
+        const ok = await confirmDialog({
+          title: "打开新文档？",
+          message: "当前文档有未保存的修改，打开后这些修改将丢失。",
+          okLabel: "放弃并打开",
+          danger: true,
+        });
+        if (!ok) return;
+      }
+      const r = await window.officeCopilot.readDocx(p);
+      if (!r.ok) {
+        if (r.message) toast(r.message, "error");
+        return;
+      }
+      editor.commands.setContent(r.doc as never);
+      setHeaderDoc((r.header as never) ?? null);
+      setFooterDoc((r.footer as never) ?? null);
+      setSection((r.section as never) ?? null);
+      setLinkStyle(null);
+      setFilePath(r.path ?? p);
+      setDirty(false);
+      setStarted(true);
+      window.officeCopilot.addRecent(p);
+      if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
+    },
+    [editor],
+  );
+
+  // Drag a .docx from Finder/Explorer anywhere onto the window to open it.
+  const dragDepthRef = useRef(0);
+  const [dropActive, setDropActive] = useState(false);
+  const hasFiles = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer.types).includes("Files");
+  const onDragEnter = useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepthRef.current += 1;
+    setDropActive(true);
+  }, []);
+  const onDragOver = useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+  const onDragLeave = useCallback(() => {
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setDropActive(false);
+  }, []);
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      dragDepthRef.current = 0;
+      setDropActive(false);
+      const file = Array.from(e.dataTransfer.files).find((f) =>
+        /\.(docx|json)$/i.test(f.name),
+      );
+      if (!file) {
+        toast("只能打开 .docx 文档。", "error");
+        return;
+      }
+      const p = window.officeCopilot.pathForFile(file);
+      if (p) void openPath(p, true);
+    },
+    [openPath],
+  );
+
+  const handleSave = useCallback(async () => {
+    if (!editor) return;
+    const json = editor.getJSON() as PMDoc;
+    const r = await window.officeCopilot.saveFile({
+      path: filePathRef.current,
+      doc: json,
+      header: headerDoc as never,
+      footer: footerDoc as never,
+      section: section as never,
+      link: linkStyle as never,
+    });
+    if (r.ok && r.path) {
+      setFilePath(r.path);
+      setDirty(false);
+      window.officeCopilot.addRecent(r.path);
+    } else if (!r.canceled && r.message) {
+      toast(r.message, "error");
+    }
+  }, [editor, headerDoc, footerDoc, section, linkStyle]);
+
+  const handleSaveAs = useCallback(async () => {
+    if (!editor) return;
+    const json = editor.getJSON() as PMDoc;
+    const defaultName = filePathRef.current
+      ? filePathRef.current.split(/[\\/]/).pop()
+      : "document.docx";
+    const r = await window.officeCopilot.saveFileAs({
+      doc: json,
+      defaultName,
+      header: headerDoc as never,
+      footer: footerDoc as never,
+      section: section as never,
+      link: linkStyle as never,
+    });
+    if (r.ok && r.path) {
+      setFilePath(r.path);
+      setDirty(false);
+      window.officeCopilot.addRecent(r.path);
+    } else if (!r.canceled && r.message) {
+      toast(r.message, "error");
+    }
+  }, [editor, headerDoc, footerDoc, section, linkStyle]);
+
+  const handlePrint = useCallback(async () => {
+    if (!editor) return;
+    const g = section ?? {
+      pageWidth: 794, pageHeight: 1123,
+      marginTop: 96, marginRight: 96, marginBottom: 96, marginLeft: 96,
+      header: 48, footer: 48, contentWidth: 602, contentHeight: 931,
+    };
+    const html = buildPrintHtml({
+      bodyHtml: editor.getHTML(),
+      headerHtml: renderHeaderFooterHtml(headerDoc as never, 1, 1),
+      footerHtml: renderHeaderFooterHtml(footerDoc as never, 1, 1),
+      pageWidthPx: g.pageWidth,
+      pageHeightPx: g.pageHeight,
+      marginTopPx: g.marginTop,
+      marginRightPx: g.marginRight,
+      marginBottomPx: g.marginBottom,
+      marginLeftPx: g.marginLeft,
+      headerPx: g.header,
+      footerPx: g.footer,
+      link: linkStyle,
+    });
+    const defaultName = filePath
+      ? filePath.split(/[\\/]/).pop()?.replace(/\.docx$/i, "") + ".pdf"
+      : "document.pdf";
+    const r = await window.officeCopilot.printToPdf(html, defaultName);
+    if (r.ok) toast(`已导出：${r.path}`, "success");
+    else if (!r.canceled && r.message) toast(r.message, "error");
+  }, [editor, section, headerDoc, footerDoc, filePath, linkStyle]);
+
+  const handleToolbarAction = useCallback(
+    (action:
+      | "new"
+      | "open"
+      | "save"
+      | "save-as"
+      | "print"
+      | "find-replace"
+      | "page-setup"
+      | "beautify") => {
+      switch (action) {
+        case "new":
+          handleNew();
+          break;
+        case "open":
+          handleOpen();
+          break;
+        case "save":
+          handleSave();
+          break;
+        case "save-as":
+          handleSaveAs();
+          break;
+        case "print":
+          handlePrint();
+          break;
+        case "find-replace":
+          setShowFind(true);
+          break;
+        case "page-setup":
+          setPageSetupOpen(true);
+          break;
+        case "beautify":
+          setTemplateOpen(true);
+          break;
+      }
+    },
+    [handleNew, handleOpen, handleSave, handleSaveAs, handlePrint],
+  );
+
+  const runFormatDocument = useCallback(() => {
+    if (!editor) return;
+    void runTypography(editor, filePath ?? "未命名文档").then((r) => {
+      if (!r.ok) {
+        toast(r.message ?? "排版失败。", r.message?.includes("无需") ? undefined : "error");
+        return;
+      }
+      setDirty(true);
+      const skipped = r.skipped.length ? `；${r.skipped.length} 段保留原样（${r.skipped[0]}）` : "";
+      toast(`已规范化 ${r.touched} 个段落，可在修改历史里查看 diff 或单独撤销${skipped}`, "success");
+    });
+  }, [editor, filePath]);
+
+  const lastTemplateId = useUiStore((s) => s.lastTemplateId);
+  const setLastTemplate = useUiStore((s) => s.setLastTemplate);
+
+  const applyTemplate = useCallback(
+    (t: DocTemplate) => {
+      if (!editor) return;
+      setTemplateOpen(false);
+      void (async () => {
+        const r = await runTemplate(t, editor, filePath ?? "未命名文档");
+        const alreadyTyped = !r.ok && Boolean(r.message?.includes("无需"));
+        if (!r.ok && !alreadyTyped) {
+          toast(r.message ?? "美化排版失败。", "error");
+          return;
+        }
+
+        // 页边距与页眉页脚和「页面设置」一样属于文档级设置，跟随 App state，
+        // 不进修改历史；正文样式那部分才是逐条可撤销的。
+        if (t.page) {
+          const base = section ?? FALLBACK_PAGE;
+          setSection(
+            geometryFor(
+              base.pageWidth,
+              base.pageHeight,
+              {
+                top: mmToPx(t.page.top),
+                right: mmToPx(t.page.right),
+                bottom: mmToPx(t.page.bottom),
+                left: mmToPx(t.page.left),
+              },
+              base.header,
+              base.footer,
+            ) as never,
+          );
+          setDirty(true);
+        }
+
+        const nextFooter = buildFooterDoc(t);
+        const nextHeader = buildHeaderDoc(t, documentTitle(editor));
+        let keptChrome = false;
+        if ((nextFooter || nextHeader) && (footerDoc || headerDoc)) {
+          const replace = await confirmDialog({
+            title: `美化排版 · ${t.label}`,
+            message: "该模板将替换现有的页眉/页脚内容（正文样式不受影响）。",
+            okLabel: "替换",
+            cancelLabel: "保留原有",
+          });
+          keptChrome = !replace;
+        }
+        if (!keptChrome) {
+          if (nextFooter) setFooterDoc(nextFooter as never);
+          if (nextHeader) setHeaderDoc(nextHeader as never);
+          if (nextFooter || nextHeader) setDirty(true);
+        }
+
+        // 超链接的配色属于文档而不是段落：它不改正文，所以不进修改历史。
+        const nextLink = t.link ?? null;
+        const linkChanged =
+          (nextLink?.color ?? null) !== (linkStyle?.color ?? null) ||
+          (nextLink?.underline ?? true) !== (linkStyle?.underline ?? true);
+        if (linkChanged) {
+          setLinkStyle(nextLink);
+          setDirty(true);
+        }
+        setLastTemplate(t.id);
+
+        const parts: string[] = [
+          r.ok
+            ? `已按「${t.label}」调整 ${r.touched} 个段落`
+            : `正文已符合「${t.label}」`,
+        ];
+        if (t.page) parts.push("页边距已套用");
+        if (nextFooter || nextHeader)
+          parts.push(keptChrome ? "页眉页脚保留原样" : "页眉页脚已套用");
+        if (linkChanged) parts.push("超链接样式已套用");
+        if (r.ok && r.skipped.length)
+          parts.push(`${r.skipped.length} 段保留原样（${r.skipped[0]}）`);
+        toast(
+          `${parts.join("；")}。正文改动可在修改历史里逐条撤销。`,
+          "success",
+        );
+      })();
+    },
+    [editor, filePath, section, headerDoc, footerDoc, linkStyle, setLastTemplate],
+  );
+
+  useEffect(() => {
+    if (!window.officeCopilot || !editor) return;
+    const subs = [
+      window.officeCopilot.onMenu("menu:new", handleNew),
+      window.officeCopilot.onMenu("menu:open", handleOpen),
+      window.officeCopilot.onMenu("menu:save", handleSave),
+      window.officeCopilot.onMenu("menu:save-as", handleSaveAs),
+      window.officeCopilot.onMenu("menu:print", handlePrint),
+      window.officeCopilot.onMenu("menu:find", () => setShowFind((v) => !v)),
+      window.officeCopilot.onMenu("ai:toggle-panel", () => {
+        if (!showAI) setShowAI(true);
+        else setAiCollapsed((v) => !v);
+      }),
+      window.officeCopilot.onMenu("outline:toggle", () =>
+        setOutlineCollapsed((v) => !v),
+      ),
+      window.officeCopilot.onMenu("ai:format-document", runFormatDocument),
+      window.officeCopilot.onMenu("ai:beautify-document", () =>
+        setTemplateOpen(true),
+      ),
+      window.officeCopilot.onMenu("ai:expand", () =>
+        window.dispatchEvent(new CustomEvent("ai:run", { detail: "扩写" })),
+      ),
+      window.officeCopilot.onMenu("ai:shorten", () =>
+        window.dispatchEvent(new CustomEvent("ai:run", { detail: "缩写" })),
+      ),
+      window.officeCopilot.onMenu("ai:polish", () =>
+        window.dispatchEvent(new CustomEvent("ai:run", { detail: "润色" })),
+      ),
+    ];
+    return () => {
+      subs.forEach((u) => u());
+    };
+  }, [
+    editor,
+    handleNew,
+    handleOpen,
+    handleSave,
+    handleSaveAs,
+    handlePrint,
+    runFormatDocument,
+    showAI,
+  ]);
+
+  // The AI panel chip and the command palette are renderer-side, so they
+  // dispatch a DOM event rather than going through the menu IPC channel.
+  useEffect(() => {
+    window.addEventListener("ai:format-document", runFormatDocument);
+    return () =>
+      window.removeEventListener("ai:format-document", runFormatDocument);
+  }, [runFormatDocument]);
+
+  // Open-recent from the application menu.
+  useEffect(() => {
+    if (!window.officeCopilot?.onOpenRecent || !editor) return;
+    const off = window.officeCopilot.onOpenRecent((p) => openPath(p));
+    return off;
+  }, [editor, openPath]);
+
+  const insertImage = useCallback(async () => {    const r = await window.officeCopilot.pickImage();
+    if (r.ok)
+      editor
+        ?.chain()
+        .focus()
+        .insertContent({
+          type: "image",
+          attrs: { src: r.dataUrl, layout: "inline" },
+        })
+        .run();
+  }, [editor]);
+
+  const insertTable = useCallback(() => {
+    editor
+      ?.chain()
+      .focus()
+      .insertTable({ rows: 3, cols: 3, withHeaderRow: true })
+      .run();
+  }, [editor]);
+
+  const wordCount = editor?.storage.characterCount.words() ?? 0;
+  const charCount = editor?.storage.characterCount.characters() ?? 0;
+  const filename = useMemo(() => {
+    if (!filePath) return "未命名文档";
+    return filePath.split(/[\\/]/).pop() ?? filePath;
+  }, [filePath]);
+
+  const outlineWidth = useUiStore((s) => s.outlineWidth);
+  const aiWidth = useUiStore((s) => s.aiWidth);
+  const setOutlineWidth = useUiStore((s) => s.setOutlineWidth);
+  const setAiWidth = useUiStore((s) => s.setAiWidth);
+  const outlineResize = usePanelResize({
+    side: "left",
+    width: outlineWidth,
+    setWidth: setOutlineWidth,
+    min: 180,
+    max: 480,
+    resetTo: 220,
+  });
+  const aiResize = usePanelResize({
+    side: "right",
+    width: aiWidth,
+    setWidth: setAiWidth,
+    min: 280,
+    max: 640,
+    resetTo: 340,
+  });
+
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const setTheme = useUiStore((s) => s.setTheme);
+  const commandCtx = useMemo<CommandContext>(
+    () => ({
+      handleNew,
+      handleOpen,
+      handleSave: () => void handleSave(),
+      handleSaveAs: () => void handleSaveAs(),
+      handlePrint: () => void handlePrint(),
+      openPageSetup: () => setPageSetupOpen(true),
+      showFindBar: () => setShowFind(true),
+      toggleOutline: () => setOutlineCollapsed((v) => !v),
+      toggleAI: () => {
+        setShowAI(true);
+        setAiCollapsed((v) => !v);
+      },
+      openHistory: () => setHistoryOpen(true),
+      openSettings: () => setSettingsOpen(true),
+      runAI: (action) => {
+        setShowAI(true);
+        window.dispatchEvent(new CustomEvent("ai:run", { detail: action }));
+      },
+      formatDocument: runFormatDocument,
+      openTemplatePicker: () => setTemplateOpen(true),
+      setTheme,
+    }),
+    [
+      handleNew,
+      handleOpen,
+      handleSave,
+      handleSaveAs,
+      handlePrint,
+      runFormatDocument,
+      setTheme,
+    ],
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  if (!editor) return <div className="app">启动中…</div>;
+
+  return (
+    <div
+      className="app"
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <div className="titlebar">
+        <div className="title">
+          {dirty ? <span className="dirty-dot" aria-hidden>•</span> : null}
+          {filename} — Office Copilot
+        </div>
+      </div>
+      <div
+        className="main"
+        style={
+          {
+            "--outline-w": `${outlineWidth}px`,
+            "--ai-w": `${aiWidth}px`,
+            "--oc-link-color": linkStyle?.color ?? "#0563c1",
+            "--oc-link-decoration":
+              linkStyle?.underline === false ? "none" : "underline",
+          } as React.CSSProperties
+        }
+      >
+        <Outline
+          editor={editor}
+          collapsed={outlineCollapsed}
+          onToggle={() => setOutlineCollapsed((v) => !v)}
+        />
+        {!outlineCollapsed && (
+          <div
+            className="resizer"
+            title="拖动调整宽度，双击复位"
+            onPointerDown={outlineResize.onPointerDown}
+            onDoubleClick={outlineResize.onDoubleClick}
+          />
+        )}
+        <div className="editor-area">
+          {started ? (
+            <Toolbar
+              editor={editor}
+              onInsertImage={insertImage}
+              onInsertTable={insertTable}
+              onAction={handleToolbarAction}
+              dirty={dirty}
+            />
+          ) : null}
+          {showFind && <FindBar editor={editor} onClose={() => setShowFind(false)} />}
+          {started ? (
+            editor && (
+              <PageChrome
+                editor={editor}
+                headerDoc={headerDoc}
+                footerDoc={footerDoc}
+                section={section}
+                onHeaderChange={setHeaderDoc}
+                onFooterChange={setFooterDoc}
+              >
+                <TableBubbleMenu editor={editor} />
+                <AISuggestionBubble
+                  editor={editor}
+                  docKey={filePath ?? "未命名文档"}
+                  onApplied={() => setDirty(true)}
+                />
+              </PageChrome>
+            )
+          ) : (
+            <Welcome
+              onNew={handleNew}
+              onOpen={handleOpen}
+              onOpenRecent={(p) => openPath(p, true)}
+            />
+          )}
+          <StatusBar wordCount={wordCount} charCount={charCount} editorEl={editorEl} />
+        </div>
+        {showAI && !aiCollapsed && (
+          <div
+            className="resizer"
+            title="拖动调整宽度，双击复位"
+            onPointerDown={aiResize.onPointerDown}
+            onDoubleClick={aiResize.onDoubleClick}
+          />
+        )}
+        {showAI && (
+          <AIPanel
+            editor={editor}
+            docKey={filePath ?? "未命名文档"}
+            collapsed={aiCollapsed}
+            onToggle={() => setAiCollapsed((v) => !v)}
+            onOpenHistory={() => setHistoryOpen(true)}
+            onChanged={() => setDirty(true)}
+          />
+        )}
+      </div>
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+      />
+      <PageSetupDialog
+        open={pageSetupOpen}
+        section={section as SectionGeometry | null}
+        onClose={() => setPageSetupOpen(false)}
+        onApply={(s) => {
+          setSection(s as never);
+          setDirty(true);
+        }}
+      />
+      <TemplatePickerDialog
+        open={templateOpen}
+        lastTemplateId={lastTemplateId}
+        onClose={() => setTemplateOpen(false)}
+        onPick={applyTemplate}
+      />
+      <HistoryPanel
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        editor={editor}
+        docKey={filePath ?? "未命名文档"}
+        onChanged={() => setDirty(true)}
+      />
+      {dropActive && (
+        <div className="drop-overlay">
+          <div className="drop-overlay-card">
+            <FileDown size={28} />
+            松开以打开 .docx
+          </div>
+        </div>
+      )}
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        ctx={commandCtx}
+      />
+      <DialogHost />
+      <ToastHost />
+      <EdgeResizer />
+    </div>
+  );
+}
