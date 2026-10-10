@@ -1,0 +1,44 @@
+/* 段落面板底部的「制表位…」编辑区。字段沿用 .paragraph-popover 的 pp-row/pp-grid，
+   这里只补 Word 那张清单需要的滚动列表与三个并排动作。 */
+.paragraph-popover .ts-section {
+  margin-top: 6px;
+}
+.paragraph-popover .ts-stops {
+  max-height: 88px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  margin-bottom: 6px;
+}
+.paragraph-popover .ts-stops .ts-empty {
+  padding: 5px 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.paragraph-popover .ts-stop-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+}
+.paragraph-popover .ts-stop-row + .ts-stop-row {
+  border-top: 1px solid var(--border);
+}
+.paragraph-popover .ts-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+.paragraph-popover .ts-actions .pp-seg-btn {
+  flex: 1;
+}
+.paragraph-popover .ts-actions .pp-seg-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

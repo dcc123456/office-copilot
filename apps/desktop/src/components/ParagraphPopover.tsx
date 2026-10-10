@@ -1,7 +1,21 @@
 import { useEffect, useState } from "react";
 import type { Editor } from "@tiptap/react";
+import type {
+  TabStop,
+  TabStopAlignment,
+  TabStopLeader,
+} from "@office-copilot/docx-io";
+import { cmToPt, ptToCm } from "@office-copilot/docx-io";
 import { AlignLeft, AlignCenter, AlignRight, AlignJustify, X } from "lucide-react";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
+import {
+  TAB_ALIGNMENTS,
+  TAB_LEADERS,
+  alignmentLabelOf,
+  stopLabelOf,
+} from "../editor/tabStopOptions.js";
+import { sameTabStopPosition } from "../editor/extensions/ParagraphFormatting.js";
+import "../styles/tabStops.css";
 
 /**
  * 段落设置面板，按 Word 段落对话框的分组排：
@@ -9,6 +23,7 @@ import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
  *   - 缩进：左/右缩进 (pt)、「特殊格式 + 磅值」（首行缩进 / 悬挂缩进）
  *   - 间距：段前 / 段后 (pt)、行距 (single / 1.15 / 1.5 / double / fixed)
  *   - 分页与换行：孤行控制、与下段同页、段中不分页、段前分页、对齐到网格
+ *   - 制表位：清单 + 位置/对齐/前导符 + 设置/清除/全部清除（Word 的"制表位…"按钮）
  *
  * 数值经自定义命令 `setParagraphFormat` 写进当前选中的段落/标题，落在
  * editor/extensions/ParagraphFormatting.ts，再由 docx-io 往返成 OOXML 的
@@ -30,6 +45,7 @@ interface Attrs {
   widowControl?: boolean;
   snapToGrid?: boolean;
   pageBreakBefore?: boolean;
+  tabStops?: TabStop[];
 }
 
 /** Word 段落对话框「特殊格式」的三个取值。 */
@@ -162,6 +178,9 @@ export function ParagraphFields({
   onClose: () => void;
 }) {
   const [attrs, setAttrs] = useState<Attrs>({});
+  // Word 把制表位放在另一个对话框里；这里折进面板底部展开——多开一层窗口会抢走
+  // 编辑器选区，而制表位恰恰要求用户看得见自己正在给哪一段定位。
+  const [tabStopsOpen, setTabStopsOpen] = useState(false);
 
   useEffect(() => {
     const read = () => {
@@ -184,6 +203,7 @@ export function ParagraphFields({
         widowControl: a.widowControl,
         snapToGrid: a.snapToGrid,
         pageBreakBefore: a.pageBreakBefore,
+        tabStops: a.tabStops,
       });
     };
     read();
@@ -370,6 +390,27 @@ export function ParagraphFields({
         ))}
       </div>
 
+      <div className="pp-hint">制表位</div>
+      <div className="pp-grid">
+        <button
+          type="button"
+          className="pp-seg-btn"
+          title="展开/收起制表位编辑区"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => setTabStopsOpen((open) => !open)}
+        >
+          {tabStopsOpen ? "收起" : "制表位…"}
+        </button>
+      </div>
+      {tabStopsOpen && (
+        <TabStopSection
+          stops={attrs.tabStops}
+          onSet={(stop) => editor.commands.setTabStop(stop)}
+          onClear={(positionPt) => editor.commands.clearTabStop(positionPt)}
+          onClearAll={() => editor.commands.clearAllTabStops()}
+        />
+      )}
+
       <div className="pp-hint">
         提示：磅值 21pt 约等于中文 2 字符；悬挂缩进会让首行向左凸出。
       </div>
@@ -431,5 +472,165 @@ function Num({
         onChange(v === "" ? undefined : Math.max(0, Number(v)));
       }}
     />
+  );
+}
+
+/**
+ * 把「位置」录入框里的厘米换成段落属性用的磅。
+ *
+ * @param raw 厘米原文（Word 的对话框按两位小数录入）；空串、负数、非数字都不算一个位置。
+ * @returns 磅值（0.1pt 精度，换算出自 docx-io）；读不出来时 null，界面据此禁用「设置」。
+ */
+export function tabStopPositionPt(raw: string): number | null {
+  const text = raw.trim();
+  if (!text) return null;
+  const cm = Number(text);
+  if (!Number.isFinite(cm) || cm < 0) return null;
+  return cmToPt(cm);
+}
+
+/**
+ * 「制表位…」编辑区：清单 + Word 对话框的位置/对齐/前导符 + 设置/清除/全部清除。
+ *
+ * @param stops 当前段落的制表位清单；undefined 是"这一段没建模过"，清单显示成空。
+ * @param onSet 设一条：同位置整条替换，这一段在别处的制表位照旧留着。
+ * @param onClear 按位置清一条。
+ * @param onClearAll 全部清除：写入空清单，导出因此删掉段落自己的 `w:tabs`。
+ */
+function TabStopSection({
+  stops,
+  onSet,
+  onClear,
+  onClearAll,
+}: {
+  stops: TabStop[] | undefined;
+  onSet: (stop: TabStop) => void;
+  onClear: (positionPt: number) => void;
+  onClearAll: () => void;
+}) {
+  const [position, setPosition] = useState("");
+  const [alignment, setAlignment] = useState<TabStopAlignment>("left");
+  const [leader, setLeader] = useState<TabStopLeader>("none");
+
+  const list = stops ?? [];
+  const positionPt = tabStopPositionPt(position);
+  // Word 也只在真有这一位时才让「清除」可点，按下去没东西可清会让人以为面板坏了。
+  const canClear =
+    positionPt !== null &&
+    list.some((stop) => sameTabStopPosition(stop.positionPt, positionPt));
+
+  /** 载入清单里的一条到录入框（Word：点列表项等于把它摆回上面三个控件）。 */
+  const pick = (stop: TabStop) => {
+    setPosition(ptToCm(stop.positionPt).toFixed(2));
+    setAlignment(stop.alignment);
+    setLeader(stop.leader ?? "none");
+  };
+
+  return (
+    <div className="ts-section">
+      <div className="ts-stops">
+        {list.length ? (
+          list.map((stop) => (
+            <button
+              key={stop.positionPt}
+              type="button"
+              className="ts-stop-row"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => pick(stop)}
+            >
+              {stopLabelOf(stop)}
+            </button>
+          ))
+        ) : (
+          <div className="ts-empty">（这一段没有制表位）</div>
+        )}
+      </div>
+
+      <Row label="位置 (cm)">
+        <input
+          type="number"
+          min={0}
+          step={0.01}
+          value={position}
+          placeholder="0.00"
+          onChange={(e) => setPosition(e.target.value)}
+        />
+      </Row>
+
+      <Row label="对齐方式">
+        <select
+          value={alignment}
+          onChange={(e) => setAlignment(e.target.value as TabStopAlignment)}
+        >
+          {TAB_ALIGNMENTS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+          {/* 编号生成的列表制表位：显示得出来，但界面不给造一条（§排名 5 取舍）。 */}
+          {TAB_ALIGNMENTS.some((o) => o.value === alignment) ? null : (
+            <option value={alignment} disabled>
+              {alignmentLabelOf(alignment)}
+            </option>
+          )}
+        </select>
+      </Row>
+
+      <Row label="前导符">
+        <select value={leader} onChange={(e) => setLeader(e.target.value as TabStopLeader)}>
+          {TAB_LEADERS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </Row>
+
+      <div className="ts-actions">
+        <button
+          type="button"
+          className="pp-seg-btn"
+          disabled={positionPt === null}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            if (positionPt === null) return;
+            onSet({
+              positionPt,
+              alignment,
+              // 「无」就是不写 w:leader：Word 自己也是省略的，写成 "none" 会让
+              // 同一份文档两次保存的字节对不上。
+              ...(leader === "none" ? {} : { leader }),
+            });
+          }}
+        >
+          设置
+        </button>
+        <button
+          type="button"
+          className="pp-seg-btn"
+          disabled={!canClear}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => {
+            if (positionPt !== null) onClear(positionPt);
+          }}
+        >
+          清除
+        </button>
+        <button
+          type="button"
+          className="pp-seg-btn"
+          disabled={!list.length}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onClearAll}
+        >
+          全部清除
+        </button>
+      </div>
+
+      <div className="pp-hint">
+        位置按厘米录入、以磅存进段落属性，作用于选区里的每一段。编辑器里的 Tab 仍按浏览器
+        默认宽度显示，制表位与前导符在导出的 .docx 里生效。
+      </div>
+    </div>
   );
 }

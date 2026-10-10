@@ -48,6 +48,9 @@ declare module "@tiptap/core" {
     paragraphFormat: {
       setParagraphFormat: (patch: Partial<ParagraphFormatAttrs>) => ReturnType;
       applyNamedStyle: (styleId: string | null, headingLevel?: number) => ReturnType;
+      setTabStop: (stop: TabStop) => ReturnType;
+      clearTabStop: (positionPt: number) => ReturnType;
+      clearAllTabStops: () => ReturnType;
     };
   }
 }
@@ -269,6 +272,33 @@ export const ParagraphFormatting = Extension.create({
             attrs: { ...node.attrs, ...patch },
           })) || commands.updateAttributes("paragraph", patch),
 
+      setTabStop:
+        (stop: TabStop) =>
+        ({ state, dispatch }: CommandProps) =>
+          // 逐块并入：Word 的「设置」只动这一个位置，别段落在别处的制表位必须留着，
+          // 所以不能拿面板里那张清单整份覆盖过去。
+          mapFormatBlocks(state, dispatch, (node) => ({
+            attrs: { ...node.attrs, tabStops: withTabStop(stopsOf(node), stop) },
+          })),
+
+      clearTabStop:
+        (positionPt: number) =>
+        ({ state, dispatch }: CommandProps) =>
+          mapFormatBlocks(state, dispatch, (node) => ({
+            attrs: {
+              ...node.attrs,
+              tabStops: withoutTabStop(stopsOf(node), positionPt),
+            },
+          })),
+
+      clearAllTabStops:
+        () =>
+        ({ state, dispatch }: CommandProps) =>
+          // 与「清除」不同：这条要的就是空清单，导出因此删掉段落自己的 w:tabs。
+          mapFormatBlocks(state, dispatch, (node) => ({
+            attrs: { ...node.attrs, tabStops: [] },
+          })),
+
       applyNamedStyle:
         (styleId: string | null, headingLevel?: number) =>
         ({ commands, state, dispatch }: CommandProps) => {
@@ -329,6 +359,63 @@ function switchHtml(
   return css
     ? { [dataKey]: String(value), style: css }
     : { [dataKey]: String(value) };
+}
+
+/**
+ * 这一段现有的制表位清单，命令侧的统一读法。
+ *
+ * @param node 段落 / 标题节点。
+ * @returns 清单（可能是空表）；undefined = 这一段没建模过制表位，导出沿用源文档的 `w:tabs`。
+ */
+function stopsOf(node: PMNode): TabStop[] | undefined {
+  return Array.isArray(node.attrs.tabStops)
+    ? (node.attrs.tabStops as TabStop[])
+    : undefined;
+}
+
+/**
+ * 同一个位置就是同一条制表位。
+ *
+ * @param a 位置，pt。读侧与 `cmToPt` 都给 0.1pt 精度，所以按 0.1pt 取整后逐位比较，
+ *   不设容差——差 0.1pt 的两条在 Word 里也是两条。
+ * @param b 位置，pt。
+ * @returns 是不是同一条。
+ */
+export function sameTabStopPosition(a: number, b: number): boolean {
+  return Math.round(a * 10) === Math.round(b * 10);
+}
+
+/**
+ * 把一个制表位并进清单：同位置整条替换（含只改对齐或前导符），否则插入，结果按位置升序。
+ *
+ * @param stops 这一段现有的清单；undefined 从空表开始。
+ * @param stop 新的一条，位置是 pt。
+ * @returns 新清单，不改动入参。
+ */
+export function withTabStop(
+  stops: TabStop[] | undefined,
+  stop: TabStop,
+): TabStop[] {
+  const others = (stops ?? []).filter(
+    (existing) => !sameTabStopPosition(existing.positionPt, stop.positionPt),
+  );
+  return [...others, stop].sort((a, b) => a.positionPt - b.positionPt);
+}
+
+/**
+ * 按位置移除一条制表位。
+ *
+ * @param stops 现有清单；undefined 时原样返回 undefined，因为"这一位本来没有制表位"与
+ *   "用户全部清除过"（空表）在导出是两种写法，不能混。
+ * @param positionPt 位置，pt。
+ * @returns 移除后的清单（清光了就是空表），或 undefined。
+ */
+export function withoutTabStop(
+  stops: TabStop[] | undefined,
+  positionPt: number,
+): TabStop[] | undefined {
+  if (!stops) return undefined;
+  return stops.filter((existing) => !sameTabStopPosition(existing.positionPt, positionPt));
 }
 
 /**

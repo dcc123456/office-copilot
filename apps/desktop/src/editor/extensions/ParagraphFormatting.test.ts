@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { ParagraphFormatting } from "./ParagraphFormatting.js";
+import {
+  ParagraphFormatting,
+  sameTabStopPosition,
+  withTabStop,
+  withoutTabStop,
+} from "./ParagraphFormatting.js";
 
 /**
  * 制表位属性的 DOM 读写规则。粘贴与 `getHTML/setContent(html)` 走的是 PM 的
@@ -58,5 +63,38 @@ describe("制表位属性的 DOM 读写", () => {
     }
     // 没有 tabStops 时什么都不渲染，段落的 DOM 不会长出空属性。
     expect(rules.tabStops.renderHTML({})).toEqual({});
+  });
+});
+
+describe("制表位清单的并入与移除", () => {
+  const dot = { positionPt: 56.7, alignment: "right" as const, leader: "dot" as const };
+  const center = { positionPt: 100, alignment: "center" as const };
+
+  it("同位置整条替换，别的位置照旧按升序排", () => {
+    expect(withTabStop([center], dot)).toEqual([dot, center]);
+    // 只改前导符也是替换：改一次多一条，清单很快挤满重叠的制表位。
+    expect(withTabStop([center, { ...dot, leader: "hyphen" as const }], dot)).toEqual([
+      dot,
+      center,
+    ]);
+  });
+
+  it("没建模过的段落从空表开始，且并入不改动入参", () => {
+    const stops = [center];
+    expect(withTabStop(undefined, dot)).toEqual([dot]);
+    expect(withTabStop(stops, dot)).toEqual([dot, center]);
+    expect(stops).toEqual([center]);
+  });
+
+  it("移除只删那一位；没建模过的一律原样退回 undefined", () => {
+    expect(withoutTabStop([dot, center], 56.7)).toEqual([center]);
+    // 清光了是空表（导出删段落自己的 w:tabs），与"从没建模过"两回事。
+    expect(withoutTabStop([dot], 56.7)).toEqual([]);
+    expect(withoutTabStop(undefined, 56.7)).toBeUndefined();
+  });
+
+  it("按 0.1pt 认位：读侧与 cmToPt 都只给到这一格", () => {
+    expect(sameTabStopPosition(56.7, 113.4 / 2)).toBe(true);
+    expect(sameTabStopPosition(56.7, 56.8)).toBe(false);
   });
 });

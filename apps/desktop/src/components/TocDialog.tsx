@@ -7,6 +7,7 @@ import {
   type TocOptions,
   type TocReject,
 } from "../editor/toc.js";
+import { TAB_LEADERS } from "../editor/tabStopOptions.js";
 
 /**
  * 「插入目录」对话框，字段对着 Word 侧栏里那个目录面板：显示级别、是否显示页码、
@@ -16,17 +17,6 @@ import {
  * 本组件连一份选项对象都不解释（AGENTS §3.3 / §5.7）。失败原因码由宿主回传，
  * 中文文案在这里拼。
  */
-
-/** Word 前导符下拉框里的七项，`w:leader` 的取值。 */
-const LEADERS: { value: TabStopLeader; label: string }[] = [
-  { value: "none", label: "（无）" },
-  { value: "dot", label: "点线 …" },
-  { value: "hyphen", label: "短划线 - - -" },
-  { value: "dash", label: "虚线 — — —" },
-  { value: "line", label: "实线 ———" },
-  { value: "heavy", label: "重实线 ———" },
-  { value: "middleDot", label: "中间点 · · ·" },
-];
 
 /** 拒绝码 → 界面文案。引擎只给码，不给话（§5.7）。 */
 const REJECT_TEXT: Record<TocReject, string> = {
@@ -134,7 +124,7 @@ export function TocDialog({
               disabled={!showPageNumbers}
               onChange={(e) => setLeader(e.target.value as TabStopLeader)}
             >
-              {LEADERS.map((l) => (
+              {TAB_LEADERS.map((l) => (
                 <option key={l.value} value={l.value}>
                   {l.label}
                 </option>

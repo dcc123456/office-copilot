@@ -120,6 +120,8 @@ const mixedBoldDoc = [
  * @param args 该命令的入参。
  * @param words 要选中的文字：每处文字所在的块都会落进命令的选区。
  * @param source 命令所在的扩展，默认段落格式那一个（标记类的命令传自己的扩展）。
+ * @param mode 选区形状：`range` 拉整段文字（默认），`cursor` 只把光标停在第一处前面
+ *   ——面板上的按钮就是这种情况，用户通常没有拉选区。
  * @returns 命令的返回值（选区里能落这个格式才为 true）。
  * @throws 选区里找不到要选的文字，或那份扩展根本没有这条命令——是用例写错了，不该静默通过。
  */
@@ -132,6 +134,7 @@ function runFormatCommand(
     ParagraphFormatting as unknown as {
       config: { addCommands?: () => Record<string, unknown> };
     },
+  mode: "range" | "cursor" = "range",
 ): boolean {
   let from = -1;
   let to = -1;
@@ -142,7 +145,11 @@ function runFormatCommand(
   });
   if (from < 0) throw new Error(`no run matching ${words.join("/")}`);
   editor.view.dispatch(
-    editor.state.tr.setSelection(TextSelection.create(editor.state.doc, from, to)),
+    editor.state.tr.setSelection(
+      mode === "cursor"
+        ? TextSelection.create(editor.state.doc, from)
+        : TextSelection.create(editor.state.doc, from, to),
+    ),
   );
   const commands = (
     source.config.addCommands as (this: unknown) => Record<
@@ -332,6 +339,65 @@ describe("段落对话框补齐的字段（真实 schema）", () => {
     const again = schema.nodeFromJSON(node.toJSON())!;
     expect(again.attrs.tabStops).toEqual(stops);
     expect(() => again.check()).not.toThrow();
+  });
+});
+
+describe("制表位命令（真实 schema）", () => {
+  /** Word 目录行的右页边制表位：位置是 docx-io `cmToPt` 给的 0.1pt 精度。 */
+  const rightDot = { positionPt: 56.7, alignment: "right", leader: "dot" };
+  const paraWith = (tabStops: unknown, word: string) => ({
+    type: "paragraph",
+    attrs: { tabStops },
+    content: [text(word)],
+  });
+
+  it("「设置」只动这一个位置，别段落在别处的制表位原样留着", () => {
+    // 面板上那张清单是从第一段读出来的，整份覆盖会把第二段 100pt 那条抹掉。
+    const editor = harness([para([text("目录行")]), paraWith([{ positionPt: 100, alignment: "center" }], "签名行")]);
+    expect(runFormatCommand(editor, "setTabStop", [rightDot], ["目录行", "签名行"])).toBe(true);
+    expect(editor.state.doc.child(0).attrs.tabStops).toEqual([rightDot]);
+    expect(editor.state.doc.child(1).attrs.tabStops).toEqual([
+      rightDot,
+      { positionPt: 100, alignment: "center" },
+    ]);
+  });
+
+  it("同位置再设一次是替换，不会堆出两条挨着的制表位", () => {
+    const editor = harness([para([text("第一章")])]);
+    runFormatCommand(editor, "setTabStop", [rightDot], ["第一章"]);
+    runFormatCommand(editor, "setTabStop", [{ positionPt: 56.7, alignment: "right" }], ["第一章"]);
+    expect(editor.state.doc.child(0).attrs.tabStops).toEqual([
+      { positionPt: 56.7, alignment: "right" },
+    ]);
+  });
+
+  it("「清除」只删那一位；没建模过制表位的段落不因此变成“全部清除”", () => {
+    const editor = harness([
+      para([text("甲")]),
+      paraWith([{ positionPt: 56.7, alignment: "right", leader: "dot" }], "乙"),
+    ]);
+    expect(runFormatCommand(editor, "clearTabStop", [56.7], ["甲", "乙"])).toBe(true);
+    // 甲从来没建模过：写成 [] 等于替用户声明"这段清空了制表位"，导出会删掉它的 w:tabs。
+    expect(editor.state.doc.child(0).attrs.tabStops).toBeUndefined();
+    expect(editor.state.doc.child(1).attrs.tabStops).toEqual([]);
+  });
+
+  it("「全部清除」把选区里每一段写成空清单", () => {
+    const editor = harness([
+      paraWith([rightDot], "甲"),
+      paraWith([{ positionPt: 100, alignment: "center" }], "乙"),
+    ]);
+    expect(runFormatCommand(editor, "clearAllTabStops", [], ["甲", "乙"])).toBe(true);
+    expect(editor.state.doc.child(0).attrs.tabStops).toEqual([]);
+    expect(editor.state.doc.child(1).attrs.tabStops).toEqual([]);
+  });
+
+  it("光标停在段落里（没拉选区）也能设制表位，面板才是这么用的", () => {
+    const editor = harness([para([text("签名行")])]);
+    expect(
+      runFormatCommand(editor, "setTabStop", [rightDot], ["签名行"], undefined, "cursor"),
+    ).toBe(true);
+    expect(editor.state.doc.child(0).attrs.tabStops).toEqual([rightDot]);
   });
 });
 
