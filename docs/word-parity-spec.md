@@ -767,8 +767,15 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 页面边框（**③已落地**）：`w:pgBorders`（`CT_PageBorders`，父元素 `sectPr`，§17.6.10）承载在
   `SectionGeometry.pageBorders` 上：`{offsetFrom, top, left, bottom, right}`，每条边
   `{style, sizePt, spacePt, color}`。线宽 `w:sz` 是**八分之一 pt**、间距 `w:space` 是 **pt**（§17.3.4），
-  两者就按 pt 存在模型里，不再换算成 cm。水印：`w:headerReference` 里的 `v:shape` 文字（Word 用
-  WordArt VML，本仓可以退化成 `w:pict` 文本框，需在规格里明确"Word 打开效果待验"）。
+  两者就按 pt 存在模型里，不再换算成 cm。
+- 水印（**⑤已落地**）：**不是节属性**，规格里原先"`w:headerReference` 里的 `v:shape`"这句也不准确——
+  Word 把它写成**默认页眉部件里的一段艺术字**：`w:hdr/w:p/w:r/w:pict/v:shape type="#_x0000_t136"`，
+  文字在 `v:textpath@string`，颜色在 `v:shape@fillcolor`，半透明在 `v:fill@opacity`（`ST_Percentage`），
+  对角是 `v:shape@rotation="315"`（度），"自动"字号是 `fitshape="t"` + `font-size:1pt`。
+  承载在 `SectionGeometry.watermark` = `{text, font, sizePt, color, semiTransparent, layout}`
+  （`sizePt: null` 即"自动"，`layout` 是 `diagonal|horizontal`），三态语义同 ②③④。
+  退化成 `w:pict` 文本框那条路**没走**：文本框形状 Word 认，但"水印"在 Word 里就是 t136 艺术字，
+  换成文本框会让用户在自己的文档里认不出这条对象，也拿不到 `v:fill` 的透明度。
 - 首字下沉（**④已落地**）：`w:pPr/w:framePr` 的 `w:dropCap="none|drop|margin"` + `w:lines`
   （ECMA-376 §17.3.1.11 `CT_FramePr`；`w:lines` 缺省 **1**，规格里原先写的 `w:dropRows` 这个属性
   **不存在**）。承载在段落属性 `dropCap` 上：`{position, lines?}`；三态沿用 ②③——
@@ -779,7 +786,8 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   靠"值等价就整段不重建"原样留着。
 
 提交切分：① 节属性读写保真（`bba064e`）；② 分栏（`b93c1ef` `a806d69`）；
-③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉（`2cfe911` `d30939a`）；⑤ 水印。
+③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉（`2cfe911` `d30939a`）；
+⑤ 水印（`2044594` 数据层 + `1a44229` 桌面入口）。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -894,6 +902,55 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 > 21px**，下沉字于是压到下一段（Word 会按 `w:lines` 留空）。`1lh` 单位要 Chrome 133 才有，
 > 本机拿不到；为了让画布撑高而再造一套行盒计算既会跟 `PagedLayout` 的高度测量打架，也不是交付物
 > 关心的事，所以画布保持近似，差距同时记在样式文件与 §8.8。
+
+> ⑤的判据与实测（`2044594` 数据层 + `1a44229` 桌面入口）：动手前先把 Word 自己写出来的那段
+> XML 当一手来源（`tmp/wm-fixture.mjs` 留了一份），确认三件与本仓判断直接相关的事——
+> ① 水印**不在 `sectPr` 里**，它是默认页眉部件 `word/header1.xml` 中一段 `w:p/w:r/w:pict/v:shape`，
+> 所以本规格原来那句"`w:headerReference` 里的 `v:shape`"是错的（`w:headerReference` 只是节属性指向
+> 页眉的那条引用）；② 艺术字形状类型 `#_x0000_t136` 的 `path` 与 14 条 `v:f` 公式是 WordArt 的
+> **固定样板**，逐字照抄即可，只有 `rotation`（度，对角 315）、`fillcolor`、`v:fill@opacity`
+> （`ST_Percentage`，`50%` 或定点数 `50000f`）、`v:textpath@string` 与 `style` 里的
+> `font-family`/`font-size` 是变量，"自动"字号就是 `fitshape="t"` + `font-size:1pt`；
+> ③ VML 命名空间 `urn:schemas-microsoft-com:vml`（外加 `o`、`w10`）必须声明在 `w:hdr` 根上，
+> 缺了 Word 直接不认这段形状。据此否掉了"退化成 `w:pict` 文本框"的原计划：文本框 Word 打得开，
+> 但用户在 Word 的对象树里看到的就不是"水印"，也拿不到 `v:fill` 的透明度（§6.1 要写否决理由）。
+> 模型：`SectionGeometry.watermark` = `{text, font, sizePt, color, semiTransparent, layout}`，
+> `sizePt: null` 表示"自动"；三态沿用 ②③④（`undefined` 一动不动 / `null` 删掉 / 有值且不等价才重建）。
+> 判"是不是水印"只认 `type="#_x0000_t136"` **且**带 `v:textpath@string` 的形状，且带
+> `w:txbxContent` 的段落一律不碰——用户页眉里自己放的装饰性艺术字不许被"清理"掉（§2.7）。
+> 因为水印落在页眉部件，保存链路必须能**只建页眉不建页脚**：原来的
+> `ensureDefaultHeaderFooter()` 一次建两条，改成按 kind 取用的 `ensureHeaderFooterPart(bundle, kind)`，
+> 顺带删掉"编辑页眉就凭空写一个空页脚部件"这条副作用（§3.5）。
+> 触碰同一段代码时修掉两个真会损坏文档的缺陷：① 页眉与页脚共用同一个 `rIdHf1`，两条一起建时
+> 后者覆盖前者的关系；② `word/_rels/document.xml.rels` 在没有任何关系时序列化成自闭合
+> `<Relationships/>`，而旧代码用 `rels.replace("</Relationships>", …)` 追加——匹配不上就**静默丢掉**
+> 页眉关系，Word 会报"文件损坏"。改成解析后 `addRelationship` 再序列化，并从
+> `ensurePartReference` 里抽出这一份复用（同一段逻辑第二次出现，§3.2）。
+> 另一处不能想当然：`v:textpath@style` 里是 `font-family:'黑体'`，用通用的 `escapeAttr` 会把单引号
+> 写成 `&apos;`，Word 读不出字体名，所以属性值转义分成"style 用只转 `&<>` 与双引号"和
+> "`@string` 用 `escapeAttr`"两条（§2.2 的取舍：读不懂不如不写）。
+> 桌面入口就是「页面设置」的水印区：启用 / 文字 / 字体 / 字号（pt，0 为自动）/ 颜色 / 半透明 /
+> 版式（对角·横向，复用 `.ps-seg`，未启用时整排禁用），`watermarkFor()` 与
+> `pageBordersFor()`/`lineNumbersFor()` 同一条三态规则；`geometryFor()` 的 `extras` 多接一项，
+> 套模板路径把文档原有水印原样带走（§2.7）。
+> 实测（`tmp/wm-app-probe.mjs`，独立 `--user-data-dir` + CDP 起真实 app，一份**没有页眉部件**、
+> `document.xml.rels` 是空表根的 `.docx`）：打开时对话框"启用水印"未勾、文字/半透明/版式全部禁用；
+> 勾上→填"内部资料"、黑体、字号 0、颜色 `#dddddd`、对角→确定→保存，读回
+> `word/header1.xml` 里 `v:shape` 与 `v:shapetype` 各 1 条、`fillcolor="#dddddd"`、`rotation="315"`、
+> `<v:fill on="t" opacity="50%"/>`、`font-family:'黑体';font-size:1pt` + `fitshape="t"`、
+> `string="内部资料"`，`w:hdr` 根上带 VML 三个命名空间；`document.xml` 里
+> `<w:headerReference r:id="rIdHf1" w:type="default"/>`、rels 里
+> `Target="header1.xml"` 那条关系在且 `[Content_Types].xml` 有对应 Override，**没有**凭空建出
+> `word/footer1.xml`，正文两段一字不缺。用读文件的同一套代码回灌得到
+> `{text:"内部资料", font:"黑体", sizePt:null, color:"#dddddd", semiTransparent:true, layout:"diagonal"}`，
+> 再点一次保存 `header1.xml` **字节一致**、`headerReference` 与 `rIdHf1` 各 1 条；重开对话框显示的就是
+> 刚写进去的值，取消勾选再保存后 `v:shape` 归零而页眉部件仍在、正文完好，回灌读成"没建模过"。
+> 截图 `tmp/wm-dialog.png`（水印区排布与其余各区一致）。
+> 已知不做：编辑画布**不预览**水印——负 `z-index` 的绝对定位艺术字要落到 `PagedLayout` 的分页测量里
+> 就是又一套坐标计算，而交付物是 `.docx`，与 ③ 的行号、② 的分栏同一取舍；读侧只认 VML t136 形状，
+> 若别的编辑器把水印写成 DrawingML，我们读不出来也就不会去动它。
+> 用 Word / WPS 实际打开验证：`[!] BLOCKED`，形状与属性取自 Word 产出的样例加 ECMA-376 §14.1.2 /
+> §9.5.1 推断，本机没能亲眼看到渲染结果（见 §8.11）。
 
 ## 八、总验收表（每个功能提交都要填满）
 
@@ -1254,6 +1311,63 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   ⑦ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定，与 8.9 同一条）。
 - 提交：`d281eb3`（前置整理）+ `27169f2`（本片）+ 本条 docs 记录一起推送；推送后 `git ls-remote origin main`
   与本仓 `git rev-parse HEAD` 一致才声称已推送。
+
+### 8.11 排名 7 ⑤（水印：数据层 + 桌面入口）验收记录（`2044594` `1a44229`）
+
+- 往返用例（§5.3）：`packages/docx-io/src/docx.test.ts` +6 条，全部走 `saveTwice` 真文件路径——
+  读进 `section.watermark`；页眉没建模时字节原样穿过；没改过的水印二次保存**字节一致**且
+  `v:shape`/`v:shapetype` 各 1 条；改文字/字体/颜色/版式后是**替换**而不是叠加（断言
+  `string="作废&quot;&lt;草稿&gt;"` 的转义、`font-family:'黑体';font-size:48pt`、无 `rotation`、无 `opacity`）；
+  `watermark: null` 删形状但留下页眉文字；正文文档原本没有页眉时**只**建 `header1.xml`
+  （Content_Types Override + `Target="header1.xml"` 关系 + `w:headerReference r:id="rIdHf1"`，
+  不建 `footer1.xml`），二次保存仍只有一条 `rIdHf1`。不新增编辑器节点/标记，所以
+  `EDITOR_EXTENSIONS` 与 `docBlocks.live.test.ts` 这一片不涉及（§5.3 的注册项没变）。
+- 引擎层单测：`packages/docx-io/src/watermark.test.ts`（新）13 条——读 Word 的对角半透明
+  （含 `50000f` 定点数写法）、读固定字号与横向、实体解码；读不懂的一律当没建模过（无形状 /
+  没有 `string` / `fillcolor` 不是 hex 都返回 `undefined`）；写侧建形状与命名空间、写完能读回、
+  替换不叠加、剥水印时留下页眉正文、**绝不删** `w:txbxContent` 里的艺术字、引号注入被转义、
+  `sameWatermark` 逐字段比较。
+- 局部格式（§2.3）：不涉及——水印是文档级对象，不碰任何 run 属性，也没有整段覆盖字符样式的路径。
+- 原子写与撤销（§2.4/§2.5）：不涉及新机制——仍走 `fileHandlers` 的 `.tmp` → `rename`；水印与页边距
+  同属"文档级设置跟随 App state、不进修改历史"那一类（与 ②③④ 一致，套版路径的注释就写明了这条边界）。
+- 单位与颜色（§2.1/§2.2）：VML 的 `rotation` 是度、`font-size` 是 pt、形状尺寸是 pt，全部按原生单位
+  存，**没有**新增第二处换算；颜色只认 `#rrggbb`，`fillcolor` 读成非 hex 就当没建模（不往 `w:color`
+  那种位置塞读不懂的值）。属性值转义分两条：`@style` 只转 `&<>` 与双引号（`font-family:'黑体'` 的单引号
+  必须留着），`@string` 走通用 `escapeAttr`。
+- 复用（§3.1/§3.2）：`ensureHeaderFooterPart` 取代 `ensureDefaultHeaderFooter`（旧实现删掉，§3.5）；
+  `addRelationship` 从 `ensurePartReference` 里抽出共用，同时修掉空 rels 表被 `replace("</Relationships>")`
+  静默丢关系的缺陷；`watermarkFor` 与 `pageBordersFor`/`lineNumbersFor` 同一条三态规则、
+  `geometryFor` 的 `extras` 同一入口，没有第二套"文档级设置"通道；对话框控件复用 `.ps-grid`/`.ps-seg`，
+  未新增样式文件。
+- 类型 + 测试：`pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包 docx-io **293**（8 个文件，+19 全在水印）/
+  desktop **330**（29 个文件，+4 在 `PageSetupDialog.test.ts`）/ word-client 8 / word-tools 6 / server 2；
+  `apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针 `tmp/wm-app-probe.mjs`（独立 `--user-data-dir` + CDP），跑了两遍结果一致。
+  看到的数记在 §七"⑤的判据与实测"那段：初始禁用态、勾上后解锁、保存后 `header1.xml` 的
+  `fillcolor="#dddddd"` / `rotation="315"` / `opacity="50%"` / `string="内部资料"` /
+  `fitshape="t"`、`headerReference` 与 rels 那条 `rIdHf1`、二次保存字节一致、取消勾选后形状归零而
+  页眉与正文完好。截图 `tmp/wm-dialog.png`：水印区与分栏/边框/行号排布一致，颜色是色块、
+  版式是"对角/横向"分段按钮。画布上不显示水印（本片有意不做，见上）。
+- Word 实测：`[!] BLOCKED`——形状与属性取自 Word 自己产出的样例 XML 与 ECMA-376 §14.1.2 / §9.5.1
+  **推断**，本机没有 Microsoft Word，装有 WPS 但它的窗口抓不到（原因见 §8.12）。
+- 遗留（写清楚，不算本片做完）：① 编辑画布与打印/PDF 都不预览水印（数据完整写进 `.docx`，由
+  Word/WPS 渲染）；② 只认 VML `#_x0000_t136`，别的编辑器写成 DrawingML 的水印读不出来（读不出来
+  也就不动它）；③ 只管 `w:type="default"` 的页眉，`even`/`first` 页眉里的水印不建模；
+  ④ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定，与 8.9/8.10 同一条）。
+- 提交：`2044594`（数据层）+ `1a44229`（桌面入口）+ 本条 docs 记录一起推送；推送后
+  `git ls-remote origin main` 与本仓 `git rev-parse HEAD` 一致才声称已推送。
+
+### 8.12 环境更正：WPS 装了，但渲染结果看不到
+
+① ~ ⑤ 的验收记录里有 12 处写着"本机未安装 Word / WPS"，这句**不准确**，按本条统一更正：
+本机装有 WPS（`/Applications/wpsoffice.app`），没有的是 Microsoft Word 与 LibreOffice。
+**`[!] BLOCKED` 的结论不变**，但原因不是"没装"，而是"装了也看不到渲染结果"——⑤ 期间实测过三条路：
+`osascript` 驱动 WPS 报 `-1728 不允许辅助访问`（运行探针的终端没有辅助功能权限）；
+`python3 -c "import Quartz"` 无模块，拿不到窗口列表；整屏截图只有壁纸与 WPS 菜单栏，
+文档窗口不在可捕获范围内。
+所以此前所有"形状/单位/元素顺序按 ECMA-376 与 Word 产出的样例推断"的措辞仍然成立，
+只是别再把它写成"没装"。要真验渲染，二选一：给终端开"辅助功能 + 屏幕录制"权限后由我重跑探针，
+或你人工用 WPS 打开 `tmp/` 里那几份 `.docx` 回一句结论。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
