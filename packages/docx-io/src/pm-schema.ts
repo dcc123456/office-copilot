@@ -107,6 +107,23 @@ export type TabStop = {
 };
 
 /**
+ * 首字下沉的位置，直接沿用 `w:dropCap` 的合法值（ECMA-376 §17.3.1.11 ST_DropCap）：
+ * `drop` = Word UI 的"下沉"（首字缩进正文区内），`margin` = "首字突出到页边距外"。
+ * `none` 不进模型——那是"关掉"，用 attrs 上的 null 表示。
+ */
+export type DropCapPosition = "drop" | "margin";
+
+/** 首字下沉：位置 + 跨几行（`w:lines`，正整数）。 */
+export type DropCap = {
+  position: DropCapPosition;
+  /**
+   * 下沉行数。源文档没写 `w:lines` 时保持 undefined：写侧因此不会补一个我们猜的默认值，
+   * 未改动的段落重复保存才能字节一致。
+   */
+  lines?: number;
+};
+
+/**
  * 段落与标题共用的 `<w:pPr>` 建模属性（用 type 而非 interface：写回侧把它当
  * `Record<string, unknown>` 遍历，type 才有隐式索引签名）。
  *
@@ -154,6 +171,15 @@ export type PPrAttrs = {
   tabStops?: TabStop[];
   /** Line height as a CSS-like number (1.0, 1.15, 1.5, 2.0). */
   lineHeight?: string;
+  /**
+   * 首字下沉（`<w:framePr>` 上的 `w:dropCap` + `w:lines`）。
+   * undefined = 这一段没建模过（源文档的 `w:framePr` 原样透传）；
+   * null = 用户选了"无"——只带首字下沉属性的框架整个删掉（`w:framePr` 的**存在本身**
+   *   就表示"这段是文本框"，留一个空元素会把正文段落变成匿名文本框），
+   *   真文本框（还有 `w:w`/`w:h`/`w:hRule` 之类）只把 `w:dropCap` 改写成 none；
+   * 有值 = 位置 + 行数。
+   */
+  dropCap?: DropCap | null;
   /**
    * Raw <w:pPr> inner XML (everything between <w:pPr> and </w:pPr>)
    * captured from the source document. pmToOoxml merges it with the

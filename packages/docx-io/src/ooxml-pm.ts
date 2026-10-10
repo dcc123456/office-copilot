@@ -13,6 +13,8 @@ import {
   type Element,
 } from "./xml.js";
 import type {
+  DropCap,
+  DropCapPosition,
   PPrAttrs,
   PMDoc,
   PMMark,
@@ -678,7 +680,61 @@ export function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
   }
   const tabs = readTabStops(pPr);
   if (tabs) out.tabStops = tabs;
+  const dropCap = readDropCap(pPr);
+  if (dropCap !== undefined) out.dropCap = dropCap;
   return out;
+}
+
+/**
+ * 首字下沉（`<w:framePr>` 的 `w:dropCap` + `w:lines`）。
+ *
+ * ECMA-376 §17.3.1.11 的 `CT_FramePr` 只有 `dropCap`（ST_DropCap：`none`/`drop`/`margin`）
+ * 与 `lines`（ST_DecimalNumber）两个属性跟首字下沉有关——没有 `w:dropRows`、也没有
+ * `w:dropChar`，那是别的方言里的写法。注意**存在 `w:framePr` 本身就意味着"这一段属于
+ * 一个文本框"**（§17.3.1.11 正文第一段），所以关掉首字下沉时不能只清空这两个属性、
+ * 留一个 `<w:framePr/>` 在那儿。
+ */
+const DROP_CAP_POSITIONS = ["drop", "margin"] as const satisfies readonly DropCapPosition[];
+
+/**
+ * 一个"纯粹为首字下沉而存在"的 `w:framePr` 可能带的全部属性。
+ * 除了这些还有别的（`w:w`/`w:h`/`w:hRule`/`w:hSpace`/`w:xAlign`……）就说明这是用户
+ * 自己排的真文本框，我们只把 `w:dropCap` 改成 none，不敢整条删掉。
+ */
+const DROP_CAP_FRAME_ATTRS = new Set([
+  "w:dropCap",
+  "w:lines",
+  "w:wrap",
+  "w:hAnchor",
+  "w:vAnchor",
+  "w:x",
+  "w:y",
+]);
+
+/**
+ * `<w:framePr>` 的属性书写顺序。照 Word 观测到的顺序排（锚定信息在前、下沉信息在后），
+ * 这样"读进来一个首字下沉段落、没改就再保存"不会把属性顺序打乱。
+ * 表里没列到的源文档属性（`w:hSpace` 等）由 `mergedElementXml` 接在后面，一样不丢。
+ */
+const FRAMEPR_ORDER = ["w:wrap", "w:vAnchor", "w:hAnchor", "w:x", "w:y", "w:dropCap", "w:lines"];
+
+/**
+ * 读 `<w:pPr><w:framePr>` 的首字下沉设置。
+ *
+ * @param pPr 段落的 `<w:pPr>` 元素（可缺）。
+ * @returns `undefined` = 没建模过（这一段没有 `w:framePr`、或它不是首字下沉：
+ *   `w:dropCap` 缺省、是 `none`、或是表外值）——写侧因此把原文原样带走；
+ *   否则是位置 + 行数，`w:lines` 读成不到或不是正整数时留 undefined，不猜默认值。
+ */
+function readDropCap(pPr: Element | null | undefined): DropCap | undefined {
+  const frame = pPr ? firstChild(pPr, "w:framePr") : undefined;
+  if (!frame) return undefined;
+  const attributes = frame.attributes ?? {};
+  const rawPosition = attributes["w:dropCap"];
+  if (!DROP_CAP_POSITIONS.includes(rawPosition as DropCapPosition)) return undefined;
+  const position = rawPosition as DropCapPosition;
+  const lines = Number(attributes["w:lines"]);
+  return Number.isInteger(lines) && lines >= 1 ? { position, lines } : { position };
 }
 
 /** `<w:tab>` 的 `w:val` 合法值，与 `TabStopAlignment` 一一对应（写侧据此丢掉读不懂的值）。 */
@@ -1653,6 +1709,11 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
   push("w:snapToGrid", onOffXml("w:snapToGrid", a.snapToGrid));
   push("w:spacing", spacingElementXml(a, rawPpr));
   push("w:ind", indElementXml(a, rawPpr));
+  // 首字下沉是唯一"关掉也可能生成空串"的一项：这时依然要记名，否则源文档那条
+  // `w:framePr` 会被 rawPpr 透传回来，用户点了"无"却还在下沉（同下面 w:tabs 的坑）。
+  if (a.dropCap !== undefined) {
+    parts.push({ name: "w:framePr", xml: framePrElementXml(a, rawPpr) });
+  }
   // 制表位是唯一"空清单也要记名"的一项：用户点了全部清除时 attrs 是 []，
   // 写出的是没有 w:tabs 的 pPr，但 covered 必须有它，否则源文档那条又被透传回来。
   if (Array.isArray(a.tabStops)) {
@@ -1844,6 +1905,14 @@ function rawElementAttrs(
  * 只在"这一次真的改了值"时才清理同义写法：源文档里两者本来就一致（编辑器里没
  * 动过这段）时把它们留着，重复保存才不会把中文版 Word 写的 `w:leftChars`
  * 一步步磨掉，也才谈得上幂等。
+ *
+ * @param tag 元素名（不含 `w:`）。
+ * @param order 属性书写顺序表；表外的源文档属性按原样接在后面。
+ * @param rawPpr 源文档 pPr 内部 XML，提供打底属性。
+ * @param set 这次要写出的属性；undefined 值的项一律不写。
+ * @param suppress 每个被改写属性要一并清掉的同义写法。
+ * @param drop 用户"关掉"某个建模属性时要从打底里删掉的属性（首字下沉的 `w:lines`
+ *   就是这么消失的）——`set` 只能覆盖，没有这个参数就只能把旧值留在文件里。
  */
 function mergedElementXml(
   tag: string,
@@ -1851,14 +1920,16 @@ function mergedElementXml(
   rawPpr: string | undefined,
   set: Record<string, string>,
   suppress: Record<string, string[]>,
+  drop: string[] = [],
 ): string {
   const raw = rawElementAttrs(rawPpr, tag);
   const kept: Record<string, string> = { ...raw };
   for (const [name, value] of Object.entries(set)) {
     const changed = raw[name] === undefined || raw[name] !== value;
     kept[name] = value;
-    if (changed) for (const drop of suppress[name] ?? []) delete kept[drop];
+    if (changed) for (const item of suppress[name] ?? []) delete kept[item];
   }
+  for (const name of drop) delete kept[name];
   const names = [
     ...order.filter((n) => kept[n] !== undefined),
     ...Object.keys(kept).filter((n) => !order.includes(n) && kept[n] !== undefined),
@@ -1931,6 +2002,44 @@ function spacingElementXml(
     set,
     SPACING_SUPPRESS,
   );
+}
+
+/**
+ * 由段落 attrs 生成 `<w:framePr>`（首字下沉）。
+ *
+ * @param a 段落 attrs，只看 `dropCap`。
+ * @param rawPpr 源文档 pPr 内部 XML；属性级合并，没建模的 `w:hSpace`/`w:xAlign` 等留着。
+ * @returns 元素串。空串有两种语义："这一段没建模过首字下沉"与"用户关掉了它，而这条框架
+ *   本来就只为首字下沉存在"——后一种必须由调用方把 `w:framePr` 记进 covered，否则透传回来。
+ *   真文本框（带 `w:w`/`w:h`/`w:hRule` 之类）只把 `w:dropCap` 改成 none 并删掉 `w:lines`，
+ *   因为 `w:framePr` 的存在本身就意味着"这段属于一个文本框"（§17.3.1.11）。
+ */
+function framePrElementXml(a: PPrAttrs, rawPpr?: string): string {
+  const cap = a.dropCap;
+  if (cap === undefined) return "";
+  const raw = rawElementAttrs(rawPpr, "framePr");
+  if (cap === null) {
+    const isRealTextFrame = Object.keys(raw).some((name) => !DROP_CAP_FRAME_ATTRS.has(name));
+    if (!isRealTextFrame) return "";
+    return mergedElementXml(
+      "framePr",
+      FRAMEPR_ORDER,
+      rawPpr,
+      { "w:dropCap": "none" },
+      {},
+      ["w:lines"],
+    );
+  }
+  const set: Record<string, string> = { "w:dropCap": cap.position };
+  if (typeof cap.lines === "number") set["w:lines"] = String(cap.lines);
+  // 源文档没有 framePr 时补上锚定：`hAnchor`/`vAnchor` 的缺省基准是页面，
+  // 不写就会把首字钉到页面上去而不是跟着这段文字走。
+  if (!Object.keys(raw).length) {
+    set["w:wrap"] = "around";
+    set["w:vAnchor"] = "text";
+    set["w:hAnchor"] = "text";
+  }
+  return mergedElementXml("framePr", FRAMEPR_ORDER, rawPpr, set, {});
 }
 
 function headingXml(

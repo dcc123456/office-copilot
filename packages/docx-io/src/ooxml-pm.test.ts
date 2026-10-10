@@ -1000,6 +1000,105 @@ describe("段落开关与大纲级别（Word 段落对话框的其余字段）",
   });
 });
 
+describe("首字下沉（w:pPr/w:framePr 的 dropCap 与 lines）", () => {
+  /**
+   * 把源文档的一段 pPr 读成 PM，再用给定 attrs 覆盖回去写出的 `<w:pPr>`。
+   *
+   * @param source 源文档 pPr 的内部 XML；传 null 表示这一段本来什么都没有（编辑器新建的段落）。
+   * @param dropCap 用户在面板里选的下沉设置（undefined=没动过，null=选了"无"）。
+   * @returns 写出的完整 `<w:pPr>` 串；段落没有 pPr 时是空串。
+   */
+  function rewriteFramePr(source: string | null, dropCap: PPrAttrs["dropCap"]): string {
+    const loaded: PMDoc =
+      source === null
+        ? { type: "doc", content: [{ type: "paragraph", attrs: {}, content: [{ type: "text", text: "x" }] }] }
+        : ooxmlToPm(
+            bodyXml(`<w:p><w:pPr>${source}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`),
+          );
+    const attrs = { ...(loaded.content?.[0]?.attrs as PPrAttrs), dropCap };
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [{ type: "paragraph", attrs, content: [{ type: "text", text: "x" }] }],
+    });
+    return /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(xml)?.[0] ?? "";
+  }
+
+  it("读出位置与行数，没改动的段落字节一致", () => {
+    // Word 的"下沉 3 行"就是这个形状（§17.3.1.11：dropCap 是 ST_DropCap、lines 是整数）。
+    const frame =
+      '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="3"/>';
+    const pm = ooxmlToPm(bodyXml(`<w:p><w:pPr>${frame}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`));
+    expect(pm.content?.[0]).toMatchObject({
+      type: "paragraph",
+      attrs: { dropCap: { position: "drop", lines: 3 } },
+    });
+    expect(rewriteFramePr(frame, undefined)).toBe(`<w:pPr>${frame}</w:pPr>`);
+  });
+
+  it("不是首字下沉的框架原样带走：真文本框、none 与表外值都算没建模过", () => {
+    // 只留认得出的那几条 = 静默删掉用户的文本框；存在 `w:framePr` 本身就说"这段是框"。
+    for (const frame of [
+      '<w:framePr w:w="2191" w:h="811" w:hRule="exact" w:hSpace="180" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="1921"/>',
+      '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="none"/>',
+      '<w:framePr w:dropCap="raised"/>',
+    ]) {
+      const pm = ooxmlToPm(bodyXml(`<w:p><w:pPr>${frame}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`));
+      expect((pm.content?.[0]?.attrs as PPrAttrs).dropCap).toBeUndefined();
+      expect(rewriteFramePr(frame, undefined)).toBe(`<w:pPr>${frame}</w:pPr>`);
+    }
+  });
+
+  it("源文档没写 w:lines 时不猜行数，写回也就不会补上它", () => {
+    const frame = '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="margin"/>';
+    const pm = ooxmlToPm(bodyXml(`<w:p><w:pPr>${frame}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`));
+    // `margin` = 首字突出到页边距外（Word UI 的"文字环绕"档），行数留给 Word 自己按高度定。
+    expect(pm.content?.[0]).toMatchObject({ attrs: { dropCap: { position: "margin" } } });
+    expect(rewriteFramePr(frame, undefined)).toBe(`<w:pPr>${frame}</w:pPr>`);
+  });
+
+  it("新建的下沉补出锚定：缺省的 hAnchor/vAnchor 是页面，会把首字钉到纸边上去", () => {
+    expect(rewriteFramePr(null, { position: "drop", lines: 2 })).toBe(
+      '<w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="2"/></w:pPr>',
+    );
+    // 行数没定就只写位置，不替用户编一个。
+    expect(rewriteFramePr(null, { position: "margin" })).toBe(
+      '<w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="margin"/></w:pPr>',
+    );
+  });
+
+  it("改行数只动 dropCap 与 lines，源文档那条框架的其余属性留着", () => {
+    // 用户在下沉段落里只把 3 行改成 4 行，`w:hSpace` 这类没建模的属性不该被洗掉。
+    const source =
+      '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:hSpace="180" w:dropCap="drop" w:lines="3"/>';
+    const expected =
+      '<w:pPr><w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="4" w:hSpace="180"/></w:pPr>';
+    expect(rewriteFramePr(source, { position: "drop", lines: 4 })).toBe(expected);
+    // 再存一次：顺序与值都不该再变（AGENTS §2.6 的幂等判据）。
+    expect(
+      rewriteFramePr(
+        '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="4" w:hSpace="180"/>',
+        { position: "drop", lines: 4 },
+      ),
+    ).toBe(expected);
+  });
+
+  it("关掉下沉：纯下沉框架整条删掉，真文本框只把 dropCap 写成 none", () => {
+    // `w:framePr` 的存在本身就意味着"这段是文本框"，留着空元素会把正文段变成匿名框。
+    expect(
+      rewriteFramePr(
+        '<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="3"/>',
+        null,
+      ),
+    ).toBe("");
+    const realFrame =
+      '<w:framePr w:w="2191" w:h="811" w:hRule="exact" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="1921" w:dropCap="drop" w:lines="3"/>';
+    const off = rewriteFramePr(realFrame, null);
+    expect(off).toContain('w:hRule="exact"');
+    expect(off).toContain('w:dropCap="none"');
+    expect(off).not.toContain("w:lines");
+  });
+});
+
 describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
   const WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
   const PARA = (pPr: string) =>
