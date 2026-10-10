@@ -4,7 +4,12 @@ import { DocxFile } from "./docx.js";
 
 async function makeDocx(
   paragraphs: string[],
-  extra: { sectPr?: string; stylesXml?: string } = {},
+  extra: {
+    sectPr?: string;
+    stylesXml?: string;
+    /** 原样插进 body 的 <w:p>…</w:p>，用来造带 pPr 的真实段落。 */
+    rawParagraphs?: string[];
+  } = {},
 ): Promise<Uint8Array> {
   const zip = new JSZip();
   const body = paragraphs
@@ -15,7 +20,7 @@ async function makeDocx(
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
   <w:body>
-    ${body}
+    ${body}${(extra.rawParagraphs ?? []).join("")}
     <w:sectPr>${extra.sectPr ?? '<w:pgSz w:w="12240" w:h="15840"/>'}</w:sectPr>
   </w:body>
 </w:document>`,
@@ -167,5 +172,48 @@ describe("DocxFile", () => {
     const { section } = await plain.toProseMirror();
     expect(section?.linePitch).toBeUndefined();
     expect(section?.paraSpacingAfter).toBe(0);
+  });
+
+  /**
+   * 真实文件层面的保真验收：打开带缩进的 docx → 走一遍编辑器保存路径
+   * （toProseMirror / replaceProseMirror / toBytes）→ 重开读 document.xml。
+   *
+   * @param paragraphs 带 pPr 的原始 <w:p> 片段。
+   * @returns 保存一次与保存两次后的 document.xml 文本。
+   */
+  async function saveTwice(
+    paragraphs: string[],
+  ): Promise<{ once: string; twice: string }> {
+    const readBody = async (bytes: Uint8Array) => {
+      const zip = await JSZip.loadAsync(bytes);
+      return (await zip.file("word/document.xml")!.async("string"));
+    };
+    const reopen = async (bytes: Uint8Array): Promise<Uint8Array> => {
+      const docx = await DocxFile.fromBytes(bytes);
+      const loaded = await docx.toProseMirror();
+      await docx.replaceProseMirror(loaded.doc);
+      return docx.toBytes();
+    };
+    const source = await makeDocx([], { rawParagraphs: paragraphs });
+    const onceBytes = await reopen(source);
+    return {
+      once: await readBody(onceBytes),
+      twice: await readBody(await reopen(onceBytes)),
+    };
+  }
+
+  it("keeps every indentation spelling through a real save", async () => {
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:ind w:left="300" w:right="200" w:leftChars="200"/><w:spacing w:line="360" w:lineRule="auto" w:beforeLines="50"/></w:pPr><w:r><w:t>合同右侧缩进</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:ind w:start="400" w:end="200"/></w:pPr><w:r><w:t>2010 写法</w:t></w:r></w:p>`,
+      `<w:p><w:pPr><w:ind w:left="300" w:hanging="420"/></w:pPr><w:r><w:t>参考文献悬挂缩进</w:t></w:r></w:p>`,
+    ]);
+    expect(once).toContain('w:right="200"');
+    expect(once).toContain('w:leftChars="200"');
+    expect(once).toContain('w:beforeLines="50"');
+    // 第二次保存只可能因为"我们把它归一化了"而少掉写法，不该少掉数值。
+    expect(once).toContain('w:left="400"');
+    expect(once).toContain('w:hanging="420"');
+    expect(twice).toBe(once);
   });
 });

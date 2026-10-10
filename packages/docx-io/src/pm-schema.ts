@@ -52,10 +52,10 @@ export type PMNode =
         pageBreakBefore?: boolean;
         /**
          * Raw <w:pPr> inner XML (everything between <w:pPr> and </w:pPr>)
-         * captured from the source document. When present, pmToOoxml writes
-         * it back verbatim instead of synthesizing pPr from attrs, so we
-         * preserve spacing/indent/borders/keepLines/etc. that we don't
-         * model explicitly.
+         * captured from the source document. pmToOoxml merges it with the
+         * attrs it models: <w:jc>/<w:spacing>/<w:ind> are rebuilt from both
+         * sides, every other element (borders, keepLines, tabs, outlineLvl,
+         * …) rides through untouched. See `mergedElementXml` in ooxml-pm.ts.
          */
         rawPpr?: string;
         /** Spacing before the paragraph, in points. */
@@ -64,6 +64,8 @@ export type PMNode =
         spacingAfter?: number;
         /** Left indent, in points. */
         indent?: number;
+        /** Right indent, in points (Word's 段落对话框 → 右侧). */
+        indentRight?: number;
         /** First-line indent, in points. Negative = hanging indent. */
         indentFirst?: number;
         /** Line height as a CSS-like number (1.0, 1.15, 1.5, 2.0). */
@@ -79,6 +81,7 @@ export type PMNode =
         spacingBefore?: number;
         spacingAfter?: number;
         indent?: number;
+        indentRight?: number;
         indentFirst?: number;
         lineHeight?: string;
       };

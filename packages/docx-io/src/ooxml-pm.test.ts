@@ -589,6 +589,160 @@ describe("lineHeight 固定值 / 最小值", () => {
   });
 });
 
+/**
+ * 段落缩进/间距的**属性级合并**。以前的写法是"整元素重建"：cleanRaw 把源文档的
+ * <w:ind>/<w:spacing> 删掉，再只按我们建模过的属性重新生成，于是右缩进、
+ * w:*Chars（中文版 Word 的主写法）、w:*Lines、2010 版的 w:start/w:end
+ * 保存一次就永久消失。下面每条都是那批丢失场景的回归用例。
+ */
+describe("段落缩进与间距的属性级合并", () => {
+  const PARA = (pPr: string) =>
+    bodyXml(`<w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`);
+  /** OOXML → PM → OOXML，返回 attrs 与写出的 pPr 片段。 */
+  function roundTripInd(pPr: string): { attrs: Record<string, unknown>; ind: string } {
+    const pm = ooxmlToPm(PARA(pPr));
+    const out = pmToOoxml(pm);
+    return {
+      attrs: (pm.content?.[0]?.attrs ?? {}) as Record<string, unknown>,
+      ind: /<w:ind\b[^>]*>/.exec(out)?.[0] ?? "",
+    };
+  }
+  function roundTripSpacing(pPr: string): { attrs: Record<string, unknown>; spacing: string } {
+    const pm = ooxmlToPm(PARA(pPr));
+    const out = pmToOoxml(pm);
+    return {
+      attrs: (pm.content?.[0]?.attrs ?? {}) as Record<string, unknown>,
+      spacing: /<w:spacing\b[^>]*>/.exec(out)?.[0] ?? "",
+    };
+  }
+
+  it("keeps a right indent that the editor never touched", () => {
+    // 右缩进以前没有对应属性，重建 <w:ind> 时直接被抹平——用户右侧缩进全丢。
+    const { attrs, ind } = roundTripInd('<w:ind w:left="300" w:right="200"/>');
+    expect(attrs.indent).toBe(15);
+    expect(attrs.indentRight).toBe(10);
+    expect(ind).toContain('w:left="300"');
+    expect(ind).toContain('w:right="200"');
+  });
+
+  it("reads the Office 2010 w:start / w:end spellings", () => {
+    const { attrs, ind } = roundTripInd('<w:ind w:start="400" w:end="200"/>');
+    expect(attrs.indent).toBe(20);
+    expect(attrs.indentRight).toBe(10);
+    // 归一化成 left/right，但不能把值换成 0。
+    expect(ind).toContain('w:left="400"');
+    expect(ind).toContain('w:right="200"');
+    expect(ind).not.toContain("w:start");
+    expect(ind).not.toContain("w:end");
+  });
+
+  it("carries indentation formats we do not model back out", () => {
+    // 中文版 Word 用字符单位写缩进（w:leftChars 会压过 w:left），必须原样带回。
+    const { ind } = roundTripInd('<w:ind w:left="300" w:leftChars="200"/>');
+    expect(ind).toContain('w:leftChars="200"');
+    expect(ind.match(/<w:ind\b/g)).toHaveLength(1);
+  });
+
+  it("drops the synonym that would override an indentation the user changed", () => {
+    // 改了左缩进却留着 w:leftChars，Word 会照旧按 2 字符排版，改动看不见。
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { rawPpr: '<w:ind w:left="300" w:leftChars="200"/>', indent: 30 },
+          content: [{ type: "text", text: "x" }],
+        },
+      ],
+    });
+    const ind = /<w:ind\b[^>]*>/.exec(xml)?.[0] ?? "";
+    expect(ind).toContain('w:left="600"');
+    expect(ind).not.toContain("w:leftChars");
+  });
+
+  it("round-trips a hanging indent and lets 0 clear it", () => {
+    const hanging = roundTripInd('<w:ind w:left="300" w:hanging="420"/>');
+    expect(hanging.attrs.indentFirst).toBe(-21);
+    expect(hanging.ind).toContain('w:hanging="420"');
+    // 段落面板把"特殊格式"改成"首行缩进 0"时，悬挂必须被清掉而不是留在文件里。
+    const cleared = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { rawPpr: '<w:ind w:left="300" w:hanging="420"/>', indentFirst: 0 },
+          content: [{ type: "text", text: "x" }],
+        },
+      ],
+    });
+    const ind = /<w:ind\b[^>]*>/.exec(cleared)?.[0] ?? "";
+    expect(ind).toContain('w:firstLine="0"');
+    expect(ind).not.toContain("w:hanging");
+  });
+
+  it("replaces a per-line spacing setting when 段前 is set in points", () => {
+    // w:beforeLines（按行计的段前）优先级高于 w:before，两者并存会让改动失效。
+    const { spacing } = roundTripSpacing('<w:spacing w:beforeLines="100"/>');
+    expect(spacing).not.toBe("");
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { rawPpr: '<w:spacing w:beforeLines="100" w:after="60"/>', spacingBefore: 12 },
+          content: [{ type: "text", text: "x" }],
+        },
+      ],
+    });
+    const spacing2 = /<w:spacing\b[^>]*>/.exec(xml)?.[0] ?? "";
+    expect(spacing2).toContain('w:before="240"');
+    expect(spacing2).toContain('w:after="60"');
+    expect(spacing2).not.toContain("w:beforeLines");
+  });
+
+  it("emits spacing and ind before jc, the order CT_PPr declares", () => {
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { rawPpr: '<w:pBdr><w:bottom w:val="single"/></w:pBdr>', spacingAfter: 6, indentRight: 10, textAlign: "center" },
+          content: [{ type: "text", text: "x" }],
+        },
+      ],
+    });
+    const pPr = /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(xml)?.[0] ?? "";
+    expect(pPr.indexOf("<w:pBdr")).toBeLessThan(pPr.indexOf("<w:spacing"));
+    expect(pPr.indexOf("<w:spacing")).toBeLessThan(pPr.indexOf("<w:ind"));
+    expect(pPr.indexOf("<w:ind")).toBeLessThan(pPr.indexOf("<w:jc"));
+  });
+
+  it("makes both pPr builders agree on the same attrs", () => {
+    // pPrXml（新建段落）与 synthesizedFormatXml（有 rawPpr）以前各写一份换算，
+    // 负的 indentFirst 在干净路径里会被写成 w:firstLine="-420"。
+    const attrs = { spacingBefore: 6, spacingAfter: 6, indent: 21, indentFirst: -21, lineHeight: "1.5" };
+    const clean = pmToOoxml({
+      type: "doc",
+      content: [{ type: "paragraph", attrs, content: [{ type: "text", text: "x" }] }],
+    });
+    const imported = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { ...attrs, rawPpr: "<w:snapToGrid/>" },
+          content: [{ type: "text", text: "x" }],
+        },
+      ],
+    });
+    const grab = (xml: string, tag: string) =>
+      [...xml.matchAll(new RegExp(`<w:${tag}\\b[^>]*>`, "g"))].map((m) => m[0]).join("");
+    expect(grab(imported, "spacing")).toBe(grab(clean, "spacing"));
+    expect(grab(imported, "ind")).toBe(grab(clean, "ind"));
+    expect(grab(clean, "ind")).toContain('w:hanging="420"');
+  });
+});
+
 describe("DocxFile toProseMirror / replaceProseMirror", () => {
   it("round-trips a minimal docx via zip", async () => {
     const zip = new JSZip();

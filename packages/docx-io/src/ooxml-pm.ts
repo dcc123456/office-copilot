@@ -366,6 +366,7 @@ function paragraphFromXml(
     fmt.spacingBefore !== undefined ||
     fmt.spacingAfter !== undefined ||
     fmt.indent !== undefined ||
+    fmt.indentRight !== undefined ||
     fmt.indentFirst !== undefined ||
     fmt.lineHeight !== undefined;
   return {
@@ -388,6 +389,9 @@ interface ParagraphFormatAttrs {
   spacingBefore?: number;
   spacingAfter?: number;
   indent?: number;
+  /** 右缩进，单位 pt（Word 段落对话框的"右侧"）。 */
+  indentRight?: number;
+  /** 首行缩进，单位 pt；负值表示悬挂缩进（Word 的"特殊格式：悬挂"）。 */
   indentFirst?: number;
   lineHeight?: string;
 }
@@ -434,27 +438,43 @@ function readParagraphFormat(pPr: Element | null | undefined): ParagraphFormatAt
   }
   const ind = firstChild(pPr, "w:ind");
   if (ind) {
-    // w:left / w:firstLine / w:hanging are in twips (20 per point).
-    const left = ind.attributes?.["w:left"] as string | undefined;
-    const firstLine = ind.attributes?.["w:firstLine"] as string | undefined;
-    const hanging = ind.attributes?.["w:hanging"] as string | undefined;
-    if (left !== undefined) {
-      const n = Number(left) / 20;
-      if (Number.isFinite(n) && n !== 0) out.indent = Math.round(n * 10) / 10;
-    }
+    // w:left / w:right / w:firstLine / w:hanging are in twips (20 per point).
+    // w:start / w:end are the Office 2010 synonyms of w:left / w:right; reading
+    // only the legacy names silently loses indentation in newer documents.
+    const left = twipsToPoints(ind, "w:left", "w:start");
+    if (left !== undefined) out.indent = left;
+    const right = twipsToPoints(ind, "w:right", "w:end");
+    if (right !== undefined) out.indentRight = right;
     // firstLine and hanging are mutually exclusive. hanging produces a
     // negative first-line indent (first line starts to the left of the
     // left indent); ignoring it is what makes tightly-set table cells
     // collapse character-by-character and balloon in height.
-    if (firstLine !== undefined) {
-      const n = Number(firstLine) / 20;
-      if (Number.isFinite(n) && n !== 0) out.indentFirst = Math.round(n * 10) / 10;
-    } else if (hanging !== undefined) {
-      const n = Number(hanging) / 20;
-      if (Number.isFinite(n) && n !== 0) out.indentFirst = -Math.round(n * 10) / 10;
-    }
+    const firstLine = twipsToPoints(ind, "w:firstLine");
+    const hanging = twipsToPoints(ind, "w:hanging");
+    if (firstLine !== undefined) out.indentFirst = firstLine;
+    else if (hanging !== undefined) out.indentFirst = -hanging;
   }
   return out;
+}
+
+/**
+ * 读一个 twips 属性并换算成 pt（1pt = 20 twips）。
+ *
+ * @param names 属性名，按优先级排列；第一个存在的生效，用于 w:left 与 w:start 这类同义写法。
+ * @returns pt 值（保留一位小数）；属性缺失、非数字或为 0 时返回 undefined，
+ *   因为 0 意味着"这里没建模过"，写回时应保持源文档原样而不是补一个 0。
+ */
+function twipsToPoints(
+  el: Element,
+  ...names: string[]
+): number | undefined {
+  for (const name of names) {
+    const raw = el.attributes?.[name] as string | undefined;
+    if (raw === undefined) continue;
+    const n = Number(raw) / 20;
+    if (Number.isFinite(n) && n !== 0) return Math.round(n * 10) / 10;
+  }
+  return undefined;
 }
 
 function jcToTextAlign(jc: string | undefined): string | undefined {
@@ -977,30 +997,28 @@ function paragraphXml(
   } = {},
 ): string {
   const a = node.attrs ?? {};
-  // When rawPpr is present, drop any <w:jc>/<w:spacing>/<w:ind> it has
-  // so the synthesized versions below win; otherwise we'd produce two
-  // elements and Word picks the first one. The paired form is not
-  // hypothetical — third-party writers emit <w:spacing …></w:spacing>.
+  // When rawPpr is present, drop the <w:jc>/<w:spacing>/<w:ind> it carries so
+  // the merged versions below win; otherwise we'd emit two of the same element
+  // and Word picks the first one. The merge in spacingElementXml /
+  // indElementXml re-reads the raw attributes, so the properties we don't model
+  // (w:right, w:*Chars, w:*Lines, w:start/w:end) ride along instead of vanishing.
+  // The paired form is not hypothetical — third-party writers emit <w:spacing …></w:spacing>.
   const cleanRaw = (s: string) =>
     s
       .replace(/<w:jc\b[^>]*\/>|<w:jc\b[^>]*>[\s\S]*?<\/w:jc>/g, "")
       .replace(/<w:spacing\b[^>]*\/>|<w:spacing\b[^>]*>[\s\S]*?<\/w:spacing>/g, "")
       .replace(/<w:ind\b[^>]*\/>|<w:ind\b[^>]*>[\s\S]*?<\/w:ind>/g, "");
-  const override = synthesizedFormatXml(a);
+  const raw = opts.rawPpr ?? (a.rawPpr as string | undefined);
+  const override = synthesizedFormatXml(a, raw);
   // Precedence: explicit override (list item numPr) > preserved rawPpr
-  // from source > synthesized from style/alignment/format.
+  // from source > synthesized from style/alignment/format. CT_PPr's sequence
+  // puts spacing/ind before jc, so the merged elements go out before the tail.
   let pPr: string;
-  if (opts.rawPpr) {
-    pPr = `<w:pPr>${cleanRaw(opts.rawPpr)}${opts.numPr ?? ""}${pPrTail(a.textAlign, a.pageBreakBefore)}${override}</w:pPr>`;
-  } else if (a.rawPpr) {
-    pPr = `<w:pPr>${cleanRaw(a.rawPpr as string)}${opts.numPr ?? ""}${pPrTail(a.textAlign, a.pageBreakBefore)}${override}</w:pPr>`;
+  if (raw) {
+    pPr = `<w:pPr>${cleanRaw(raw)}${opts.numPr ?? ""}${override}${pPrTail(a.textAlign, a.pageBreakBefore)}</w:pPr>`;
   } else {
     pPr = pPrXml(opts.pStyle, a.textAlign, a.pageBreakBefore, {
-      before: a.spacingBefore,
-      after: a.spacingAfter,
-      indent: a.indent,
-      indentFirst: a.indentFirst,
-      lineHeight: a.lineHeight,
+      ...a,
       numPr: opts.numPr,
     });
   }
@@ -1013,33 +1031,140 @@ function paragraphXml(
  * reusing a rawPpr. This keeps the raw data intact while ensuring our
  * explicit edits actually make it to the saved file.
  */
-function synthesizedFormatXml(a: Record<string, unknown>): string {
-  const parts: string[] = [];
-  const spacingAttrs: string[] = [];
-  if (typeof a.spacingBefore === "number") {
-    spacingAttrs.push(`w:before="${Math.round(a.spacingBefore * 20)}"`);
+function synthesizedFormatXml(
+  a: Record<string, unknown>,
+  rawPpr?: string,
+): string {
+  return [spacingElementXml(a, rawPpr), indElementXml(a, rawPpr)]
+    .filter(Boolean)
+    .join("");
+}
+
+/** pt → OOXML 的 twips 字符串（1pt = 20 twips）。 */
+function twipsValue(pt: number): string {
+  return String(Math.round(pt * 20));
+}
+
+/**
+ * 取 rawPpr 里某个 pPr 子元素（传 "ind" / "spacing"）已有的属性表。
+ *
+ * 存在的意义：写回做的是**属性级合并**而不是整元素重建。我们没建模的写法
+ * （`w:right`、`w:start`/`w:end`、字符单位版 `w:*Chars`、按行版的
+ * `w:beforeLines`）以前会被 `cleanRaw` 连元素一起删掉，保存一次就永久丢失。
+ */
+function rawElementAttrs(
+  rawPpr: string | undefined,
+  tag: string,
+): Record<string, string> {
+  if (!rawPpr) return {};
+  const match = new RegExp(`<w:${tag}\\b([^>]*?)/?>`, "").exec(rawPpr);
+  if (!match) return {};
+  const attrs: Record<string, string> = {};
+  const inner = match[1] ?? "";
+  for (const pair of inner.matchAll(/(w:[\w-]+)="([^"]*)"/g)) {
+    const name = pair[1];
+    const value = pair[2];
+    if (name && value) attrs[name] = value;
   }
-  if (typeof a.spacingAfter === "number") {
-    spacingAttrs.push(`w:after="${Math.round(a.spacingAfter * 20)}"`);
+  return attrs;
+}
+
+/**
+ * 合并出 `<w:spacing>` / `<w:ind>`：源文档属性打底，attrs 里建模过的覆盖上去。
+ * `suppress` 处理 Word 的优先级陷阱——`w:*Chars`、`w:*Lines`、`w:beforeAuto`
+ * 会压过同义的 twips 值，2010 起的 `w:start`/`w:end` 与 `w:left`/`w:right` 互斥，
+ * 所以接管一个属性时必须把它的一切同义写法清掉，否则用户在面板里改了不生效。
+ *
+ * 只在"这一次真的改了值"时才清理同义写法：源文档里两者本来就一致（编辑器里没
+ * 动过这段）时把它们留着，重复保存才不会把中文版 Word 写的 `w:leftChars`
+ * 一步步磨掉，也才谈得上幂等。
+ */
+function mergedElementXml(
+  tag: string,
+  order: string[],
+  rawPpr: string | undefined,
+  set: Record<string, string>,
+  suppress: Record<string, string[]>,
+): string {
+  const raw = rawElementAttrs(rawPpr, tag);
+  const kept: Record<string, string> = { ...raw };
+  for (const [name, value] of Object.entries(set)) {
+    const changed = raw[name] === undefined || raw[name] !== value;
+    kept[name] = value;
+    if (changed) for (const drop of suppress[name] ?? []) delete kept[drop];
   }
-  spacingAttrs.push(...lineHeightSpacingAttrs(a.lineHeight as string | undefined));
-  if (spacingAttrs.length) parts.push(`<w:spacing ${spacingAttrs.join(" ")}/>`);
-  if (
-    typeof a.indent === "number" ||
-    typeof a.indentFirst === "number"
-  ) {
-    const attrs: string[] = [];
-    if (typeof a.indent === "number")
-      attrs.push(`w:left="${Math.round(a.indent * 20)}"`);
-    if (typeof a.indentFirst === "number") {
-      const tw = Math.round(Math.abs(a.indentFirst as number) * 20);
-      if ((a.indentFirst as number) >= 0)
-        attrs.push(`w:firstLine="${tw}"`);
-      else attrs.push(`w:hanging="${tw}"`);
-    }
-    parts.push(`<w:ind ${attrs.join(" ")}/>`);
+  const names = [
+    ...order.filter((n) => kept[n] !== undefined),
+    ...Object.keys(kept).filter((n) => !order.includes(n) && kept[n] !== undefined),
+  ];
+  if (!names.length) return "";
+  return `<w:${tag} ${names.map((n) => `${n}="${kept[n]}"`).join(" ")}/>`;
+}
+
+const IND_ORDER = ["w:left", "w:right", "w:firstLine", "w:hanging"];
+const IND_SUPPRESS: Record<string, string[]> = {
+  "w:left": ["w:start", "w:leftChars"],
+  "w:right": ["w:end", "w:rightChars"],
+  "w:firstLine": ["w:hanging", "w:firstLineChars"],
+  "w:hanging": ["w:firstLine", "w:hangingChars"],
+};
+
+const SPACING_ORDER = ["w:before", "w:after", "w:line", "w:lineRule"];
+const SPACING_SUPPRESS: Record<string, string[]> = {
+  "w:before": ["w:beforeLines", "w:beforeAuto"],
+  "w:after": ["w:afterLines", "w:afterAuto"],
+  "w:line": ["w:lineRule"],
+};
+
+/**
+ * 由段落 attrs 生成 `<w:ind>`。attrs 单位是 pt；负的 `indentFirst` 表示
+ * 悬挂缩进，写成 `w:hanging`（Word 的"特殊格式：悬挂缩进"就是这个属性）。
+ * 传 undefined 的 attrs 项保持源文档原样。
+ */
+function indElementXml(
+  a: Record<string, unknown>,
+  rawPpr?: string,
+): string {
+  const set: Record<string, string> = {};
+  if (typeof a.indent === "number") set["w:left"] = twipsValue(a.indent);
+  if (typeof a.indentRight === "number")
+    set["w:right"] = twipsValue(a.indentRight);
+  if (typeof a.indentFirst === "number") {
+    const tw = twipsValue(Math.abs(a.indentFirst));
+    if (a.indentFirst >= 0) set["w:firstLine"] = tw;
+    else set["w:hanging"] = tw;
   }
-  return parts.join("");
+  return mergedElementXml("ind", IND_ORDER, rawPpr, set, IND_SUPPRESS);
+}
+
+/**
+ * 由段落 attrs 生成 `<w:spacing>`。段前/段后是 pt，行距沿用
+ * `lineHeightSpacingAttrs`（倍数走 `w:lineRule="auto"`，"pt:N" 是固定值、
+ * "atLeast:N" 是最小值，单位都是 twips）。
+ */
+function spacingElementXml(
+  a: Record<string, unknown>,
+  rawPpr?: string,
+): string {
+  const set: Record<string, string> = {};
+  if (typeof a.spacingBefore === "number")
+    set["w:before"] = twipsValue(a.spacingBefore);
+  if (typeof a.spacingAfter === "number")
+    set["w:after"] = twipsValue(a.spacingAfter);
+  // 行距先给 w:line 再给 w:lineRule，顺序决定源文档里那条旧的 lineRule 会被覆盖。
+  for (const pair of lineHeightSpacingAttrs(a.lineHeight as string | undefined)) {
+    const m = /^(w:[\w-]+)="([^"]*)"$/.exec(pair);
+    const name = m?.[1];
+    const value = m?.[2];
+    if (name && value) set[name] = value;
+  }
+  return mergedElementXml(
+    "spacing",
+    SPACING_ORDER,
+    rawPpr,
+    set,
+    SPACING_SUPPRESS,
+  );
 }
 
 function pPrTail(textAlign: string | undefined, pageBreakBefore?: boolean): string {
@@ -1228,38 +1353,28 @@ function tableCellXml(
   return `<w:tc>${tcPr.length ? `<w:tcPr>${tcPr.join("")}</w:tcPr>` : ""}${blocks || "<w:p/>"}</w:tc>`;
 }
 
+/**
+ * 干净路径（编辑器新建、没有 rawPpr 的段落）的 `<w:pPr>`。
+ * spacing/ind 与 rawPpr 路径共用 `spacingElementXml`/`indElementXml`，
+ * 所以两处不会再生出第二套 pt→twips 换算或第二套 hanging 判断。
+ *
+ * @param pStyle 要写进的样式 id；undefined 表示不写。
+ * @param textAlign left/center/right/justify，转成 `w:jc`。
+ * @param pageBreakBefore 段前分页。
+ * @param extras 段落格式 attrs（pt / 倍数），外加可选的 `numPr` 原文。
+ */
 function pPrXml(
   pStyle: string | undefined,
   textAlign: string | undefined,
   pageBreakBefore?: boolean,
-  extras: {
-    before?: number;
-    after?: number;
-    indent?: number;
-    indentFirst?: number;
-    lineHeight?: string;
-    numPr?: string;
-  } = {},
+  extras: Record<string, unknown> = {},
 ): string {
   const parts: string[] = [];
   if (pStyle) parts.push(`<w:pStyle w:val="${pStyle}"/>`);
   if (pageBreakBefore) parts.push(`<w:pageBreakBefore/>`);
-  if (extras.numPr) parts.push(extras.numPr);
-  const spacingAttrs: string[] = [];
-  if (extras.before !== undefined)
-    spacingAttrs.push(`w:before="${Math.round(extras.before * 20)}"`);
-  if (extras.after !== undefined)
-    spacingAttrs.push(`w:after="${Math.round(extras.after * 20)}"`);
-  spacingAttrs.push(...lineHeightSpacingAttrs(extras.lineHeight));
-  if (spacingAttrs.length) parts.push(`<w:spacing ${spacingAttrs.join(" ")}/>`);
-  if (extras.indent !== undefined || extras.indentFirst !== undefined) {
-    const indAttrs: string[] = [];
-    if (extras.indent !== undefined)
-      indAttrs.push(`w:left="${Math.round(extras.indent * 20)}"`);
-    if (extras.indentFirst !== undefined)
-      indAttrs.push(`w:firstLine="${Math.round(extras.indentFirst * 20)}"`);
-    parts.push(`<w:ind ${indAttrs.join(" ")}/>`);
-  }
+  if (typeof extras.numPr === "string") parts.push(extras.numPr);
+  parts.push(spacingElementXml(extras));
+  parts.push(indElementXml(extras));
   if (textAlign) {
     const v =
       textAlign === "center"
@@ -1271,7 +1386,8 @@ function pPrXml(
             : "left";
     parts.push(`<w:jc w:val="${v}"/>`);
   }
-  return parts.length ? `<w:pPr>${parts.join("")}</w:pPr>` : "";
+  const inner = parts.filter(Boolean).join("");
+  return inner ? `<w:pPr>${inner}</w:pPr>` : "";
 }
 
 function inlineChildrenToXml(
