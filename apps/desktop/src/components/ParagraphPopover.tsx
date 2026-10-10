@@ -4,28 +4,62 @@ import { AlignLeft, AlignCenter, AlignRight, AlignJustify, X } from "lucide-reac
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
 
 /**
- * 段落设置面板。工具栏按钮挂的是同一份内容：
- *   - 对齐方式
- *   - 行距 (single / 1.15 / 1.5 / double / fixed)
- *   - 段前 / 段后 (pt)
- *   - 左缩进 (pt) 与「特殊格式 + 磅值」（首行缩进 / 悬挂缩进）
+ * 段落设置面板，按 Word 段落对话框的分组排：
+ *   - 常规：对齐方式、大纲级别
+ *   - 缩进：左/右缩进 (pt)、「特殊格式 + 磅值」（首行缩进 / 悬挂缩进）
+ *   - 间距：段前 / 段后 (pt)、行距 (single / 1.15 / 1.5 / double / fixed)
+ *   - 分页与换行：孤行控制、与下段同页、段中不分页、段前分页、对齐到网格
  *
  * 数值经自定义命令 `setParagraphFormat` 写进当前选中的段落/标题，落在
  * editor/extensions/ParagraphFormatting.ts，再由 docx-io 往返成 OOXML 的
- * <w:spacing> 与 <w:ind>。右键菜单的「段落(P)…」直接复用 ParagraphFields。
+ * <w:spacing>、<w:ind>、<w:outlineLvl> 与 <w:keepNext/> 一族。右键菜单的
+ * 「段落(P)…」直接复用 ParagraphFields。
  */
 
 interface Attrs {
   textAlign?: string;
+  outlineLevel?: number;
   lineHeight?: string;
   spacingBefore?: number;
   spacingAfter?: number;
   indent?: number;
+  indentRight?: number;
   indentFirst?: number;
+  keepWithNext?: boolean;
+  keepLines?: boolean;
+  widowControl?: boolean;
+  snapToGrid?: boolean;
+  pageBreakBefore?: boolean;
 }
 
 /** Word 段落对话框「特殊格式」的三个取值。 */
 type SpecialFormat = "none" | "firstLine" | "hanging";
+
+/** 段落属性里属于「分页与换行」的开关（对应 OOXML 的 CT_OnOff 元素）。 */
+type SwitchKey =
+  | "widowControl"
+  | "keepWithNext"
+  | "keepLines"
+  | "pageBreakBefore"
+  | "snapToGrid";
+
+/** 开关的按钮文案沿用 Word 的原词，tip 是 hover 说明。 */
+const SWITCH_FIELDS: { key: SwitchKey; label: string; tip: string }[] = [
+  { key: "widowControl", label: "孤行控制", tip: "禁止把一段的首末单行留在上一页/下一页" },
+  { key: "keepWithNext", label: "与下段同页", tip: "本段与下一段排在同一页" },
+  { key: "keepLines", label: "段中不分页", tip: "本段的所有行排在同一页" },
+  { key: "pageBreakBefore", label: "段前分页", tip: "在本段之前强制换页" },
+  { key: "snapToGrid", label: "对齐到网格", tip: "如果定义了文档网格，则对齐到网格" },
+];
+
+/** Word「大纲级别」下拉。段落属性存 OOXML 的原值：0-8 = 1-9 级，9 = 正文文本。 */
+const OUTLINE_OPTIONS: { value: number; label: string }[] = [
+  ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map((value) => ({
+    value,
+    label: `${value + 1} 级`,
+  })),
+  { value: 9, label: "正文文本" },
+];
 
 /** 特殊格式刚打开时给磅值一个初值：中文 2 字符（五号 10.5pt × 2）。 */
 const DEFAULT_SPECIAL_PT = 21;
@@ -131,20 +165,26 @@ export function ParagraphFields({
 
   useEffect(() => {
     const read = () => {
-      const a: Attrs = {};
-      a.textAlign = editor.getAttributes("paragraph").textAlign as
-        | string
-        | undefined;
-      const anyNode =
-        editor.getAttributes("paragraph") ||
-        editor.getAttributes("heading") ||
-        {};
-      a.lineHeight = (anyNode.lineHeight as string | undefined) ?? "";
-      a.spacingBefore = anyNode.spacingBefore as number | undefined;
-      a.spacingAfter = anyNode.spacingAfter as number | undefined;
-      a.indent = anyNode.indent as number | undefined;
-      a.indentFirst = anyNode.indentFirst as number | undefined;
-      setAttrs(a);
+      // getAttributes 对不活跃的类型返回 {}（真值），所以必须按 isActive 选类型，
+      // 不能写 `getAttributes("paragraph") || getAttributes("heading")`：那样选中
+      // 标题时读到的一直是空的段落属性，面板永远是空白。
+      const type = editor.isActive("heading") ? "heading" : "paragraph";
+      const a: Attrs = editor.getAttributes(type) as Attrs;
+      setAttrs({
+        textAlign: a.textAlign,
+        outlineLevel: a.outlineLevel,
+        lineHeight: a.lineHeight ?? "",
+        spacingBefore: a.spacingBefore,
+        spacingAfter: a.spacingAfter,
+        indent: a.indent,
+        indentRight: a.indentRight,
+        indentFirst: a.indentFirst,
+        keepWithNext: a.keepWithNext,
+        keepLines: a.keepLines,
+        widowControl: a.widowControl,
+        snapToGrid: a.snapToGrid,
+        pageBreakBefore: a.pageBreakBefore,
+      });
     };
     read();
     editor.on("selectionUpdate", read);
@@ -212,6 +252,79 @@ export function ParagraphFields({
         </div>
       </Row>
 
+      <Row label="大纲级别">
+        <select
+          value={attrs.outlineLevel ?? 9}
+          onChange={(e) => apply({ outlineLevel: Number(e.target.value) })}
+        >
+          {OUTLINE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </Row>
+
+      <div className="pp-hint">缩进（磅）</div>
+      <div className="pp-grid">
+        <Row label="左侧 (pt)">
+          <Num
+            value={attrs.indent}
+            placeholder="0"
+            onChange={(v) => apply({ indent: v })}
+          />
+        </Row>
+        <Row label="右侧 (pt)">
+          <Num
+            value={attrs.indentRight}
+            placeholder="0"
+            onChange={(v) => apply({ indentRight: v })}
+          />
+        </Row>
+        <Row label="特殊格式">
+          <select
+            value={special}
+            onChange={(e) =>
+              apply({
+                indentFirst: indentFirstFor(
+                  e.target.value as SpecialFormat,
+                  magnitude,
+                ),
+              })
+            }
+          >
+            <option value="none">无</option>
+            <option value="firstLine">首行缩进</option>
+            <option value="hanging">悬挂缩进</option>
+          </select>
+        </Row>
+        <Row label="磅值 (pt)">
+          <Num
+            value={magnitude}
+            placeholder="0"
+            onChange={(v) => apply({ indentFirst: indentFirstFor(special, v) })}
+          />
+        </Row>
+      </div>
+
+      <div className="pp-hint">间距（磅）</div>
+      <div className="pp-grid">
+        <Row label="段前 (pt)">
+          <Num
+            value={attrs.spacingBefore}
+            placeholder="0"
+            onChange={(v) => apply({ spacingBefore: v })}
+          />
+        </Row>
+        <Row label="段后 (pt)">
+          <Num
+            value={attrs.spacingAfter}
+            placeholder="0"
+            onChange={(v) => apply({ spacingAfter: v })}
+          />
+        </Row>
+      </div>
+
       <Row label="行距">
         <select
           value={attrs.lineHeight ?? ""}
@@ -241,52 +354,20 @@ export function ParagraphFields({
         </select>
       </Row>
 
+      <div className="pp-hint">分页与换行</div>
       <div className="pp-grid">
-        <Row label="段前 (pt)">
-          <Num
-            value={attrs.spacingBefore}
-            placeholder="0"
-            onChange={(v) => apply({ spacingBefore: v })}
-          />
-        </Row>
-        <Row label="段后 (pt)">
-          <Num
-            value={attrs.spacingAfter}
-            placeholder="0"
-            onChange={(v) => apply({ spacingAfter: v })}
-          />
-        </Row>
-        <Row label="左缩进 (pt)">
-          <Num
-            value={attrs.indent}
-            placeholder="0"
-            onChange={(v) => apply({ indent: v })}
-          />
-        </Row>
-        <Row label="特殊格式">
-          <select
-            value={special}
-            onChange={(e) =>
-              apply({
-                indentFirst: indentFirstFor(
-                  e.target.value as SpecialFormat,
-                  magnitude,
-                ),
-              })
-            }
+        {SWITCH_FIELDS.map((sw) => (
+          <button
+            key={sw.key}
+            type="button"
+            className={`pp-seg-btn ${attrs[sw.key] ? "active" : ""}`}
+            title={`${sw.tip}（点击切换）`}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => apply({ [sw.key]: !attrs[sw.key] } as Partial<Attrs>)}
           >
-            <option value="none">无</option>
-            <option value="firstLine">首行缩进</option>
-            <option value="hanging">悬挂缩进</option>
-          </select>
-        </Row>
-        <Row label="磅值 (pt)">
-          <Num
-            value={magnitude}
-            placeholder="0"
-            onChange={(v) => apply({ indentFirst: indentFirstFor(special, v) })}
-          />
-        </Row>
+            {sw.label}
+          </button>
+        ))}
       </div>
 
       <div className="pp-hint">

@@ -1,6 +1,11 @@
 import { useMemo } from "react";
 import { inlineDiff, toGitLines, type GitLine, type InlinePart } from "./diff.js";
-import { STYLE_KEYS, type Block, type StylePatch } from "./docEdit.js";
+import {
+  PARAGRAPH_NUM_KEYS,
+  STYLE_KEYS,
+  type Block,
+  type StylePatch,
+} from "./docEdit.js";
 
 /** Tables and images take part in the diff, but say what they are. */
 function lineText(b: Block): string {
@@ -24,7 +29,8 @@ const STYLE_LABELS: Record<keyof StylePatch, string> = {
   lineHeight: "行距",
   spacingBefore: "段前",
   spacingAfter: "段后",
-  indent: "缩进",
+  indent: "左缩进",
+  indentRight: "右缩进",
   indentFirst: "首行缩进",
 };
 
@@ -35,11 +41,20 @@ function formatStyle(style: StylePatch): string {
     if (v === undefined || v === null || v === false) continue;
     if (key === "bold" || key === "italic" || key === "underline") bits.push(STYLE_LABELS[key]);
     else if (key === "headingLevel") bits.push(`级别 ${v}`);
-    else if (key === "spacingBefore" || key === "spacingAfter") bits.push(`${STYLE_LABELS[key]} ${v}pt`);
-    else if (key === "indent" || key === "indentFirst") bits.push(`${STYLE_LABELS[key]} ${v}pt`);
+    else if (isParagraphNumKey(key)) bits.push(`${STYLE_LABELS[key]} ${v}pt`);
     else bits.push(`${STYLE_LABELS[key]} ${v}`);
   }
   return bits.join(" · ") || "默认样式";
+}
+
+/**
+ * 段落级的数值格式（段前后距、缩进）在 diff 里统一带 pt 后缀。
+ *
+ * @param key STYLE_KEYS 里的一个键。
+ * @returns 属于 PARAGRAPH_NUM_KEYS 时 true；其余 false。
+ */
+function isParagraphNumKey(key: keyof StylePatch): boolean {
+  return (PARAGRAPH_NUM_KEYS as readonly (keyof StylePatch)[]).includes(key);
 }
 
 /** Style-only edits leave the text untouched, so show them as `-旧样式 +新样式`. */

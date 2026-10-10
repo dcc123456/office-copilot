@@ -6,6 +6,7 @@ import {
   CHAR_STYLE_KEYS,
   CHAR_STYLE_LABELS,
   matchesAddress,
+  PARAGRAPH_NUM_KEYS,
   type Address,
   type Anchor,
   type Block,
@@ -79,7 +80,7 @@ function styleOf(node: PMNode): StylePatch {
   if (node.type.name === "heading") s.headingLevel = Number(attrs.level ?? 1);
   if (typeof attrs.textAlign === "string") s.align = attrs.textAlign as StylePatch["align"];
   if (attrs.lineHeight != null) s.lineHeight = String(attrs.lineHeight);
-  for (const key of ["spacingBefore", "spacingAfter", "indent", "indentFirst"] as const) {
+  for (const key of PARAGRAPH_NUM_KEYS) {
     if (typeof attrs[key] === "number") s[key] = attrs[key];
   }
   return s;
@@ -375,7 +376,7 @@ function buildTextBlock(schema: Schema, text: string, style: StylePatch): PMNode
   const attrs: Record<string, unknown> = {};
   if (style.align) attrs.textAlign = style.align;
   if (style.lineHeight) attrs.lineHeight = style.lineHeight;
-  for (const key of ["spacingBefore", "spacingAfter", "indent", "indentFirst"] as const) {
+  for (const key of PARAGRAPH_NUM_KEYS) {
     if (style[key] != null) attrs[key] = style[key];
   }
 
@@ -530,14 +531,14 @@ function applyStyle(tr: Transaction, target: Located, style: StylePatch): RunRes
     }
   }
 
-  const attrKeys = ["align", "lineHeight", "spacingBefore", "spacingAfter", "indent", "indentFirst", "headingLevel"] as const;
+  const attrKeys = ["align", "lineHeight", ...PARAGRAPH_NUM_KEYS, "headingLevel"] as const;
   const touchesAttrs = attrKeys.some((k) => style[k] !== undefined);
 
   if (touchesAttrs) {
     const attrs: Record<string, unknown> = { ...node.attrs };
     if (style.align !== undefined) attrs.textAlign = style.align ?? null;
     if (style.lineHeight !== undefined) attrs.lineHeight = style.lineHeight ?? null;
-    for (const key of ["spacingBefore", "spacingAfter", "indent", "indentFirst"] as const) {
+    for (const key of PARAGRAPH_NUM_KEYS) {
       if (style[key] !== undefined) attrs[key] = style[key] ?? null;
     }
     let type: NodeType = node.type;

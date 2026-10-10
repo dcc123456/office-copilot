@@ -52,7 +52,7 @@ export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用�
    bold/italic/underline(true|false)、
    fontSize("16px")、fontFamily("宋体")、fontFamilyWest("Times New Roman")、
    letterSpacing("0.67px")、color("#cc0000")、highlight("#ffff00")、lineHeight("1.5")、
-   spacingBefore/spacingAfter(单位磅)、indent/indentFirst(单位磅)。把不需要的字段设成 null 表示清除。
+   spacingBefore/spacingAfter(单位磅)、indent/indentRight/indentFirst(单位磅，indentFirst 为负表示悬挂缩进)。把不需要的字段设成 null 表示清除。
    段内只有部分文字带某种字符样式（如加粗、颜色）时，整段设置那一项会被拒绝，只设其余字段。
 3. {"op":"insertParagraph","after":N,"text":"...","style":{...}} — 在第 N 段后插入。after=-1 插到文首。
 4. {"op":"insertTable","after":N,"rows":[["列1","列2"],["值1","值2"]],"headerRow":true} — 插入表格，rows 必须是等宽的二维数组。

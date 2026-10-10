@@ -212,6 +212,54 @@ describe("block-wide style writes", () => {
   });
 });
 
+describe("段落对话框补齐的字段（真实 schema）", () => {
+  it("右缩进与悬挂缩进写进段落，并能从 block.style 读回", () => {
+    const editor = harness([para([text("正文")])]);
+    const { exec } = applyStyles(editor, [
+      { index: 0, style: { indent: 21, indentRight: 21, indentFirst: -21 } },
+    ]);
+    expect(exec?.ok).toBe(true);
+    const p = editor.state.doc.firstChild!;
+    expect(p.attrs.indentRight).toBe(21);
+    // 负的 indentFirst 就是悬挂缩进，编辑器不做第二次单位换算
+    expect(p.attrs.indentFirst).toBe(-21);
+    expect(blocksOf(editor.state.doc)[0]!.style.indentRight).toBe(21);
+  });
+
+  it("分页开关与大纲级别活过 doc JSON 往返，false 不被当成未设置", () => {
+    const node = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: {
+        keepWithNext: true,
+        keepLines: true,
+        widowControl: false,
+        snapToGrid: false,
+        outlineLevel: 0,
+      },
+      content: [text("标题行")],
+    })!;
+    expect(node.attrs.widowControl).toBe(false);
+    expect(node.attrs.outlineLevel).toBe(0);
+    const again = schema.nodeFromJSON(node.toJSON())!;
+    expect(again.attrs).toEqual(node.attrs);
+    expect(() => again.check()).not.toThrow();
+  });
+
+  it("新建段落不带任何分页开关，套版不会凭空写出 w:keepNext", () => {
+    const p = schema.nodeFromJSON({ type: "paragraph", content: [text("普通段落")] })!;
+    for (const key of [
+      "keepWithNext",
+      "keepLines",
+      "widowControl",
+      "snapToGrid",
+      "outlineLevel",
+      "indentRight",
+    ]) {
+      expect(p.attrs[key]).toBeNull();
+    }
+  });
+});
+
 describe("automatic typesetting", () => {
   const mixedDocument = [
     heading(1, [text("一级标题")]),

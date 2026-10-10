@@ -33,8 +33,25 @@ export interface StylePatch {
   spacingBefore?: number | null;
   spacingAfter?: number | null;
   indent?: number | null;
+  /** 右缩进（Word 段落对话框的"右侧"），单位磅。 */
+  indentRight?: number | null;
   indentFirst?: number | null;
 }
+
+/**
+ * 段落级的数值格式键：单位一律磅（pt），docx-io 在进出口换算成 twips。
+ * 这条清单同时被 `parseStylePatch` 的取值校验和 `docBlocks` 的读写用，
+ * 加一个字段只改这里一次。
+ */
+export const PARAGRAPH_NUM_KEYS = [
+  "spacingBefore",
+  "spacingAfter",
+  "indent",
+  "indentRight",
+  "indentFirst",
+] as const;
+
+export type ParagraphNumKey = (typeof PARAGRAPH_NUM_KEYS)[number];
 
 export const STYLE_KEYS: readonly (keyof StylePatch)[] = [
   "headingLevel",
@@ -43,6 +60,7 @@ export const STYLE_KEYS: readonly (keyof StylePatch)[] = [
   "spacingBefore",
   "spacingAfter",
   "indent",
+  "indentRight",
   "indentFirst",
   "bold",
   "italic",
@@ -200,7 +218,7 @@ function str(v: unknown): string | null {
 
 const ALIGN = ["left", "center", "right", "justify"] as const;
 
-type NumStyleKey = "spacingBefore" | "spacingAfter" | "indent" | "indentFirst";
+type NumStyleKey = ParagraphNumKey;
 type StrStyleKey =
   | "fontSize"
   | "fontFamily"
@@ -256,7 +274,7 @@ export function parseStylePatch(raw: unknown): StylePatch | null {
 }
 
 function isNumStyleKey(k: keyof StylePatch): k is NumStyleKey {
-  return k === "spacingBefore" || k === "spacingAfter" || k === "indent" || k === "indentFirst";
+  return (PARAGRAPH_NUM_KEYS as readonly string[]).includes(k);
 }
 
 function isBoolStyleKey(k: keyof StylePatch): k is BoolStyleKey {
