@@ -5,6 +5,8 @@ import type {
   SectionGeometry,
   SectionLineNumbers,
   SectionPageBorders,
+  SectionWatermark,
+  WatermarkLayout,
 } from "@office-copilot/docx-io";
 import {
   BORDER_STYLE_OPTIONS,
@@ -22,6 +24,7 @@ import "../styles/pageBorders.css";
  *   - margins (top/right/bottom/left) and header/footer distances
  *   - columns (栏数 + 栏间距)
  *   - page borders (四条边的线型 / 线宽 / 间距 / 颜色) and line numbering
+ *   - watermark (文字 / 字体 / 字号 / 颜色 / 半透明 / 版式)
  *
  * On save we produce a complete SectionGeometry object in CSS px at
  * 96 DPI. The app applies it immediately by replacing the section
@@ -51,7 +54,7 @@ const BORDER_SIDES: readonly { key: BorderSideKey; label: string }[] = [
  * Page geometry in CSS px at 96 DPI. Shared with 美化排版 so a template's
  * margins produce exactly the object the 页面设置 dialog would have.
  *
- * @param extras 文档级设置里"这一层管不着"的那几项（分栏 / 页面边框 / 行号）。
+ * @param extras 文档级设置里"这一层管不着"的那几项（分栏 / 页面边框 / 行号 / 水印）。
  *   传 undefined 的字段表示这次保存不碰它——docx-io 会原样保留文件里的元素
  *   （AGENTS §2.7：模板只改页边距，不许顺手动用户的边框与行号）。
  */
@@ -61,7 +64,10 @@ export function geometryFor(
   margins: { top: number; right: number; bottom: number; left: number },
   header: number,
   footer: number,
-  extras?: Pick<SectionGeometry, "columns" | "pageBorders" | "lineNumbers">,
+  extras?: Pick<
+    SectionGeometry,
+    "columns" | "pageBorders" | "lineNumbers" | "watermark"
+  >,
 ): SectionGeometry {
   return {
     pageWidth,
@@ -77,6 +83,7 @@ export function geometryFor(
     columns: extras?.columns,
     pageBorders: extras?.pageBorders,
     lineNumbers: extras?.lineNumbers,
+    watermark: extras?.watermark,
   };
 }
 
@@ -139,6 +146,57 @@ export function lineNumbersFor(
   };
 }
 
+/** 对话框里水印区的一组控件值。 */
+export interface WatermarkForm {
+  enabled: boolean;
+  /** 水印文字，Word 的艺术字版式里唯一必填项。 */
+  text: string;
+  /** 中文字体名，直接进 `v:textpath` 的 `font-family`。 */
+  font: string;
+  /** 字号，pt；0 是 Word 的"自动"（`fitshape`），会写 `sizePt: null`。 */
+  sizePt: number;
+  /** `#rrggbb`，`type="color"` 保证不会是别的形状（§2.2）。 */
+  color: string;
+  semiTransparent: boolean;
+  layout: WatermarkLayout;
+}
+
+/** 文档里无水印时对话框显示的初值，与 Word 插入水印的缺省一致：灰、半透明、对角。 */
+const DEFAULT_WATERMARK_FORM: WatermarkForm = {
+  enabled: false,
+  text: "草稿",
+  font: "宋体",
+  sizePt: 0,
+  color: "#c0c0c0",
+  semiTransparent: true,
+  layout: "diagonal",
+};
+
+/**
+ * 把水印区收成要写进页眉部件的值。
+ *
+ * @param edited 用户在对话框里动过水印没有；语义同 `pageBordersFor`——
+ *   没动过返回 `undefined`，docx-io 会原样保留页眉里已有的艺术字形状。
+ * @param form 对话框里的那七个字段。
+ * @returns `undefined` 不碰，`null` 删掉水印，否则要写进 `v:shape` 的那份设置。
+ */
+export function watermarkFor(
+  edited: boolean,
+  form: WatermarkForm,
+): SectionWatermark | null | undefined {
+  if (!edited) return undefined;
+  const text = form.text.trim();
+  if (!form.enabled || !text) return null;
+  return {
+    text,
+    font: form.font.trim() || DEFAULT_WATERMARK_FORM.font,
+    sizePt: form.sizePt > 0 ? form.sizePt : null,
+    color: form.color,
+    semiTransparent: form.semiTransparent,
+    layout: form.layout,
+  };
+}
+
 const CM = 96 / 2.54;
 const pxToCm = (px: number) => Math.round((px / CM) * 100) / 100;
 const cmToPx = (cm: number) => Math.round(cm * CM * 10) / 10;
@@ -192,6 +250,8 @@ export function PageSetupDialog({
   const [lnStart, setLnStart] = useState(1);
   const [lnDistanceCm, setLnDistanceCm] = useState(DEFAULT_LN_DISTANCE_CM);
   const [lnEdited, setLnEdited] = useState(false);
+  const [wm, setWm] = useState<WatermarkForm>(DEFAULT_WATERMARK_FORM);
+  const [wmEdited, setWmEdited] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -227,15 +287,21 @@ export function PageSetupDialog({
     setColNum(g.columns?.count ?? 1);
     setColGapCm(g.columns ? pxToCm(g.columns.gap) : DEFAULT_COL_GAP_CM);
     setSourceColumns(g.columns ?? null);
-    // 边框与行号的"没碰过"状态用 edited 标记表示：只有用户真的改过才把值送进节属性，
+    // 边框、行号与水印的"没碰过"状态用 edited 标记表示：只有用户真的改过才把值送进节属性，
     // 否则交给 docx-io 原样保留文件里的元素（含我们没建模的 w:display / w:restart）。
     setBordersEdited(false);
     setLnEdited(false);
+    setWmEdited(false);
     setBorders(g.pageBorders ? { ...g.pageBorders } : emptyPageBorders());
     setLnEnabled((g.lineNumbers?.countBy ?? 0) > 0);
     setLnCountBy(g.lineNumbers?.countBy ?? 1);
     setLnStart(g.lineNumbers?.start ?? 1);
     setLnDistanceCm(pxToCm(g.lineNumbers?.distance ?? cmToPx(DEFAULT_LN_DISTANCE_CM)));
+    setWm(
+      g.watermark
+        ? { ...g.watermark, enabled: true, sizePt: g.watermark.sizePt ?? 0 }
+        : DEFAULT_WATERMARK_FORM,
+    );
   }, [open, section]);
 
   if (!open) return null;
@@ -287,6 +353,17 @@ export function PageSetupDialog({
     });
   };
 
+  /**
+   * 改水印区的一个字段。
+   *
+   * @param patch 要覆盖的字段。同时置上 edited——"没碰过"（保留原样）与
+   *   "碰过但清空"（删掉）就靠它区分。
+   */
+  const patchWm = (patch: Partial<WatermarkForm>) => {
+    setWmEdited(true);
+    setWm((prev) => ({ ...prev, ...patch }));
+  };
+
   const apply = () => {
     onApply(
       geometryFor(
@@ -309,6 +386,7 @@ export function PageSetupDialog({
             start: lnStart,
             distancePx: cmToPx(lnDistanceCm),
           }),
+          watermark: watermarkFor(wmEdited, wm),
         },
       ),
     );
@@ -587,6 +665,87 @@ export function PageSetupDialog({
                 }}
               />
             </label>
+          </div>
+          <div className="ps-section-title">水印</div>
+          <div className="ps-grid">
+            <label>
+              启用水印
+              <input
+                type="checkbox"
+                checked={wm.enabled}
+                onChange={(e) => patchWm({ enabled: e.target.checked })}
+              />
+            </label>
+            <label>
+              半透明
+              <input
+                type="checkbox"
+                checked={wm.semiTransparent}
+                disabled={!wm.enabled}
+                onChange={(e) => patchWm({ semiTransparent: e.target.checked })}
+              />
+            </label>
+            <label>
+              文字
+              <input
+                type="text"
+                value={wm.text}
+                disabled={!wm.enabled}
+                onChange={(e) => patchWm({ text: e.target.value })}
+              />
+            </label>
+            <label>
+              字体
+              <input
+                type="text"
+                value={wm.font}
+                disabled={!wm.enabled}
+                onChange={(e) => patchWm({ font: e.target.value })}
+              />
+            </label>
+            <label>
+              字号 (pt，0 为自动)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                value={wm.sizePt}
+                disabled={!wm.enabled}
+                onChange={(e) =>
+                  patchWm({ sizePt: Math.max(0, Number(e.target.value) || 0) })
+                }
+              />
+            </label>
+            <label>
+              颜色
+              <input
+                type="color"
+                value={wm.color}
+                disabled={!wm.enabled}
+                onChange={(e) => patchWm({ color: e.target.value })}
+              />
+            </label>
+          </div>
+          <div className="ps-row">
+            <label>版式</label>
+            <div className="ps-seg">
+              <button
+                type="button"
+                className={wm.layout === "diagonal" ? "active" : ""}
+                disabled={!wm.enabled}
+                onClick={() => patchWm({ layout: "diagonal" })}
+              >
+                对角
+              </button>
+              <button
+                type="button"
+                className={wm.layout === "horizontal" ? "active" : ""}
+                disabled={!wm.enabled}
+                onClick={() => patchWm({ layout: "horizontal" })}
+              >
+                横向
+              </button>
+            </div>
           </div>
           <div className="ps-hint">
             当前正文区域 ≈ {bodyWidthCm.toFixed(2)} cm × {bodyHeightCm.toFixed(2)} cm

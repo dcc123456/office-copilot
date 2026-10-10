@@ -700,11 +700,12 @@ export function App() {
               },
               base.header,
               base.footer,
-              // 模板只改页边距，分栏、页面边框与行号属于用户自己的版式，原样带过去（AGENTS §2.7）。
+              // 模板只改页边距，分栏、页面边框、行号与水印属于用户自己的版式，原样带过去（AGENTS §2.7）。
               {
                 columns: section?.columns,
                 pageBorders: section?.pageBorders,
                 lineNumbers: section?.lineNumbers,
+                watermark: section?.watermark,
               },
             ),
           );
