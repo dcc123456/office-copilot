@@ -108,28 +108,46 @@ const ROLE_ORDER: readonly TemplateRole[] = [
   "body",
 ];
 
-/**
- * The document's own title: the first level-1 heading. Templates give it a
- * larger, centred treatment and use `h1` for the sections beneath it.
- */
-function titleIndex(blocks: readonly Block[]): number {
-  for (const b of blocks) {
-    if (b.type === "heading" && Number(b.style.headingLevel ?? 1) === 1) return b.index;
-  }
-  return -1;
+/** 标题归属：哪个块拿模板的 title 待遇，哪些封面行原样不动。 */
+interface TitleSlot {
+  title: number;
+  /** 保持作者原版式的封面行索引。 */
+  skip: readonly number[];
 }
 
-/** The document's first level-1 heading text — templates that print a page
- *  header use it as the running title. */
+const NO_TITLE: TitleSlot = { title: -1, skip: [] };
+
+/**
+ * 文档开头的连续居中段落构成封面带：第一行就是标题，其余（副标题、许可、联系方式）
+ * 没有对应角色，硬塞成正文会把作者排好的版式改小、加缩进。带里没有居中标题时才沿用
+ * 老规则（第一个一级标题当标题），所以遇到一级标题就收带，免得它的同级被区别对待。
+ */
+function titleSlot(blocks: readonly Block[]): TitleSlot {
+  const band: number[] = [];
+  for (const b of blocks) {
+    if (!b.text.trim()) continue;
+    if (b.type !== "paragraph" || b.style.align !== "center") break;
+    band.push(b.index);
+  }
+  if (band.length) return { title: band[0]!, skip: band.slice(1) };
+  const first = blocks.find(
+    (b) => b.type === "heading" && Number(b.style.headingLevel ?? 1) === 1,
+  );
+  return first ? { title: first.index, skip: [] } : NO_TITLE;
+}
+
+/** 取文档标题文字，供带页眉的模板当页眉内容；判不出标题时返回空串。 */
 export function documentTitle(editor: Editor): string {
   const blocks = blocksOf(editor.state.doc);
-  const i = titleIndex(blocks);
+  const i = titleSlot(blocks).title;
   return blocks.find((b) => b.index === i)?.text.trim() ?? "";
 }
 
-function roleOf(b: Block, title: number): TemplateRole | null {
+/** 块对应的模板角色；封面带里除标题以外的行返回 null，即不产生任何 op。 */
+function roleOf(b: Block, slot: TitleSlot): TemplateRole | null {
+  if (slot.skip.includes(b.index)) return null;
+  if (b.index === slot.title) return "title";
   if (b.type === "heading") {
-    if (b.index === title) return "title";
     const level = Number(b.style.headingLevel ?? 1);
     if (level >= 6) return "h6";
     if (level >= 5) return "h5";
@@ -158,11 +176,11 @@ function pruneForBlock(patch: StylePatch, mixed: Block["mixed"]): StylePatch {
 export function templateProposal(t: DocTemplate, blocks: readonly Block[]): Proposal {
   const ops: Proposal["ops"] = [];
   const counts = new Map<TemplateRole, number>();
-  const title = titleIndex(blocks);
+  const slot = titleSlot(blocks);
   const roles = completeRoles(t);
 
   for (const b of blocks) {
-    const role = roleOf(b, title);
+    const role = roleOf(b, slot);
     if (!role) continue;
     const want = roles[role];
     if (!want || !b.text.trim()) continue;

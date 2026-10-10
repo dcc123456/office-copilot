@@ -52,6 +52,23 @@ function fixture(): Block[] {
   ];
 }
 
+/**
+ * A 宣传页/封面件: the title is a centred paragraph and the level-1 headings
+ * are sections — the shape that used to get the first section centred above a
+ * shrunken title.
+ */
+function coverFixture(): Block[] {
+  return [
+    para(0, "Browser Copilot", { align: "center", fontSize: "28px", bold: true }),
+    para(1, "会替你操作网页的 AI 助手", { align: "center", fontSize: "20px" }),
+    para(2, "源码公开 · 非商业许可", { align: "center", fontSize: "14px" }),
+    heading(3, "一、项目简介", 1),
+    para(4, "正文一。"),
+    heading(5, "二、项目目标", 1),
+    para(6, "正文二。"),
+  ];
+}
+
 const NON_TEXTUAL = [11, 12];
 const ALL_ROLES: TemplateRole[] = ["title", "h1", "h2", "h3", "h4", "h5", "h6", "body"];
 
@@ -111,6 +128,27 @@ describe("templateProposal", () => {
       expect(plan.after.map((b) => b.style.headingLevel)).toEqual(
         blocks.map((b) => b.style.headingLevel),
       );
+    }
+  });
+
+  it("treats a centred cover band as front matter, not as 正文", () => {
+    for (const t of TEMPLATES) {
+      const blocks = coverFixture();
+      const plan = planEdit(blocks, templateProposal(t, blocks));
+      expect(plan.ok, t.id).toBe(true);
+      const after = plan.after;
+      // The opening line is the title, at the template's own title size.
+      expect(after[0]!.style.align, t.id).toBe("center");
+      expect(after[0]!.style.fontSize, t.id).toBe(completeRoles(t).title.fontSize);
+      // The rest of the band keeps what the author set.
+      expect(after[1]!.style, t.id).toEqual(blocks[1]!.style);
+      expect(after[2]!.style, t.id).toEqual(blocks[2]!.style);
+      // Two section headings of the same level end up the same way — the
+      // complaint was one centred and one left.
+      expect(after[3]!.style.align, t.id).toBe(after[5]!.style.align);
+      // And the title stays put on the next pass instead of jumping onto the
+      // first section heading.
+      expect(templateProposal(t, after).ops, `${t.id}: 二次应用`).toEqual([]);
     }
   });
 

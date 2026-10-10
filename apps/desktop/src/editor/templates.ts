@@ -494,7 +494,7 @@ export const TEMPLATES: readonly DocTemplate[] = [
         fontSize: px(XIAO_SAN),
         color: TEAL,
         bold: true,
-        align: "left",
+        align: "center",
         lineHeight: "1.35",
         indentFirst: 0,
         spacingBefore: 0,
@@ -768,7 +768,7 @@ export const TEMPLATES: readonly DocTemplate[] = [
   {
     id: "minutes",
     label: "会议纪要",
-    hint: "纪要/周报 · 左对齐标题、紧凑段距",
+    hint: "纪要/周报 · 标题居中、紧凑段距",
     swatch: "#455a64",
     spec: "微软雅黑 五号 · 1.5 倍 · 灰蓝标题 · 四边 20",
     roles: {
@@ -777,7 +777,7 @@ export const TEMPLATES: readonly DocTemplate[] = [
         fontSize: px(XIAO_SAN),
         color: SLATE,
         bold: true,
-        align: "left",
+        align: "center",
         lineHeight: "1.5",
         indentFirst: 0,
         spacingBefore: 0,
