@@ -510,6 +510,35 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 - **接受 / 拒绝按整个文档的修订区间生效**：一次修订可能被 Word 按段落拆开，只处理选区那一段的话，
   接受完还剩半条。选区没碰到任何修订时命令返回 `false`，菜单据此置灰。
 
+⑤ 的判据（侧栏一片，实现时定下来的）：
+
+- **`w:author` 取设置里的作者名，留空兜底成 `Office Copilot`**：规范里 `w:author` 是**必填**属性
+  （见上面 `CT_Comment` 那条），不写就是 Word 判定文档损坏的红线，所以"文档没写作者就不编"那条
+  只对**读侧透传**成立；我们**新造**的条目必须有值。署名每次新建时现读 `getSettings()`，
+  改完名字不用重启、不用重开文档，下一条批注就跟着变。
+- **`w:date` 按规范到秒、带 `Z`，不带小数秒**：`ST_Datetime` 允许两种写法，Word 自己写的是
+  `2026-01-02T10:30:00Z`，取观测到的这一种；`commentStamp()` 用 `toISOString().slice(0,19)+"Z"`
+  而不是整串（小数秒会让 Word 侧栏的时间戳显示成"未知"，至少没有官方说明支持它）。
+- **id 只在批注内部取最大值 +1**（`nextCommentId`）：注解 id 虽然是文档级共享编号空间（见上面那条），
+  但"批注与书签的编号是否必须互不重复"**无官方说明**，所以按 Word 实际写出的文件一样各部件各算各的。
+  这是**推断**，不是实测。
+- **右键菜单里"新建批注"按选区置灰，不做成"光标也能批"**：Word 的"新建批注"没选区时会锚到当前字，
+  我们的锚点建模是 `start`/`end` 两个区间端点，空区间的语义在编辑器里没有可见呈现（画出来是
+  〔〕挨在一起），与其给一个看不见的锚点，不如把命令按住并要求选区，判据与菜单里其它"不可用看得见"
+  的条目一致。
+- **删掉聚焦行以后接着聚焦相邻那条**：侧栏的"删除批注"只出现在聚焦行的编辑器下方，
+  删完不留下一条就等于把这条命令一起删了（第一次实测就是这么坏的：删掉最后一条以后
+  `AFTER_DELETE_ALL={rows:1,chips:3}`，用户再也点不到删除）。Word 删批注后同样把焦点落到邻近条。
+- **最后一条批注删光时连 `word/comments.xml` 一起摘掉**：只"不写部件"会把旧字节留包里，
+  Word 把已删的批注重新显示出来；空的 `<w:comments>` 又会让 Word 以为文档有批注区。
+  所以按 Word 的做法三处一起清（部件文件、`[Content_Types].xml` 的 Override、文档关系），
+  包里本来没这个部件时直接返回，避免无批注文档被反复改写 rels 字节。
+- **侧栏只做装配，判据在引擎层**（§3.3）：`src/editor/comments.ts` 出 `insertCommentOnSelection` /
+  `deleteCommentById` / `commentStamp`，拒绝只回错误码（`no-selection`），中文提示在渲染层组装（§5.7）；
+  `CommentPane.tsx` 不含任何 id 分配或写回判定。新建条目要的空正文与第一条预览文字都复用现成实现
+  （`emptyPmDoc` 从 docx-io 包口出去、`bodyPreview` 加在 `docBlocks.ts` 里给脚注与批注两个窗格共用），
+  不再各写一份（§3.1/§3.2）。
+
 提交切分（实现顺序，逐条落地后回填提交号）：
 
 | # | 内容 | 提交 |
@@ -519,7 +548,7 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 | ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读成一个 `revision` 标记、写回按修订区间合并成单元素；段落标记的增删仍靠 `rawPpr` | `5197192` |
 | ④a | desktop：标记注册进 `EDITOR_EXTENSIONS`（插入下划线 / 删除删除线 + 作者与时间）+ 接受 / 拒绝命令 | `bee11e4` |
 | ④b | desktop：接受 / 拒绝的右键菜单入口 | `ced2499` |
-| ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
+| ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | `3a0a771` `9dafc61` `1588561` `aa589be` |
 | ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
 
 ③④a 的实测（同一套 CDP 探针，独立 `--user-data-dir`）：一份含一次插入（内部两个 run，一个带 `w:b`）
@@ -1063,6 +1092,64 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   "距正文"是 `w:hSpace`，源文档里的值现在靠 `rawPpr` 逐字保住，但编辑器还不写它；
   ③ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定）。
 - 提交：`2cfe911` + `d30939a` 已推送，`git ls-remote origin main` = `d30939a2606545f5e9d298e2e11d0b67c4857cbe`。
+
+### 8.9 排名 4 ⑤（批注侧栏 UI）验收记录（`3a0a771` `9dafc61` `1588561` `aa589be`）
+
+- 往返用例：`packages/docx-io/src/docx.test.ts` 新增 1 条——`最后一条批注也删掉时，部件连同
+  Override 与关系一起摘掉`（断言 `word/comments.xml` 为 `null`、`[Content_Types].xml` 里既没有
+  `/word/comments.xml` 也没有 `comments+xml`、`word/_rels/document.xml.rels` 不再含
+  `relationships/comments`）。⑤ 之前的部件读回、逐字节透传、二次保存稳定、删一条不牵动另一条等
+  用例是 ① 那一片铺的，这次全部保持绿。
+- live 用例（§5.3：三个批注锚点节点在 ② 已注册进 `EDITOR_EXTENSIONS`，⑤ 补的是命令层）：
+  `docBlocks.live.test.ts` 新增 8 条——真实 schema 下 `insertCommentRange` 按 `id` 把
+  `commentRangeStart/End/Reference` 包住选区、跨段选区、选中整段、光标压到块边界时钳到上一段末尾、
+  `deleteComment` 一次清掉三个锚点、缺节点时的兜底。
+- 引擎层单测：`apps/desktop/src/editor/comments.test.ts`（新）5 条——id 从 `["0","2"]` 分出 `"3"`、
+  署名 `undefined`/`""`/`"   "` 三种都兜底成 `Office Copilot`、没选区时回
+  `{ok:false,reason:"no-selection"}` 且**不动锚点**、删除按 id 过滤（锚点已先没了也照样过滤）、
+  `commentStamp` 到秒带 `Z`。`contextMenu.test.ts` +1 条："新建批注"在有选区时可用、
+  `hasSelection:false` 时置灰。
+- 局部格式：不涉及——批注锚点是 inline 原子节点，不碰 `w:rPr`，没有"部分文字带不同格式被拍平"的风险
+  （§2.3）。
+- 撤销：不涉及——新增/删除批注是编辑器事务，走 PM 自己的 undo 栈；没有新增 CoreOp，
+  保存仍走 `.tmp` → `rename`（§2.4）。**注意**：`userData/modlog` 不会记批注的新删（它只记 AI/格式 op）。
+- 单位与颜色：不涉及（不产生长度、颜色属性，§2.1/§2.2 无新换算点）。
+- 复用（§3.1/§3.2）：`emptyPmDoc` 从 `docx-io` 包口出去给两个窗格共用；`bodyPreview` 加在
+  `docBlocks.ts` 里，`FootnotePane.tsx` 删掉自己那份 `previewOf` 与 `EMPTY_BODY`；
+  增删判据落 `src/editor/comments.ts`，组件只做装配。无新增平行实现、无新增依赖。
+- 类型 + 测试：`pnpm build` EXIT=0（`grep -c "error TS"` = 0）；`pnpm test` EXIT=0，逐包 docx-io **272**
+  （6 个文件，+1）/ desktop **312**（28 个文件，+14：live 8 + `comments.test.ts` 5 + `contextMenu.test.ts` 1）/
+  word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针（`tmp/comment-app-probe.mjs`，独立 `--user-data-dir` + CDP，一份**没有**批注部件的
+  `.docx`）实跑读回的数——设置里写 `authorName:"测试署名"` 后回读一致；双击第一段选中"有"→
+  右键"新建批注" `disabled:false` → 侧栏 1 行、序号 `1`、meta `测试署名 · 2026-10-10 22:18`、
+  锚点芯片 `["start:0","end:0","reference:0"]`；嵌套编辑器里打"这句要改口径。"，行内预览同步显示；
+  保存后包里凭空长出 `word/comments.xml`，条目是
+  `<w:comment w:id="0" w:author="测试署名" w:date="2026-10-10T22:18:34Z">`，正文里
+  `<w:commentRangeStart w:id="0"/><w:r><w:t xml:space="preserve">有</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/>`，
+  Content_Types 与关系各登记 1 次。第二条用 Range 量出的坐标拖选"第一段里"→ 新建后侧栏
+  `numbers:["1","2"]`、`ANCHOR_IDS` 是 `w:id="1",w:id="0"`（按正文区间顺序排）。点行"跳到锚点"
+  选区回到"第一段里"。删一条 → 部件里只剩另一条；把最后一条也删掉 →
+  `AFTER_DELETE_ALL={rows:0,chips:0}`、`PARTS4` 里没有 `word/comments.xml`、
+  `CT_HAS_COMMENTS4=false`、`RELS_HAS_COMMENTS4=false`，正文
+  `第一段里有一句可以拿来批注的文字。第二段。另一句可以批注的话。` 一字不缺；再存一次
+  `STABLE_RELS=true`、`STILL_NO_PART=true`（不会反复改写 rels，也不会又长出部件）。
+  两处**日志假阴性**要记下来免得下次误判：`TEXT_KEPT=false` 与 `DOC_AFTER_DELETE=false` 都不丢字——
+  锚点芯片在 DOM 里就是字面的〔〕批，`textContent.includes(整句)` 必然匹配不上，
+  去掉标签与空白后的 `TEXT_AFTER_ALL` 才是判据。
+- 探针改出来的两个缺陷（都已修，写在这里防止回退）：① 第二次"新建批注"没反应，实测是双击没产生
+  选区、菜单按判据正确置灰，探针改成 Range 拖选后正常；② 删光批注以后 `word/comments.xml` 仍带条目
+  （`syncCommentIds` 已经把 model 清空，但 `serializeCommentsPart` 返回空串时旧字节原样留在包里），
+  即 `1588561` 那片修复。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。`w:comments` 的部件注册、`w:author` 必填、
+  `w:date` 形态按 ECMA-376 与 Open-XML-SDK 部件清单推断 + 与 Word 写出样例对比，不是本机实测。
+- 遗留（写清楚，不算本片做完）：① 编辑器只画区间端点与"批"字芯片，没有 Word 那种区间高亮与编号；
+  ② `w15:commentEx`（已解决状态）与 `w15:people` 不生成（读到的靠透传带走），侧栏也就没有"解决/恢复"；
+  ③ 部件被标成 `isUnmodeled` 时（认不出的批注形状）`writeCommentPart` 直接短路，侧栏的改动不会落盘——
+  这条在 ① 的判据里是刻意的，但没有 UI 提示；④ 批注的新删不进 `modlog`（见上面撤销那条）；
+  ⑤ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定）。
+- 提交：`3a0a771` + `9dafc61` + `1588561` + `aa589be` 已推送，
+  `git ls-remote origin main` = `aa589be6081797196d42189391e86bb4d3123213`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
