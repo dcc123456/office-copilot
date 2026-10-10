@@ -1,23 +1,51 @@
 # Office 智能助手
 
-两种形态，同一套 LLM 工具定义：
+三种形态，同一套 LLM 工具定义：
 
-1. **CLI（推荐，Word 和 WPS 都适用）** —— `oc` 命令直接修改 `.docx` 文件，无需 Office 宿主，输出文件用 Word / WPS / Pages / LibreOffice 都能打开。
-2. **Word 任务窗格加载项** —— 在 Word 桌面版/网页版里用自然语言改当前文档（需要 Microsoft Word）。
+1. **桌面 app（功能最全）** —— Electron + Tiptap 编辑器，AI 直接改当前文档并留可撤销的修改历史，见「桌面应用」。
+2. **CLI（最省事，Word 和 WPS 都适用）** —— `oc` 命令直接修改 `.docx` 文件，无需 Office 宿主，输出文件用 Word / WPS / Pages / LibreOffice 都能打开。
+3. **Word 任务窗格加载项** —— 在 Word 桌面版/网页版里用自然语言改当前文档（需要 Microsoft Word）。
+
+> 给 AI 代理看的改代码规范（提交格式、领域不变量、收尾自检）在仓库根目录的 **`AGENTS.md`**。
 
 ```
 office-copilot/
 ├─ apps/
+│  ├─ desktop/       # Electron 桌面 app：Tiptap 编辑器 + AI 直接改 .docx（功能最全）
 │  ├─ cli/           # 命令行工具（Node，跨 Office/WPS）
 │  ├─ task-pane/     # Office 加载项前端（React + Vite + Fluent UI）
 │  └─ server/        # Node/Express：加载项用的 LLM 网关 + 版本历史
 ├─ packages/
-│  ├─ docx-io/       # 直接读写 .docx（JSZip + OOXML），CLI 用
+│  ├─ docx-io/       # 直接读写 .docx（JSZip + OOXML），CLI 与桌面端共用
 │  ├─ word-client/   # Office.js Word API 原子操作封装，加载项用
 │  ├─ word-tools/    # 暴露给 LLM 的工具定义 + zod 校验（共享）
 │  └─ shared/        # 跨端类型与协议
-└─ manifest/manifest.xml   # 仅加载项需要
+├─ manifest/manifest.xml   # 仅加载项需要
+├─ bin/              # oc / ocw 入口、AI改文档.app 等 macOS 集成
+└─ AGENTS.md         # AI 代理改代码规范（提交格式、领域不变量、收尾自检）
 ```
+
+依赖方向是单向的：`apps/*` 依赖 `packages/*`，`packages` 之间不互相依赖业务逻辑；
+单位换算（px / 半磅 / twips）与颜色归一化只在 `packages/docx-io` 的进出口发生。
+
+---
+
+## 零、最快上手（三选一）
+
+```bash
+pnpm install                       # 装依赖（原生构建默认跳过 keytar / msal，见「已知边界」）
+
+pnpm --filter @office-copilot/cli build   # 形态 2：命令行
+cd apps/cli && pnpm link --global && cd - # 之后可直接用 oc / ocw（可选）
+
+pnpm dev:desktop                    # 形态 1：桌面 app（开发模式）
+pnpm --filter @office-copilot/desktop pack:mac   # 打成 .dmg（产物在 apps/desktop/release/，不入库）
+
+pnpm dev                            # 形态 3：任务窗格 + 后端（需要在 Word 里 sideload，见第二节）
+```
+
+三种形态都用同一份 `.env`（`cp .env.example .env`，填 `LLM_API_KEY`）。要用 `oc ai` / 桌面 AI 面板 /
+任务窗格任一自然语言入口，都必须先配好这个 Key；纯命令行改文档（`oc replace` 等）不需要网络也不需要 Key。
 
 ---
 
@@ -264,7 +292,7 @@ pnpm sideload
   - `error` / `done`
 - `GET /api/history/:sessionId`：当前会话的历史记录
 
-## 桌面应用（apps/desktop）：AI 直接改文档
+## 三、桌面应用（apps/desktop）：AI 直接改文档
 
 桌面端不再只让 AI 输出文字由你粘贴，而是由模型给出**结构化修改方案**，再按你选的模式决定要不要直接写进文档。
 
@@ -298,15 +326,21 @@ pnpm --filter @office-copilot/desktop build    # renderer + main + preload
 ## 测试
 
 ```bash
-pnpm test
+pnpm test      # 逐包跑 vitest
+pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-包含：
+当前各包通过数（2026-10-10 实测）：`docx-io` 84、`desktop` 94、`word-client` 8、`word-tools` 6、`server` 2。
 
-- `word-tools`：5 个 zod schema 校验用例
+- `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
+- `docx-io`：84 个用例，覆盖 OOXML 读入 / 写出往返、单位与颜色换算
 - `server`：mock `fetch`，验证 tool-calling 循环产出提案 / 纯聊天状态
-- `desktop`：88 个用例（`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入：局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里））
+- `desktop`：94 个用例（`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入：局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里））
+
+> 注意：根 `pnpm test` 是 `pnpm -r` + `passWithNoTests: true`，**某个包一个用例都没有也是全绿**
+> （`apps/cli`、`packages/shared` 目前没有测试文件）。验收时按上面的逐包通过数核对，别只看总退出码；
+> 也不要把 `pnpm test` 用管道接 `tail`（退出码会变成 `tail` 的）。
 
 ## 联调建议（首次验收脚本）
 
@@ -322,6 +356,11 @@ pnpm test
 
 ## 已知边界 & 下一阶段
 
+- **原生模块不构建**：`pnpm-workspace.yaml` 把 `keytar`、`@azure/msal-node-extensions`、
+  `@microsoft/m365agentstoolkit-cli` 的构建脚本设为跳过（`allowBuilds: false`），这样 `pnpm install`
+  不需要 Xcode 工具链、`pnpm dev` 能直接跑起来。代价是加载项里依赖系统钥匙串鉴权的分支可能不可用；
+  真遇到再把这些项改回 `true` 重新 `pnpm install`。
+
 - **regex 替换**：未支持，需要在客户端做字面量探测。
 - **重度 PDF 编辑**：下一阶段会走 LibreOffice headless 把 PDF 转 .docx，在 Word 里编辑后再导回；复杂排版评估商业 SDK（Aspose / PDFTron）。
 - **Excel / PPT**：新增 `packages/excel-client`、`packages/ppt-client`，复用 server 的 tool-calling 循环。
@@ -334,3 +373,15 @@ pnpm test
 - 发给 LLM 的文档内容默认截断（前 200 段，每段最多 120 字；选区最多 1000 字）。UI 可加显式开关控制是否发送全文。
 - 图片走前端 `FileReader → Base64`，不经后端。
 - `.env`、`certs/`、`apps/server/data/*.sqlite` 均已在 `.gitignore`。
+
+---
+
+## 四、仓库与协作约定
+
+- 远端：`git@github.com:dcc123456/office-copilot.git`（`main`）。改动完成即提交并推送，不在本地堆积。
+- **不入库的东西**：`node_modules`、`dist`、`apps/desktop/release/`（`.dmg` / `.app` 构建产物，单个可达
+  数百 MB）、`certs/**`（除 `.gitkeep`）、`.env`、`apps/server/data/*.sqlite`。
+- 提交信息：描述部分用中文，格式 `<type>(<scope>): <做了什么 + 为什么>`；一个提交只做一件事。
+- AI 代理与人类同样受 **`AGENTS.md`** 约束，尤其是第 2 节「领域不变量」（单位/颜色换算只在
+  `packages/docx-io`、局部格式不许被拍平、写入原子且可撤销）。收尾自检要求逐包核对测试结果，
+  并注意根 `pnpm test` 对"某包没有测试用例"也是全绿。
