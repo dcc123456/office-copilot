@@ -525,6 +525,35 @@ describe("block snapshots stay consistent with the document", () => {
   });
 });
 
+describe("书签锚点（真实 schema）", () => {
+  const start = (id: string, name: string) => ({ type: "bookmarkStart", attrs: { id, name } });
+  const end = (id: string) => ({ type: "bookmarkEnd", attrs: { id } });
+
+  it("id 与 name 活过 doc JSON，且不占段落文字", () => {
+    const editor = harness([para([start("7", "_Toc9"), text("第一章"), end("7")]), para([text("正文")])]);
+    const doc = editor.state.doc;
+    // 书签是区间标记不是内容：多算一个字符就会让 AI 的改动块定位错位。
+    expect(doc.textContent).toBe("第一章正文");
+    expect(blocksOf(doc).map((b) => b.text)).toEqual(["第一章", "正文"]);
+    const anchor = doc.firstChild!.child(0);
+    expect(anchor.type.name).toBe("bookmarkStart");
+    expect(anchor.attrs).toMatchObject({ id: "7", name: "_Toc9" });
+  });
+
+  it("跨段配对：起点在上段、终点在下段都照样留在树里", () => {
+    const doc = harness([para([start("0", "span"), text("上")]), para([text("下"), end("0")])]).state.doc;
+    const json = doc.toJSON() as { content?: { content?: { type: string }[] }[] };
+    expect(json.content?.[0]?.content?.[0]?.type).toBe("bookmarkStart");
+    expect(json.content?.[1]?.content?.at(-1)?.type).toBe("bookmarkEnd");
+  });
+
+  it("只装着书签的段落不会塌成空段", () => {
+    const doc = harness([para([start("1", "only"), end("1")]), para([text("正文")])]).state.doc;
+    expect(doc.childCount).toBe(2);
+    expect(doc.firstChild!.childCount).toBe(2);
+  });
+});
+
 describe("超链接与正文色", () => {
   const GONGWEN = templateById("gongwen")!;
   const linkMark = {

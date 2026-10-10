@@ -15,6 +15,7 @@ import { PagedLayout } from "./PagedLayout.js";
 import { FloatingImageDrag } from "./FloatingImageDrag.js";
 import { FloatBox, FloatGroup, FloatingTextLayout } from "./FloatingTextBox.js";
 import { Field } from "./Field.js";
+import { BookmarkEnd, BookmarkStart } from "./Bookmark.js";
 import { ParagraphFormatting } from "./ParagraphFormatting.js";
 import { TableColumnResize } from "./TableColumnResize.js";
 import { FormatPainter } from "./FormatPainter.js";
@@ -37,6 +38,8 @@ export const EDITOR_EXTENSIONS: Extensions = [
   FloatBox,
   FloatingTextLayout,
   Field,
+  BookmarkStart,
+  BookmarkEnd,
   ParagraphFormatting,
   TableColumnResize,
   FormatPainter,

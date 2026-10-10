@@ -981,6 +981,98 @@ describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
   });
 });
 
+describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {
+  /** 一段里夹一个起点、下一段收尾：正是 ECMA-376 §17.5.2.1 例子那种跨段书签。 */
+  const SPANNING = bodyXml(
+    `<w:p><w:r><w:t>前半</w:t></w:r><w:bookmarkStart w:id="0" w:name="testing123"/><w:r><w:t>后半</w:t></w:r></w:p>`,
+    `<w:p><w:r><w:t>下段</w:t></w:r><w:bookmarkEnd w:id="0"/></w:p>`,
+  );
+
+  it("reads bookmarks as inline nodes in document order", () => {
+    const pm = ooxmlToPm(SPANNING);
+    const first = pm.content[0]!;
+    expect(first.content?.map((n) => n.type)).toEqual([
+      "text",
+      "bookmarkStart",
+      "text",
+    ]);
+    expect(first.content?.[1]).toEqual({
+      type: "bookmarkStart",
+      attrs: { id: "0", name: "testing123" },
+    });
+    expect(pm.content[1]!.content?.[1]).toEqual({
+      type: "bookmarkEnd",
+      attrs: { id: "0" },
+    });
+  });
+
+  it("writes bookmarks as direct children of w:p, never inside w:r", () => {
+    const xml = pmToOoxml(ooxmlToPm(SPANNING));
+    expect(xml).toContain(
+      `<w:t xml:space="preserve">前半</w:t></w:r><w:bookmarkStart w:id="0" w:name="testing123"/><w:r>`,
+    );
+    expect(xml).toContain(`<w:bookmarkEnd w:id="0"/></w:p>`);
+  });
+
+  it("is idempotent — 书签不参与文字，两次写出一致", () => {
+    const once = pmToOoxml(ooxmlToPm(SPANNING));
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  it("drops a bookmark whose other half the editor deleted", () => {
+    // 起点在、终点被删：写出去就是 non-conformant 的文档，整对不写。
+    const orphanStart = bodyXml(
+      `<w:p><w:r><w:t>x</w:t></w:r><w:bookmarkStart w:id="7" w:name="gone"/></w:p>`,
+    );
+    const xml = pmToOoxml(ooxmlToPm(orphanStart));
+    expect(xml).not.toContain("bookmark");
+    // 只剩终点（起点在别的段落被删）同样不写。
+    const orphanEnd = bodyXml(`<w:p><w:r><w:t>y</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>`);
+    expect(pmToOoxml(ooxmlToPm(orphanEnd))).not.toContain("bookmarkEnd");
+  });
+
+  it("keeps bookmarks that live inside a heading paragraph", () => {
+    // 目录的 _Toc 书签就挂在标题段里，标题丢了引用目录就没了锚点。
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="2" w:name="_Toc5"/><w:r><w:t>标题</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p>`,
+      ),
+    );
+    const h = pm.content[0]!;
+    expect(h.type).toBe("heading");
+    expect(h.content?.map((n) => n.type)).toEqual(["bookmarkStart", "text", "bookmarkEnd"]);
+    const xml = pmToOoxml(pm);
+    expect(xml).toContain(`<w:bookmarkStart w:id="2" w:name="_Toc5"/>`);
+    expect(xml).toContain(`<w:bookmarkEnd w:id="2"/>`);
+  });
+
+  it("escapes a bookmark name that carries markup", () => {
+    const pm: PMDoc = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "bookmarkStart", attrs: { id: "1", name: `a<b&"c` } },
+            { type: "text", text: "x" },
+            { type: "bookmarkEnd", attrs: { id: "1" } },
+          ],
+        },
+      ],
+    };
+    expect(pmToOoxml(pm)).toContain(`<w:bookmarkStart w:id="1" w:name="a&lt;b&amp;&quot;c"/>`);
+  });
+
+  it("ignores a bookmark id that is not a number — 读不懂就不建模", () => {
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:bookmarkStart w:id="abc" w:name="odd"/><w:r><w:t>x</w:t></w:r><w:bookmarkEnd w:id="abc"/></w:p>`,
+      ),
+    );
+    expect(pm.content[0]!.content?.map((n) => n.type)).toEqual(["text"]);
+  });
+});
+
 describe("DocxFile toProseMirror / replaceProseMirror", () => {
   it("round-trips a minimal docx via zip", async () => {
     const zip = new JSZip();

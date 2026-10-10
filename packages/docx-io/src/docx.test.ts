@@ -230,6 +230,18 @@ describe("DocxFile", () => {
     expect(twice).toBe(once);
   });
 
+  it("keeps a bookmark that spans two paragraphs through a real save", async () => {
+    // 目录与交叉引用都靠书签定位（排名 3 的前提），所以这一对必须经
+    // fromBytes → toProseMirror → replaceProseMirror → toBytes 整条路原样回来。
+    const { once, twice } = await saveTwice([
+      `<w:p><w:r><w:t>第一章</w:t></w:r><w:bookmarkStart w:id="0" w:name="_Toc1"/></w:p>`,
+      `<w:p><w:bookmarkEnd w:id="0"/><w:r><w:t>正文</w:t></w:r></w:p>`,
+    ]);
+    expect(once).toContain(`<w:bookmarkStart w:id="0" w:name="_Toc1"/>`);
+    expect(once).toContain(`<w:bookmarkEnd w:id="0"/>`);
+    expect(twice).toBe(once);
+  });
+
   it("keeps an imported paragraph border through two real saves", async () => {
     const { once, twice } = await saveTwice([
       `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr><w:r><w:t>Word 里插入的分隔线</w:t></w:r></w:p>`,

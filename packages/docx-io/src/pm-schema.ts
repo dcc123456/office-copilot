@@ -160,6 +160,27 @@ export type PMNode =
       };
     }
   | {
+      /**
+       * 书签的起点：OOXML 的 `<w:bookmarkStart w:id=".." w:name=".."/>`。
+       *
+       * 它是 `<w:p>` 的直接子元素（与 `<w:r>` 平级，ECMA-376 §17.5.2.1 的例子就是
+       * 夹在两个 run 之间），所以建模成行内节点才能保住它在正文流里的位置；
+       * `w:id` 是 ST_DecimalNumber，原样存字符串不做数字转换（§2.1：换算只在进出口）。
+       */
+      type: "bookmarkStart";
+      attrs: { id: string; name?: string };
+    }
+  | {
+      /**
+       * 书签的终点：`<w:bookmarkEnd w:id=".."/>`，与起点靠同一个 `id` 配对。
+       *
+       * 一个书签可以跨段落（起在第一段、止在第三段），因此这一对节点各自落在自己那段里，
+       * 不需要任何跨段的位置信息。
+       */
+      type: "bookmarkEnd";
+      attrs: { id: string };
+    }
+  | {
       type: "table";
       attrs?: Record<string, unknown>;
       content?: PMNode[];

@@ -244,7 +244,8 @@ type WriteCtx = {
 };
 
 export function pmToOoxml(doc: PMDoc, ctx: WriteCtx = {}): string {
-  const bodyChildren = doc.content.map((b) => blockToXml(b, ctx)).join("");
+  const blocks = dropUnpairedBookmarks(doc);
+  const bodyChildren = blocks.map((b) => blockToXml(b, ctx)).join("");
   const ns = Object.entries(DRAWING_NS)
     .map(([p, uri]) => ` xmlns:${p}="${uri}"`)
     .join("");
@@ -252,6 +253,89 @@ export function pmToOoxml(doc: PMDoc, ctx: WriteCtx = {}): string {
 <w:document xmlns:w="${W_NS}" xmlns:r="${R_NS}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"${ns}>
 <w:body>${bodyChildren}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body>
 </w:document>`;
+}
+
+/** `w:id`（ST_DecimalNumber）的合法形状：Word 写的是非负整数。读写两侧共用这一份判据。 */
+const BOOKMARK_ID = /^\d{1,9}$/;
+
+/** 书签的两个行内节点类型，配对只认 id，与它落在哪一段无关。 */
+type BookmarkNode = Extract<PMNode, { type: "bookmarkStart" | "bookmarkEnd" }>;
+
+/**
+ * 按文档顺序取出树里的所有书签节点（父节点在前，再进 `content`）。
+ *
+ * @param nodes 某一层的内容；`undefined` 表示这一层没有子节点。
+ * @param found 累加器，递归时复用同一个数组。
+ * @returns 文档顺序的书签列表。
+ */
+function collectBookmarks(nodes: PMNode[] | undefined, found: BookmarkNode[] = []): BookmarkNode[] {
+  for (const node of nodes ?? []) {
+    if (node.type === "bookmarkStart" || node.type === "bookmarkEnd") found.push(node);
+    const content = (node as { content?: PMNode[] }).content;
+    if (content) collectBookmarks(content, found);
+  }
+  return found;
+}
+
+/**
+ * 写之前丢掉配不上对的书签半截——编辑器里用户可以只删一半，而 ECMA-376 §17.5.2.1 说得很死：
+ * "If no bookmarkEnd element exists subsequent to this element in document order with a
+ * matching id attribute value, then the document is non-conformant"，Word 打开就弹提示。
+ *
+ * 配对的判据就是那句话：从前往后扫，起点先入栈，遇到同 id 的终点才算成对；
+ * 只有终点的（起点被删了）与到文末还没等到终点的（终点被删了）一律不写。
+ *
+ * @param doc 编辑器交出来的文档 JSON。
+ * @returns 可直接写出的顶层块：没有书签或全部成对时就是原数组，不重建任何节点。
+ */
+function dropUnpairedBookmarks(doc: PMDoc): PMNode[] {
+  const all = collectBookmarks(doc.content);
+  if (!all.length) return doc.content;
+  const paired = new Set<BookmarkNode>();
+  const pending = new Map<string, BookmarkNode>();
+  for (const node of all) {
+    if (node.type === "bookmarkStart") {
+      // 同一个 id 出现两次起点：Word 的 id 是唯一的，第二次不算开新的区间。
+      if (!pending.has(node.attrs.id)) pending.set(node.attrs.id, node);
+    } else {
+      const start = pending.get(node.attrs.id);
+      if (start) {
+        paired.add(start);
+        paired.add(node);
+        pending.delete(node.attrs.id);
+      }
+    }
+  }
+  if (paired.size === all.length) return doc.content;
+  return withoutUnpaired(doc.content, paired);
+}
+
+/**
+ * 重建内容树，只剔除 `paired` 之外的书签节点。
+ *
+ * 用展开复制而不是原地改数组：`listItem` 上挂着 `__list`、段落带着 `rawPpr`，
+ * 浅拷贝能保住这些字段，不会因为过滤书签而顺手改掉别的属性。
+ *
+ * @param nodes 某一层的内容。
+ * @param paired 配成功，可以写出的书签节点（按对象身份判定）。
+ * @returns 过滤后的同层节点数组。
+ */
+function withoutUnpaired(nodes: PMNode[], paired: Set<BookmarkNode>): PMNode[] {
+  const out: PMNode[] = [];
+  for (const node of nodes) {
+    if ((node.type === "bookmarkStart" || node.type === "bookmarkEnd") && !paired.has(node)) {
+      continue;
+    }
+    const inner = (node as { content?: PMNode[] }).content;
+    if (!inner) {
+      out.push(node);
+      continue;
+    }
+    // 整体展开再只换 content，`listItem` 的 `__list`、段落的 `rawPpr` 才会跟着走。
+    // 这里的断言是必需的：TS 对联合类型做展开会把"给 text 节点加 content"也拼出来。
+    out.push({ ...node, content: withoutUnpaired(inner, paired) } as PMNode);
+  }
+  return out;
 }
 
 // ---------- OOXML → PM ----------
@@ -644,8 +728,18 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
       }
       if (url) addMark(inline, { type: "link", attrs: { href: url } });
       out.push(...inline);
-    } else if (child.name === "w:bookmarkStart" || child.name === "w:bookmarkEnd") {
-      // bookmarks ignored for now
+    } else if (child.name === "w:bookmarkStart") {
+      // 书签是 <w:p> 的直接子元素、与 <w:r> 平级，成对靠 w:id 匹配（ECMA-376 §17.5.2.1）。
+      // `_GoBack`（Word 自己的"回到上次编辑处"）也照原样建模：终点只带 id，
+      // 单独丢掉起点会留下规范明确判为 non-conformant 的孤儿终点。
+      const id = child.attributes?.["w:id"] as string | undefined;
+      const name = child.attributes?.["w:name"] as string | undefined;
+      if (id && BOOKMARK_ID.test(id)) {
+        out.push({ type: "bookmarkStart", attrs: name ? { id, name } : { id } });
+      }
+    } else if (child.name === "w:bookmarkEnd") {
+      const id = child.attributes?.["w:id"] as string | undefined;
+      if (id && BOOKMARK_ID.test(id)) out.push({ type: "bookmarkEnd", attrs: { id } });
     } else if (isElement(child)) {
       for (const sub of children(child)) {
         if (sub.name === "w:r") out.push(...runToInlines(sub, ctx));
@@ -1670,7 +1764,14 @@ function groupByMarks(nodes: PMNode[]): PMNode[][] {
       current.push(n);
       continue;
     }
-    if (n.type === "image" || n.type === "field" || n.type === "pageBreak") {
+    // 这几类各自成组，不跟文本合用一个 <w:r>：书签压根不是 run 的内容，另三类各带自己的 run 结构。
+    if (
+      n.type === "image" ||
+      n.type === "field" ||
+      n.type === "pageBreak" ||
+      n.type === "bookmarkStart" ||
+      n.type === "bookmarkEnd"
+    ) {
       flush();
       groups.push([n]);
       key = "";
@@ -1689,6 +1790,10 @@ function groupByMarks(nodes: PMNode[]): PMNode[][] {
 }
 
 function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
+  // 书签单独成组时直接吐元素：它属于 <w:p> 的内容模型，包进 <w:r> Word 就不认了。
+  if (nodes.length === 1 && (nodes[0]!.type === "bookmarkStart" || nodes[0]!.type === "bookmarkEnd")) {
+    return bookmarkXml(nodes[0]!);
+  }
   // Determine marks from first text node.
   const first = nodes.find((n) => n.type === "text") as PMTextNode | undefined;
   const marks = first?.marks ?? [];
@@ -1934,8 +2039,25 @@ function fieldXml(node: Extract<PMNode, { type: "field" }>): string {
   );
 }
 
+/**
+ * 书签节点 → OOXML。`w:bookmarkStart`/`w:bookmarkEnd` 是 `<w:p>` 的直接子元素，
+ * 与 `<w:r>` 平级（§17.5.2.1 的例子就夹在两个 run 之间），所以绝不能包进 run 里——
+ * 包了就成了 run 的内容，Word 读不认，书签等于没写。
+ *
+ * @param node 已通过 `dropUnpairedBookmarks` 配对的书签节点。
+ * @returns 插进 `<w:p>` 的片段；id 不是非负整数时返回空串（宁可不写也不产出违规元素）。
+ */
+function bookmarkXml(node: BookmarkNode): string {
+  const id = String(node.attrs.id ?? "");
+  if (!BOOKMARK_ID.test(id)) return "";
+  if (node.type === "bookmarkEnd") return `<w:bookmarkEnd w:id="${id}"/>`;
+  const name = node.attrs.name;
+  return `<w:bookmarkStart w:id="${id}"${name ? ` w:name="${escapeXml(name)}"` : ""}/>`;
+}
+
 function imageXml(node: Extract<PMNode, { type: "image" }>): string {
   // If the image came from a source .docx and was NOT moved by the user,
+
   // keep its exact <w:drawing> XML so floating anchors (wp:anchor),
   // wrapping, and extents round-trip perfectly.
   if (node.attrs.ooxml && node.attrs.src.startsWith("relationship:")) {
@@ -2154,7 +2276,10 @@ function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    // 属性值一律带引号（w:name / w:anchor / w:r：…），不转义 `"` 的话一个引号
+    // 就能把元素截断，Word 直接判文档打不开。
+    .replace(/"/g, "&quot;");
 }
 
 function addMark(nodes: PMNode[], mark: PMMark): void {

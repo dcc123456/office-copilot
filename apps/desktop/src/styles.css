@@ -1399,6 +1399,18 @@ body.is-window-resizing .ai-panel {
   color: var(--hf-field-fg);
 }
 
+/* 书签在 Word 里默认不画（只有开"显示格式标记"才出现竖标）。这里一直画：
+   看不见就删不掉自己插的书签，而只剩一半的书签会被写侧整对丢掉。 */
+.pm-bookmark {
+  display: inline-block;
+  width: 0;
+  border-left: 2px solid var(--paper-faint);
+  margin: 0 1px;
+}
+.pm-bookmark-end {
+  border-left-style: dashed;
+}
+
 /* Inline header/footer editor popover */
 .hf-popover {
   position: absolute;
