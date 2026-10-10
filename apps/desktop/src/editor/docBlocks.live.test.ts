@@ -764,6 +764,75 @@ describe("脚注与尾注的引用点（真实 schema）", () => {
   });
 });
 
+/**
+ * 排名 4 ②：批注的三个锚点进真实 schema。
+ *
+ * 这一段只验一件事——节点活着穿过 doc JSON。不注册的话 ProseMirror 会把不认识的内联
+ * 节点直接丢掉，`docx-io` 保存时按锚点对齐条目，正文里的批注就整批消失了。
+ */
+describe("批注锚点（真实 schema）", () => {
+  const start = (id: string) => ({ type: "commentRangeStart", attrs: { id } });
+  const end = (id: string) => ({ type: "commentRangeEnd", attrs: { id } });
+  const ref = (id: string) => ({ type: "commentReference", attrs: { id } });
+
+  it("id 活过 doc JSON，且不占正文：批注文字在部件里，不在树上", () => {
+    const editor = harness([
+      para([text("正文甲"), start("0"), text("被批注的文字"), end("0"), ref("0")]),
+    ]);
+    const doc = editor.state.doc;
+    expect(doc.textContent).toBe("正文甲被批注的文字");
+    expect(blocksOf(doc).map((b) => b.text)).toEqual(["正文甲被批注的文字"]);
+    const json = JSON.parse(JSON.stringify(doc.toJSON())) as {
+      content: { content: { type: string; attrs?: Record<string, unknown> }[] }[];
+    };
+    expect(json.content[0]!.content.map((n) => n.type)).toEqual([
+      "text",
+      "commentRangeStart",
+      "text",
+      "commentRangeEnd",
+      "commentReference",
+    ]);
+    expect(json.content[0]!.content[1]).toMatchObject({
+      type: "commentRangeStart",
+      attrs: { id: "0" },
+    });
+    expect(json.content[0]!.content[4]).toMatchObject({
+      type: "commentReference",
+      attrs: { id: "0" },
+    });
+  });
+
+  it("跨段区间：端点分处两个段落也各自留在树里，段落边界不变", () => {
+    const doc = harness([para([text("上"), start("1")]), para([end("1"), text("下")])]).state.doc;
+    expect(doc.childCount).toBe(2);
+    expect(doc.firstChild!.childCount).toBe(2);
+    expect(doc.lastChild!.childCount).toBe(2);
+    expect(doc.textContent).toBe("上下");
+  });
+
+  it("只装锚点的段落不塌掉，也不会多出一个可编辑的空位", () => {
+    const doc = harness([para([start("2"), end("2"), ref("2")]), para([text("正文")])]).state.doc;
+    expect(doc.childCount).toBe(2);
+    expect(doc.firstChild!.childCount).toBe(3);
+    expect(blocksOf(doc).map((b) => b.text)).toEqual(["", "正文"]);
+  });
+
+  it("批注与书签同 id 并存：两套锚点互不吞并", () => {
+    // 注解 id 是整个文档共享的一个编号空间，Word 就把书签和批注写成同一个号。
+    const doc = harness([
+      para([
+        { type: "bookmarkStart", attrs: { id: "0", name: "_Toc1" } },
+        start("0"),
+        text("正文"),
+        end("0"),
+        { type: "bookmarkEnd", attrs: { id: "0" } },
+      ]),
+    ]).state.doc;
+    expect(doc.firstChild!.childCount).toBe(5);
+    expect(doc.textContent).toBe("正文");
+  });
+});
+
 describe("超链接与正文色", () => {
   const GONGWEN = templateById("gongwen")!;
   const linkMark = {
