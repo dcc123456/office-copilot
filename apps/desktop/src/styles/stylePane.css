@@ -1,0 +1,38 @@
+/* 样式窗格（排名 2）。宽度用双类选择器覆盖 .sidebar 的 --outline-w，
+   单类选择器同权重时结果取决于引入顺序，不可靠。 */
+.sidebar.style-pane {
+  width: 240px;
+  flex: 0 0 auto;
+}
+
+.style-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.style-item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.style-item:hover {
+  background: var(--bg-muted);
+}
+
+.style-item.active {
+  background: var(--accent-tint);
+  color: var(--accent);
+  font-weight: 600;
+}

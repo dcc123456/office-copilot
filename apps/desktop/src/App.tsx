@@ -9,8 +9,10 @@ import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
 import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
 import type {
   LinkStyle,
+  PaneStyle,
   SectionGeometry,
 } from "@office-copilot/docx-io";
+import { StylePane } from "./components/StylePane.js";
 import { AIPanel } from "./ai/AIPanel.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { FindBar } from "./components/FindBar.js";
@@ -86,6 +88,9 @@ export function App() {
   const [started, setStarted] = useState(false);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
+  const [stylePaneOpen, setStylePaneOpen] = useState(false);
+  // 样式窗格的数据随文档走：打开 / 新建时从主进程带回来的 styles.xml 清单换一次。
+  const [docStyles, setDocStyles] = useState<PaneStyle[]>([]);
   const [pageSetupOpen, setPageSetupOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [aiCollapsed, setAiCollapsed] = useState(false);
@@ -166,6 +171,7 @@ export function App() {
     setFooterDoc(null);
     setSection(null);
     setLinkStyle(null);
+    setDocStyles([]);
     setFilePath(null);
     setDirty(false);
     setStarted(true);
@@ -183,6 +189,7 @@ export function App() {
     setFooterDoc((r.footer as never) ?? null);
     setSection((r.section as never) ?? null);
     setLinkStyle(null);
+    setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
     setFilePath(r.path ?? null);
     setDirty(false);
     setStarted(true);
@@ -212,6 +219,7 @@ export function App() {
       setFooterDoc((r.footer as never) ?? null);
       setSection((r.section as never) ?? null);
       setLinkStyle(null);
+      setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
       setFilePath(r.path ?? p);
       setDirty(false);
       setStarted(true);
@@ -396,6 +404,9 @@ export function App() {
           break;
         case "page-setup":
           setPageSetupOpen(true);
+          break;
+        case "styles":
+          setStylePaneOpen((v) => !v);
           break;
         case "beautify":
           setTemplateOpen(true);
@@ -717,6 +728,13 @@ export function App() {
             onDoubleClick={outlineResize.onDoubleClick}
           />
         )}
+        {stylePaneOpen && (
+          <StylePane
+            editor={editor}
+            styles={docStyles}
+            onClose={() => setStylePaneOpen(false)}
+          />
+        )}
         <div className="editor-area">
           {started ? (
             <Toolbar
@@ -725,6 +743,7 @@ export function App() {
               onInsertTable={insertTable}
               onAction={handleToolbarAction}
               canRevert={canRevert}
+              stylesOpen={stylePaneOpen}
               dirty={dirty}
             />
           ) : null}

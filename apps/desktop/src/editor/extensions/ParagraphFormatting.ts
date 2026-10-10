@@ -1,4 +1,5 @@
 import { Extension, type CommandProps } from "@tiptap/core";
+import type { Node as PMNode, NodeType } from "@tiptap/pm/model";
 
 /**
  * Adds paragraph/heading formatting commands and global attributes:
@@ -39,8 +40,41 @@ declare module "@tiptap/core" {
   interface Commands<ReturnType> {
     paragraphFormat: {
       setParagraphFormat: (patch: Partial<ParagraphFormatAttrs>) => ReturnType;
+      applyNamedStyle: (styleId: string | null, headingLevel?: number) => ReturnType;
     };
   }
+}
+
+/**
+ * 对选区内每个段落 / 标题块（表格单元里的也算）落地一次改动，只发一个事务。
+ *
+ * @param state 命令上下文的编辑器状态；选区决定作用范围。
+ * @param dispatch 命令上下文的 dispatch；预览（不传 dispatch）时只算不落地。
+ * @param nextBlock 给出块节点，返回要写的完整属性，可选换成别的块类型（样式套用要用）。
+ * @returns 选区里有没有块；一个都没有时是 false，调用方决定退回单段写法。
+ */
+function mapFormatBlocks(
+  state: CommandProps["state"],
+  dispatch: CommandProps["dispatch"],
+  nextBlock: (node: PMNode) => { attrs: Record<string, unknown>; type?: NodeType },
+): boolean {
+  const blocks: { node: PMNode; pos: number }[] = [];
+  const { from, to } = state.selection;
+  state.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.name === "paragraph" || node.type.name === "heading") {
+      blocks.push({ node, pos });
+    }
+  });
+  if (!blocks.length) return false;
+  // 必须攒成一个事务：逐块各发一个基于旧 doc 的 tr，第二块起 PM 抛
+  // "Applying a mismatched transaction"，选中多段时只有第一段改上。
+  let tr = state.tr;
+  for (const { node, pos } of blocks) {
+    const next = nextBlock(node);
+    tr = tr.setNodeMarkup(pos, next.type ?? node.type, next.attrs);
+  }
+  if (dispatch) dispatch(tr);
+  return true;
 }
 
 export const ParagraphFormatting = Extension.create({
@@ -209,19 +243,30 @@ export const ParagraphFormatting = Extension.create({
     return {
       setParagraphFormat:
         (patch: Partial<ParagraphFormatAttrs>) =>
+        ({ commands, state, dispatch }: CommandProps) =>
+          // 只补这段落自己缺的属性，已有的属性跟着 node.attrs 一起写回。
+          mapFormatBlocks(state, dispatch, (node) => ({
+            attrs: { ...node.attrs, ...patch },
+          })) || commands.updateAttributes("paragraph", patch),
+
+      applyNamedStyle:
+        (styleId: string | null, headingLevel?: number) =>
         ({ commands, state, dispatch }: CommandProps) => {
-          // Apply to every block in the current selection.
-          const { from, to } = state.selection;
-          let success = false;
-          state.doc.nodesBetween(from, to, (node, pos) => {
-            if (!["paragraph", "heading"].includes(node.type.name)) return;
-            const attrs = { ...node.attrs, ...patch };
-            if (dispatch) {
-              dispatch(state.tr.setNodeMarkup(pos, undefined, attrs));
-            }
-            success = true;
-          });
-          return success || commands.updateAttributes("paragraph", patch);
+          // Word 套用具名样式只换样式引用（标题样式顺带把段落变成对应级别），直接格式
+          // （加粗、字号、荧光笔）永远压过样式——所以这里只动块级属性与节点类型。
+          const target =
+            headingLevel === undefined
+              ? state.schema.nodes.paragraph
+              : state.schema.nodes.heading ?? state.schema.nodes.paragraph;
+          if (!target) return false;
+          return (
+            mapFormatBlocks(state, dispatch, (node) => {
+              // level 只有标题认，退回正文时 PM 会丢掉它；其余段落属性照 node.attrs 走。
+              const attrs: Record<string, unknown> = { ...node.attrs, styleId };
+              if (headingLevel !== undefined) attrs.level = headingLevel;
+              return { attrs, type: target };
+            }) || commands.updateAttributes("paragraph", { styleId })
+          );
         },
     } as never;
   },

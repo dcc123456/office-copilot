@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { getSchema } from "@tiptap/core";
+import { getSchema, type CommandProps } from "@tiptap/core";
 import { ptToCssLetterSpacing } from "@office-copilot/docx-io";
 import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import { EditorState } from "@tiptap/pm/state";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
+import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
 import { blocksOf, executeOps } from "./docBlocks.js";
 import { planEdit, revert, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
 import { templateProposal, typographyProposal } from "./formatDocument.js";
@@ -105,6 +106,51 @@ function applyStyles(editor: Editor, patches: Array<{ index: number; style: Styl
 const mixedBoldDoc = [
   para([text("开头 "), text("重点", [bold()]), text(" 结尾")]),
 ];
+
+/**
+ * 用真实 schema 跑一条 ParagraphFormatting 命令。
+ *
+ * harness 的 editor 是手搓的最小对象，没有 Tiptap 的 `commands` / `chain` 装配，
+ * 所以取扩展配置里那份命令实现本身，喂给它同样的 CommandProps，dispatch 用 harness 的 view。
+ *
+ * @param editor harness 出来的编辑器。
+ * @param name 要跑的命令名。
+ * @param args 该命令的入参。
+ * @param words 要选中的文字：每处文字所在的块都会落进命令的选区。
+ * @returns 命令的返回值（选区里有段落或标题才为 true）。
+ */
+function runFormatCommand(
+  editor: Editor,
+  name: "setParagraphFormat" | "applyNamedStyle",
+  args: unknown[],
+  words: string[],
+): boolean {
+  let from = -1;
+  let to = -1;
+  editor.state.doc.descendants((node, pos) => {
+    if (!node.isText || !words.some((word) => (node.text ?? "").includes(word))) return;
+    from = from < 0 ? pos : Math.min(from, pos);
+    to = Math.max(to, pos + node.nodeSize);
+  });
+  if (from < 0) throw new Error(`no run matching ${words.join("/")}`);
+  editor.view.dispatch(
+    editor.state.tr.setSelection(TextSelection.create(editor.state.doc, from, to)),
+  );
+  const commands = (
+    ParagraphFormatting.config.addCommands as (this: unknown) => Record<
+      "setParagraphFormat" | "applyNamedStyle",
+      (...args: unknown[]) => (props: CommandProps) => boolean
+    >
+  ).call({ options: {} });
+  return commands[name](...args)({
+    editor,
+    state: editor.state,
+    dispatch: editor.view.dispatch,
+    view: editor.view,
+    // 选区里没有段落或标题时的兜底路径，用例不依赖它。
+    commands: { updateAttributes: () => false },
+  } as unknown as CommandProps);
+}
 
 describe("reading run-level style", () => {
   it("records keys the runs disagree on as mixed, and keeps them out of style", () => {
@@ -305,6 +351,90 @@ describe("具名样式引用 styleId（真实 schema）", () => {
       ["正文 ", undefined],
       ["红字", "#ff0000"],
     ]);
+  });
+
+  it("跨段一次改完：两段都写上，各自已有的属性各留各的", () => {
+    const editor = harness([
+      { type: "paragraph", attrs: { indentRight: 21 }, content: [text("甲段")] },
+      { type: "paragraph", attrs: { keepWithNext: true }, content: [text("乙段")] },
+    ]);
+    expect(
+      runFormatCommand(editor, "setParagraphFormat", [{ textAlign: "center" }], ["甲段", "乙段"]),
+    ).toBe(true);
+    const first = editor.state.doc.child(0);
+    const second = editor.state.doc.child(1);
+    // 逐块各发一个基于旧 doc 的事务时，第二段起抛 mismatched transaction，只有第一段改上。
+    expect([first.attrs.textAlign, first.attrs.indentRight]).toEqual(["center", 21]);
+    expect([second.attrs.textAlign, second.attrs.keepWithNext]).toEqual(["center", true]);
+  });
+
+  it("选区里的列表项也一起改，且不动列表结构", () => {
+    const editor = harness([bulletList([text("列表项")])]);
+    expect(runFormatCommand(editor, "setParagraphFormat", [{ lineHeight: "1.5" }], ["列表项"])).toBe(
+      true,
+    );
+    const list = editor.state.doc.firstChild!;
+    expect(list.type.name).toBe("bulletList");
+    expect(list.firstChild!.firstChild!.attrs.lineHeight).toBe("1.5");
+  });
+
+  it("窗格套用标题样式：正文段变成对应级别的标题，红字与加粗都不受牵连", () => {
+    const editor = harness([
+      {
+        type: "paragraph",
+        attrs: { indentRight: 21, lineHeight: "1.5" },
+        content: [text("第一章 "), text("重点", [bold()]), text(" 结尾")],
+      },
+    ]);
+    expect(runFormatCommand(editor, "applyNamedStyle", ["2", 1], ["第一章"])).toBe(true);
+    const h = editor.state.doc.firstChild!;
+    expect([h.type.name, h.attrs.level, h.attrs.styleId]).toEqual(["heading", 1, "2"]);
+    // 段落自己设过的排版属性是"直接格式"，样式引用不该把它们清掉。
+    expect(h.attrs.indentRight).toBe(21);
+    expect(h.attrs.lineHeight).toBe("1.5");
+    expect(marksOfRun(editor, "重点")).toContain("bold");
+  });
+
+  it("窗格清除样式：标题退回正文并留下 null 引用，level 不残留", () => {
+    const editor = harness([heading(2, [text("原二级标题")])]);
+    expect(
+      runFormatCommand(editor, "applyNamedStyle", [null, undefined], ["原二级标题"]),
+    ).toBe(true);
+    const p = editor.state.doc.firstChild!;
+    expect(p.type.name).toBe("paragraph");
+    expect(p.attrs.styleId).toBeNull();
+    // 留着 heading 却没有标题样式引用，重新导入时这段会被读成正文，级别白丢。
+    expect(p.attrs.level).toBeUndefined();
+  });
+
+  it("跨段套用一次改完：两段都换，各自的其它属性原样保留", () => {
+    const editor = harness([
+      { type: "paragraph", attrs: { indentRight: 21 }, content: [text("甲段")] },
+      { type: "paragraph", attrs: { keepWithNext: true }, content: [text("乙段")] },
+    ]);
+    expect(
+      runFormatCommand(editor, "applyNamedStyle", ["af8", 2], ["甲段", "乙段"]),
+    ).toBe(true);
+    const [first, second] = [editor.state.doc.child(0), editor.state.doc.child(1)];
+    expect(first.type.name).toBe("heading");
+    expect([first.attrs.level, first.attrs.styleId, first.attrs.indentRight]).toEqual([2, "af8", 21]);
+    expect([second.attrs.level, second.attrs.styleId, second.attrs.keepWithNext]).toEqual([
+      2,
+      "af8",
+      true,
+    ]);
+  });
+
+  it("套样式不会碰列表结构：列表项只是多了引用与级别", () => {
+    const editor = harness([bulletList([text("列表项")])]);
+    expect(
+      runFormatCommand(editor, "applyNamedStyle", ["af3", undefined], ["列表项"]),
+    ).toBe(true);
+    const list = editor.state.doc.firstChild!;
+    expect(list.type.name).toBe("bulletList");
+    const p = list.firstChild!.firstChild!;
+    expect(p.type.name).toBe("paragraph");
+    expect(p.attrs.styleId).toBe("af3");
   });
 });
 

@@ -29,6 +29,7 @@ import {
   Search,
   Minus,
   Settings2,
+  SwatchBook,
   Pilcrow,
   Wand2,
   RotateCcw,
@@ -53,6 +54,8 @@ interface ToolbarProps {
   dirty?: boolean;
   /** 本文档还有可还原的美化排版记录时，「还原排版」才可点。 */
   canRevert?: boolean;
+  /** 样式窗格是否已打开，决定「样式」按钮的高亮。 */
+  stylesOpen?: boolean;
 }
 
 export type ToolbarAction =
@@ -63,6 +66,7 @@ export type ToolbarAction =
   | "print"
   | "find-replace"
   | "page-setup"
+  | "styles"
   | "beautify"
   | "revert-beautify";
 
@@ -106,6 +110,7 @@ export function Toolbar({
   onAction,
   dirty,
   canRevert,
+  stylesOpen,
 }: ToolbarProps) {
   const setLink = () => void promptSetLink(editor);
 
@@ -161,6 +166,13 @@ export function Toolbar({
             onClick={() => onAction("revert-beautify")}
           >
             <RotateCcw size={16} />
+          </Btn>
+          <Btn
+            title="样式窗格（套用本文档的具名样式）"
+            active={stylesOpen}
+            onClick={() => onAction("styles")}
+          >
+            <SwatchBook size={16} />
           </Btn>
           <Btn title="页面设置" onClick={() => onAction("page-setup")}>
             <Settings2 size={16} />

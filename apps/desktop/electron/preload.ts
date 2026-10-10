@@ -21,6 +21,8 @@ interface OpenResult {
   header?: unknown;
   footer?: unknown;
   section?: unknown;
+  /** styles.xml 里声明的段落样式清单，见 @office-copilot/docx-io 的 PaneStyle。 */
+  styles?: unknown;
   warnings?: string[];
   message?: string;
 }
