@@ -43,48 +43,62 @@ export interface PMTextNode {
   marks?: PMMark[];
 }
 
+/**
+ * 段落与标题共用的 `<w:pPr>` 建模属性（用 type 而非 interface：写回侧把它当
+ * `Record<string, unknown>` 遍历，type 才有隐式索引签名）。
+ *
+ * 单位约定（AGENTS §2.1，换算只发生在 docx-io 进出口）：段前/段后/缩进是 pt，
+ * `lineHeight` 是倍数或 `pt:N` / `atLeast:N`。
+ * 每一项 `undefined` 的含义都是"这一段没建模过这个属性"，写回时保持源文档原样，
+ * 而不是补一个默认值——这是重复保存不侵蚀用户格式的前提。
+ */
+export type PPrAttrs = {
+  textAlign?: string;
+  /** 段前分页（w:pageBreakBefore）。 */
+  pageBreakBefore?: boolean;
+  /** 与下段同页（w:keepNext），Word 勾选项"段与下段同页"。 */
+  keepWithNext?: boolean;
+  /** 段中不分页（w:keepLines），同一段的文字不跨页拆开。 */
+  keepLines?: boolean;
+  /** 孤行控制（w:widowControl）。Word 默认开，显式关闭才写 w:val="0"。 */
+  widowControl?: boolean;
+  /** 对齐到网格（w:snapToGrid），关闭后本段不受文档网格行距约束。 */
+  snapToGrid?: boolean;
+  /** 大纲级别，直接存 OOXML 的 0-9：0 是"1 级"，9 是"正文文本"。 */
+  outlineLevel?: number;
+  /** Spacing before the paragraph, in points. */
+  spacingBefore?: number;
+  /** Spacing after the paragraph, in points. */
+  spacingAfter?: number;
+  /** Left indent, in points. */
+  indent?: number;
+  /** Right indent, in points (Word's 段落对话框 → 右侧). */
+  indentRight?: number;
+  /** First-line indent, in points. Negative = hanging indent. */
+  indentFirst?: number;
+  /** Line height as a CSS-like number (1.0, 1.15, 1.5, 2.0). */
+  lineHeight?: string;
+  /**
+   * Raw <w:pPr> inner XML (everything between <w:pPr> and </w:pPr>)
+   * captured from the source document. pmToOoxml merges it with the
+   * attrs it models: the modeled children are rebuilt from both sides,
+   * every other element (borders, tabs, run properties, …) rides through
+   * untouched and keeps its place in CT_PPr's sequence. See
+   * `mergedElementXml` and `PPR_CHILD_ORDER` in ooxml-pm.ts.
+   */
+  rawPpr?: string;
+};
+
 export type PMNode =
   | PMTextNode
   | {
       type: "paragraph";
-      attrs?: {
-        textAlign?: string;
-        pageBreakBefore?: boolean;
-        /**
-         * Raw <w:pPr> inner XML (everything between <w:pPr> and </w:pPr>)
-         * captured from the source document. pmToOoxml merges it with the
-         * attrs it models: <w:jc>/<w:spacing>/<w:ind> are rebuilt from both
-         * sides, every other element (borders, keepLines, tabs, outlineLvl,
-         * …) rides through untouched. See `mergedElementXml` in ooxml-pm.ts.
-         */
-        rawPpr?: string;
-        /** Spacing before the paragraph, in points. */
-        spacingBefore?: number;
-        /** Spacing after the paragraph, in points. */
-        spacingAfter?: number;
-        /** Left indent, in points. */
-        indent?: number;
-        /** Right indent, in points (Word's 段落对话框 → 右侧). */
-        indentRight?: number;
-        /** First-line indent, in points. Negative = hanging indent. */
-        indentFirst?: number;
-        /** Line height as a CSS-like number (1.0, 1.15, 1.5, 2.0). */
-        lineHeight?: string;
-      };
+      attrs?: PPrAttrs;
       content?: PMNode[];
     }
   | {
       type: "heading";
-      attrs: {
-        level: 1 | 2 | 3 | 4 | 5 | 6;
-        textAlign?: string;
-        spacingBefore?: number;
-        spacingAfter?: number;
-        indent?: number;
-        indentRight?: number;
-        indentFirst?: number;
-        lineHeight?: string;
-      };
+      attrs: { level: 1 | 2 | 3 | 4 | 5 | 6 } & PPrAttrs;
       content?: PMNode[];
     }
   | { type: "bulletList"; content?: PMNode[]; attrs?: { numId?: string } }

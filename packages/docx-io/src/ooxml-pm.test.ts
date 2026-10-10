@@ -10,7 +10,7 @@ import {
   canonColor,
 } from "./ooxml-pm.js";
 import { StyleMap } from "./styles.js";
-import type { PMDoc } from "./pm-schema.js";
+import type { PPrAttrs, PMDoc } from "./pm-schema.js";
 import { DocxFile } from "./docx.js";
 
 function bodyXml(...inner: string[]): string {
@@ -718,8 +718,9 @@ describe("段落缩进与间距的属性级合并", () => {
   });
 
   it("makes both pPr builders agree on the same attrs", () => {
-    // pPrXml（新建段落）与 synthesizedFormatXml（有 rawPpr）以前各写一份换算，
-    // 负的 indentFirst 在干净路径里会被写成 w:firstLine="-420"。
+    // 新建段落与带 rawPpr 的导入段落现在共用 paragraphPprXml 一条路径；
+    // 以前两条路径各写一份换算，负的 indentFirst 在干净路径里会被写成
+    // w:firstLine="-420"。
     const attrs = { spacingBefore: 6, spacingAfter: 6, indent: 21, indentFirst: -21, lineHeight: "1.5" };
     const clean = pmToOoxml({
       type: "doc",
@@ -740,6 +741,94 @@ describe("段落缩进与间距的属性级合并", () => {
     expect(grab(imported, "spacing")).toBe(grab(clean, "spacing"));
     expect(grab(imported, "ind")).toBe(grab(clean, "ind"));
     expect(grab(clean, "ind")).toContain('w:hanging="420"');
+  });
+});
+
+describe("段落开关与大纲级别（Word 段落对话框的其余字段）", () => {
+  /** PM attrs → 写出的 `<w:pPr>` 片段，用于断言元素本身与它们的先后。 */
+  function pPrOf(attrs: PPrAttrs): string {
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [{ type: "paragraph", attrs, content: [{ type: "text", text: "x" }] }],
+    });
+    return /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(xml)?.[0] ?? "";
+  }
+  /** OOXML → PM → OOXML，返回段落 attrs 与写出的 `<w:pPr>` 片段。 */
+  function roundTripPpr(pPr: string): { attrs: PPrAttrs; pPr: string } {
+    const pm = ooxmlToPm(bodyXml(`<w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`));
+    const out = pmToOoxml(pm);
+    return {
+      attrs: (pm.content?.[0]?.attrs ?? {}) as PPrAttrs,
+      pPr: /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(out)?.[0] ?? "",
+    };
+  }
+
+  it("reads 与下段同页 / 段中不分页 / 孤行控制 / 对齐网格 / 大纲级别", () => {
+    const { attrs } = roundTripPpr(
+      '<w:keepNext/><w:keepLines/><w:widowControl w:val="0"/><w:snapToGrid w:val="0"/><w:outlineLvl w:val="2"/>',
+    );
+    expect(attrs).toMatchObject({
+      keepWithNext: true,
+      keepLines: true,
+      widowControl: false,
+      snapToGrid: false,
+      outlineLevel: 2,
+    });
+  });
+
+  it("writes the switches back, 关闭的一侧带 w:val=0", () => {
+    const pPr = pPrOf({
+      keepWithNext: true,
+      keepLines: true,
+      widowControl: false,
+      snapToGrid: false,
+      pageBreakBefore: true,
+      outlineLevel: 0,
+    });
+    expect(pPr).toContain("<w:keepNext/>");
+    expect(pPr).toContain("<w:keepLines/>");
+    expect(pPr).toContain("<w:pageBreakBefore/>");
+    expect(pPr).toContain('<w:widowControl w:val="0"/>');
+    expect(pPr).toContain('<w:snapToGrid w:val="0"/>');
+    expect(pPr).toContain('<w:outlineLvl w:val="0"/>');
+  });
+
+  it("keeps the CT_PPr sequence: 开关在前，缩进居中，大纲级别在最后", () => {
+    const pPr = pPrOf({
+      keepWithNext: true,
+      widowControl: false,
+      spacingAfter: 6,
+      indent: 21,
+      textAlign: "center",
+      outlineLevel: 1,
+    });
+    const rank = (tag: string) => pPr.indexOf(`<${tag}`);
+    for (const tag of ["w:keepNext", "w:widowControl", "w:spacing", "w:ind", "w:jc", "w:outlineLvl"]) {
+      expect(rank(tag)).toBeGreaterThan(-1);
+    }
+    expect(rank("w:keepNext")).toBeLessThan(rank("w:widowControl"));
+    expect(rank("w:widowControl")).toBeLessThan(rank("w:spacing"));
+    expect(rank("w:spacing")).toBeLessThan(rank("w:ind"));
+    expect(rank("w:ind")).toBeLessThan(rank("w:jc"));
+    expect(rank("w:jc")).toBeLessThan(rank("w:outlineLvl"));
+  });
+
+  it("keeps the paragraph mark's <w:rPr> behind the properties we set", () => {
+    // Word 把段落标记的字符属性写在 pPr 末尾。以前整串 rawPpr 排在最前，
+    // 我们补的 spacing/jc 就落到 rPr 之后——顺序不合 schema，Word 会提示文档有问题。
+    const { pPr } = roundTripPpr(
+      '<w:spacing w:after="120"/><w:rPr><w:sz w:val="24"/></w:rPr>',
+    );
+    expect(pPr).toContain('<w:spacing w:after="120"');
+    expect(pPr.indexOf("<w:rPr")).toBeGreaterThan(pPr.indexOf("<w:spacing"));
+  });
+
+  it("is idempotent — 没动过的段落原样写回，也不会补上它没写过的开关", () => {
+    const source =
+      '<w:keepNext/><w:widowControl w:val="0"/><w:spacing w:after="120"/><w:jc w:val="center"/><w:outlineLvl w:val="9"/>';
+    expect(roundTripPpr(source).pPr).toBe(`<w:pPr>${source}</w:pPr>`);
+    // 一段纯文字不该长出 pPr。
+    expect(pPrOf({})).toBe("");
   });
 });
 

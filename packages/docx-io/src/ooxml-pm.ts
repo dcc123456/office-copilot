@@ -4,10 +4,11 @@ import {
   firstChild,
   isElement,
   parseDocument,
+  parseFragment,
   serialize,
   type Element,
 } from "./xml.js";
-import type { PMDoc, PMMark, PMNode, PMTextNode } from "./pm-schema.js";
+import type { PPrAttrs, PMDoc, PMMark, PMNode, PMTextNode } from "./pm-schema.js";
 import { NumberingMap, readListProps, type NumberingKind } from "./numbering.js";
 import { StyleMap } from "./styles.js";
 import {
@@ -301,7 +302,6 @@ function paragraphFromXml(
   const textAlign = jcToTextAlign(jc);
 
   const inline = collectInline(p, { floats, numbering, styles });
-  const pageBreakBefore = !!(pPr && firstChild(pPr, "w:pageBreakBefore"));
   const fmt = readParagraphFormat(pPr);
 
   // Capture the full pPr inner XML so we can write it back verbatim. We
@@ -362,20 +362,12 @@ function paragraphFromXml(
     return { type: "blockquote", content: [{ type: "paragraph", content: inline }] };
   }
 
-  const hasFmt =
-    fmt.spacingBefore !== undefined ||
-    fmt.spacingAfter !== undefined ||
-    fmt.indent !== undefined ||
-    fmt.indentRight !== undefined ||
-    fmt.indentFirst !== undefined ||
-    fmt.lineHeight !== undefined;
   return {
     type: "paragraph",
-    ...(textAlign || pageBreakBefore || rawPpr || hasFmt
+    ...(textAlign || rawPpr || Object.keys(fmt).length
       ? {
           attrs: {
             ...(textAlign ? { textAlign } : {}),
-            ...(pageBreakBefore ? { pageBreakBefore: true } : {}),
             ...(rawPpr ? { rawPpr } : {}),
             ...fmt,
           },
@@ -385,25 +377,27 @@ function paragraphFromXml(
   };
 }
 
-interface ParagraphFormatAttrs {
-  spacingBefore?: number;
-  spacingAfter?: number;
-  indent?: number;
-  /** 右缩进，单位 pt（Word 段落对话框的"右侧"）。 */
-  indentRight?: number;
-  /** 首行缩进，单位 pt；负值表示悬挂缩进（Word 的"特殊格式：悬挂"）。 */
-  indentFirst?: number;
-  lineHeight?: string;
-}
-
 /**
  * Read <w:spacing> and <w:ind> values into PM attrs (in points / CSS
  * ratio). All unit conversions happen here so the UI can stay in
  * familiar points.
  */
-function readParagraphFormat(pPr: Element | null | undefined): ParagraphFormatAttrs {
-  const out: ParagraphFormatAttrs = {};
+function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
+  const out: PPrAttrs = {};
   if (!pPr) return out;
+  const keepNext = onOffValue(firstChild(pPr, "w:keepNext"));
+  if (keepNext !== undefined) out.keepWithNext = keepNext;
+  const keepLines = onOffValue(firstChild(pPr, "w:keepLines"));
+  if (keepLines !== undefined) out.keepLines = keepLines;
+  const breakBefore = onOffValue(firstChild(pPr, "w:pageBreakBefore"));
+  if (breakBefore !== undefined) out.pageBreakBefore = breakBefore;
+  const widow = onOffValue(firstChild(pPr, "w:widowControl"));
+  if (widow !== undefined) out.widowControl = widow;
+  const grid = onOffValue(firstChild(pPr, "w:snapToGrid"));
+  if (grid !== undefined) out.snapToGrid = grid;  // 大纲级别：OOXML 存 0-9（0 = Word 的"1 级"，9 = 正文文本）。超出范围说明
+  // 是别的写入方乱填的，当作没建模过，写回时原样透传。
+  const lvl = Number(val(firstChild(pPr, "w:outlineLvl")));
+  if (Number.isInteger(lvl) && lvl >= 0 && lvl <= 9) out.outlineLevel = lvl;
   const spacing = firstChild(pPr, "w:spacing");
   if (spacing) {
     // w:before / w:after are in twentieths of a point (1pt = 20).
@@ -455,6 +449,35 @@ function readParagraphFormat(pPr: Element | null | undefined): ParagraphFormatAt
     else if (hanging !== undefined) out.indentFirst = -hanging;
   }
   return out;
+}
+
+/**
+ * 读 OOXML 的开关型段落属性（CT_OnOff，如 `w:keepNext` / `w:widowControl`）。
+ *
+ * @param el `<w:pPr>` 里的子元素；不存在时传 undefined/null。
+ * @returns 裸元素（`<w:keepNext/>`）为 true，`w:val` 是 0/false/off 为 false；
+ *   元素缺失或值读不懂时返回 undefined，含义是"这一段没建模过它"，
+ *   写回时让 rawPpr 里的原样透传，而不是替 Word 补一个它没写过的值。
+ */
+function onOffValue(el: Element | null | undefined): boolean | undefined {
+  if (!el) return undefined;
+  const raw = el.attributes?.["w:val"];
+  if (raw === undefined) return true;
+  const v = String(raw).toLowerCase();
+  if (v === "0" || v === "false" || v === "off") return false;
+  return v === "1" || v === "true" || v === "on" ? true : undefined;
+}
+
+/**
+ * 写 OOXML 的开关型段落属性，是 `onOffValue` 的逆运算。
+ *
+ * @param tag 元素名（含前缀），如 "w:keepNext"。
+ * @param value 段落 attrs 里的建模值；undefined 时不产出元素。
+ * @returns 元素字符串；true 用 Word 自己的自闭合写法，false 显式 `w:val="0"`。
+ */
+function onOffXml(tag: string, value: unknown): string {
+  if (value !== true && value !== false) return "";
+  return value ? `<${tag}/>` : `<${tag} w:val="0"/>`;
 }
 
 /**
@@ -977,17 +1000,7 @@ function blockToXml(node: PMNode, ctx: WriteCtx = {}): string {
 function paragraphXml(
   node: Extract<PMNode, { type: "paragraph" }> | {
     content?: PMNode[];
-    attrs?: {
-      textAlign?: string;
-      pageBreakBefore?: boolean;
-      rawPpr?: string;
-      spacingBefore?: number;
-      spacingAfter?: number;
-      indent?: number;
-      indentFirst?: number;
-      lineHeight?: string;
-      [k: string]: unknown;
-    };
+    attrs?: PPrAttrs;
   },
   opts: {
     pStyle?: string;
@@ -997,47 +1010,167 @@ function paragraphXml(
   } = {},
 ): string {
   const a = node.attrs ?? {};
-  // When rawPpr is present, drop the <w:jc>/<w:spacing>/<w:ind> it carries so
-  // the merged versions below win; otherwise we'd emit two of the same element
-  // and Word picks the first one. The merge in spacingElementXml /
-  // indElementXml re-reads the raw attributes, so the properties we don't model
-  // (w:right, w:*Chars, w:*Lines, w:start/w:end) ride along instead of vanishing.
-  // The paired form is not hypothetical — third-party writers emit <w:spacing …></w:spacing>.
-  const cleanRaw = (s: string) =>
-    s
-      .replace(/<w:jc\b[^>]*\/>|<w:jc\b[^>]*>[\s\S]*?<\/w:jc>/g, "")
-      .replace(/<w:spacing\b[^>]*\/>|<w:spacing\b[^>]*>[\s\S]*?<\/w:spacing>/g, "")
-      .replace(/<w:ind\b[^>]*\/>|<w:ind\b[^>]*>[\s\S]*?<\/w:ind>/g, "");
-  const raw = opts.rawPpr ?? (a.rawPpr as string | undefined);
-  const override = synthesizedFormatXml(a, raw);
-  // Precedence: explicit override (list item numPr) > preserved rawPpr
-  // from source > synthesized from style/alignment/format. CT_PPr's sequence
-  // puts spacing/ind before jc, so the merged elements go out before the tail.
-  let pPr: string;
-  if (raw) {
-    pPr = `<w:pPr>${cleanRaw(raw)}${opts.numPr ?? ""}${override}${pPrTail(a.textAlign, a.pageBreakBefore)}</w:pPr>`;
-  } else {
-    pPr = pPrXml(opts.pStyle, a.textAlign, a.pageBreakBefore, {
-      ...a,
-      numPr: opts.numPr,
-    });
-  }
+  const pPr = paragraphPprXml(a, {
+    pStyle: opts.pStyle,
+    numPr: opts.numPr,
+    rawPpr: opts.rawPpr ?? a.rawPpr,
+  });
   const runs = inlineChildrenToXml(node.content ?? [], opts.link);
   return `<w:p>${pPr}${runs}</w:p>`;
 }
 
 /**
- * Build extra pPr children for spacing/indent/lineHeight when we're
- * reusing a rawPpr. This keeps the raw data intact while ensuring our
- * explicit edits actually make it to the saved file.
+ * CT_PPr 子元素的合法顺序（ECMA-376 §17.3.1.1）。Word 校验的是**先后**而不只是
+ * 元素本身，顺序错乱会弹"文档内容有问题"，所以透传的 rawPpr 与 attrs 生成的元素
+ * 都走这一份顺序表，不再由两条路径各自拼接。表里没有的名字排到最后，
+ * 维持它们在源文档里的相对次序。
  */
-function synthesizedFormatXml(
-  a: Record<string, unknown>,
-  rawPpr?: string,
-): string {
-  return [spacingElementXml(a, rawPpr), indElementXml(a, rawPpr)]
-    .filter(Boolean)
+const PPR_CHILD_ORDER = [
+  "w:pStyle",
+  "w:keepNext",
+  "w:keepLines",
+  "w:pageBreakBefore",
+  "w:framePr",
+  "w:widowControl",
+  "w:numPr",
+  "w:suppressLineNumbers",
+  "w:pBdr",
+  "w:shd",
+  "w:tabs",
+  "w:suppressAutoHyphens",
+  "w:kinsoku",
+  "w:wordWrap",
+  "w:overflowPunct",
+  "w:topLinePunct",
+  "w:autoSpaceDE",
+  "w:autoSpaceDN",
+  "w:bidi",
+  "w:adjustRightInd",
+  "w:snapToGrid",
+  "w:spacing",
+  "w:ind",
+  "w:contextualSpacing",
+  "w:mirrorIndents",
+  "w:suppressOverlap",
+  "w:jc",
+  "w:textDirection",
+  "w:textAlignment",
+  "w:textboxTightWrap",
+  "w:outlineLvl",
+  "w:divId",
+  "w:cnfStyle",
+  "w:rPr",
+  "w:sectPr",
+  "w:pPrChange",
+];
+
+/** `<w:pPr>` 的一个子元素：名字用于排序，xml 是最终写出的文本。 */
+interface PprPart {
+  name: string;
+  xml: string;
+}
+
+/**
+ * 按 CT_PPr 顺序稳定排序后拼出 `<w:pPr>`。
+ *
+ * @param parts 子元素列表，允许乱序；同名元素的相对次序保持传入顺序。
+ * @returns 完整的 pPr 字符串；一个子元素都没有时返回空串（段落直接不带 pPr）。
+ */
+function pprFromParts(parts: PprPart[]): string {
+  const rankOf = (name: string): number => {
+    const i = PPR_CHILD_ORDER.indexOf(name);
+    return i < 0 ? PPR_CHILD_ORDER.length : i;
+  };
+  const inner = parts
+    .map((part, index) => ({ index, rank: rankOf(part.name), xml: part.xml }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((part) => part.xml)
     .join("");
+  return inner ? `<w:pPr>${inner}</w:pPr>` : "";
+}
+
+/**
+ * 段落 attrs 里建模过的那些 pPr 子元素。
+ *
+ * 每一项同一条规则：attrs 没有值（undefined）就不产出元素，rawPpr 里的原文留着。
+ *
+ * @param a 段落 attrs（段前/缩进是 pt，lineHeight 是倍数或 pt:N / atLeast:N）。
+ * @param rawPpr 源文档 pPr 原文，供 spacing/ind 做属性级合并；undefined 表示新建段落。
+ * @returns 待排序写出的子元素。
+ */
+function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
+  const parts: PprPart[] = [];
+  const push = (name: string, xml: string) => {
+    if (xml) parts.push({ name, xml });
+  };
+  push("w:pageBreakBefore", onOffXml("w:pageBreakBefore", a.pageBreakBefore));
+  push("w:keepNext", onOffXml("w:keepNext", a.keepWithNext));
+  push("w:keepLines", onOffXml("w:keepLines", a.keepLines));
+  push("w:widowControl", onOffXml("w:widowControl", a.widowControl));
+  push("w:snapToGrid", onOffXml("w:snapToGrid", a.snapToGrid));
+  push("w:spacing", spacingElementXml(a, rawPpr));
+  push("w:ind", indElementXml(a, rawPpr));
+  push("w:jc", jcXml(a.textAlign));
+  const lvl = a.outlineLevel;
+  if (typeof lvl === "number" && Number.isInteger(lvl) && lvl >= 0 && lvl <= 9) {
+    push("w:outlineLvl", `<w:outlineLvl w:val="${lvl}"/>`);
+  }
+  return parts;
+}
+
+/**
+ * 生成段落的 `<w:pPr>`，两条路径（有 rawPpr 的导入段落 / 编辑器新建段落）共用。
+ *
+ * 合并规则：attrs 建模过的元素顶替 rawPpr 里的同名元素——spacing/ind 内部还要
+ * 逐个属性合并（见 `mergedElementXml`），因为源文档里可能有我们没建模的写法
+ * （`w:*Chars`、`w:*Lines`、`w:start`/`w:end`）。其余元素原样保留并按 CT_PPr
+ * 顺序排回该在的位置，源文档带 `<w:rPr>`（段落标记的字符属性，Word 写得非常多）
+ * 时不会再被挤到 spacing 前面。
+ *
+ * @param a 段落 attrs。
+ * @param opts.pStyle 段落要套用的样式 id（标题、引用）；源文档已有 pStyle 时以源文档为准。
+ * @param opts.numPr 列表段落重新分组后由我们给出的 numPr。
+ * @param opts.rawPpr 源文档的 pPr 内部 XML。
+ * @returns 完整 pPr 字符串；段落没有任何格式属性时返回空串。
+ */
+function paragraphPprXml(
+  a: PPrAttrs,
+  opts: { pStyle?: string; numPr?: string; rawPpr?: string } = {},
+): string {
+  const modeled = modeledPprParts(a, opts.rawPpr);
+  const covered = new Set(modeled.map((part) => part.name));
+  const rawParts = (opts.rawPpr ? parseFragment(opts.rawPpr) : [])
+    .map((el) => ({ name: el.name, xml: serialize(el) }))
+    .filter((part) => !covered.has(part.name));
+  // 样式引用以源文档为准：同一份 pPr 里出现两个 w:pStyle 时 Word 取第一个，
+  // 套用哪个样式就会变得不可预测，所以原文有 pStyle 就不再补我们推断的那个。
+  const keepOwnStyle =
+    !!opts.pStyle && !rawParts.some((part) => part.name === "w:pStyle");
+  const parts: PprPart[] = [];
+  if (keepOwnStyle) {
+    parts.push({
+      name: "w:pStyle",
+      xml: `<w:pStyle w:val="${opts.pStyle}"/>`,
+    });
+  }
+  parts.push(...rawParts);
+  if (opts.numPr) parts.push({ name: "w:numPr", xml: opts.numPr });
+  parts.push(...modeled);
+  return pprFromParts(parts);
+}
+
+/** textAlign（left/center/right/justify）→ `<w:jc>`；两端对齐在 OOXML 里叫 both。 */
+function jcXml(textAlign: string | undefined): string {
+  if (!textAlign) return "";
+  const v =
+    textAlign === "center"
+      ? "center"
+      : textAlign === "right"
+        ? "right"
+        : textAlign === "justify"
+          ? "both"
+          : "left";
+  return `<w:jc w:val="${v}"/>`;
 }
 
 /** pt → OOXML 的 twips 字符串（1pt = 20 twips）。 */
@@ -1122,7 +1255,7 @@ const SPACING_SUPPRESS: Record<string, string[]> = {
  * 传 undefined 的 attrs 项保持源文档原样。
  */
 function indElementXml(
-  a: Record<string, unknown>,
+  a: PPrAttrs,
   rawPpr?: string,
 ): string {
   const set: Record<string, string> = {};
@@ -1143,7 +1276,7 @@ function indElementXml(
  * "atLeast:N" 是最小值，单位都是 twips）。
  */
 function spacingElementXml(
-  a: Record<string, unknown>,
+  a: PPrAttrs,
   rawPpr?: string,
 ): string {
   const set: Record<string, string> = {};
@@ -1165,23 +1298,6 @@ function spacingElementXml(
     set,
     SPACING_SUPPRESS,
   );
-}
-
-function pPrTail(textAlign: string | undefined, pageBreakBefore?: boolean): string {
-  const parts: string[] = [];
-  if (pageBreakBefore) parts.push(`<w:pageBreakBefore/>`);
-  if (textAlign) {
-    const v =
-      textAlign === "center"
-        ? "center"
-        : textAlign === "right"
-          ? "right"
-          : textAlign === "justify"
-            ? "both"
-            : "left";
-    parts.push(`<w:jc w:val="${v}"/>`);
-  }
-  return parts.join("");
 }
 
 function headingXml(
@@ -1351,43 +1467,6 @@ function tableCellXml(
     })
     .join("");
   return `<w:tc>${tcPr.length ? `<w:tcPr>${tcPr.join("")}</w:tcPr>` : ""}${blocks || "<w:p/>"}</w:tc>`;
-}
-
-/**
- * 干净路径（编辑器新建、没有 rawPpr 的段落）的 `<w:pPr>`。
- * spacing/ind 与 rawPpr 路径共用 `spacingElementXml`/`indElementXml`，
- * 所以两处不会再生出第二套 pt→twips 换算或第二套 hanging 判断。
- *
- * @param pStyle 要写进的样式 id；undefined 表示不写。
- * @param textAlign left/center/right/justify，转成 `w:jc`。
- * @param pageBreakBefore 段前分页。
- * @param extras 段落格式 attrs（pt / 倍数），外加可选的 `numPr` 原文。
- */
-function pPrXml(
-  pStyle: string | undefined,
-  textAlign: string | undefined,
-  pageBreakBefore?: boolean,
-  extras: Record<string, unknown> = {},
-): string {
-  const parts: string[] = [];
-  if (pStyle) parts.push(`<w:pStyle w:val="${pStyle}"/>`);
-  if (pageBreakBefore) parts.push(`<w:pageBreakBefore/>`);
-  if (typeof extras.numPr === "string") parts.push(extras.numPr);
-  parts.push(spacingElementXml(extras));
-  parts.push(indElementXml(extras));
-  if (textAlign) {
-    const v =
-      textAlign === "center"
-        ? "center"
-        : textAlign === "right"
-          ? "right"
-          : textAlign === "justify"
-            ? "both"
-            : "left";
-    parts.push(`<w:jc w:val="${v}"/>`);
-  }
-  const inner = parts.filter(Boolean).join("");
-  return inner ? `<w:pPr>${inner}</w:pPr>` : "";
 }
 
 function inlineChildrenToXml(

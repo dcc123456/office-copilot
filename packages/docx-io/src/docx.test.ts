@@ -216,4 +216,16 @@ describe("DocxFile", () => {
     expect(once).toContain('w:hanging="420"');
     expect(twice).toBe(once);
   });
+
+  it("keeps the pagination switches and the paragraph mark run props through a save", async () => {
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:keepNext/><w:widowControl w:val="0"/><w:outlineLvl w:val="9"/><w:spacing w:after="120"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>标题候选</w:t></w:r></w:p>`,
+    ]);
+    expect(once).toContain("<w:keepNext/>");
+    expect(once).toContain('<w:widowControl w:val="0"/>');
+    expect(once).toContain('<w:outlineLvl w:val="9"/>');
+    // 段落标记自己的字符属性排在最后，否则 CT_PPr 顺序不合法。
+    expect(once.indexOf("<w:rPr")).toBeGreaterThan(once.indexOf("<w:spacing"));
+    expect(twice).toBe(once);
+  });
 });

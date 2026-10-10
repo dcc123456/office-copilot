@@ -22,4 +22,4 @@ export {
 export type { LinkStyle } from "./ooxml-pm.js";
 export { NumberingMap } from "./numbering.js";
 export { StyleMap } from "./styles.js";
-export type { PMDoc, PMNode, PMMark } from "./pm-schema.js";
+export type { PPrAttrs, PMDoc, PMNode, PMMark } from "./pm-schema.js";
