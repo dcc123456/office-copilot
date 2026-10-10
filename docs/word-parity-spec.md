@@ -667,9 +667,10 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 
 ## 七、排名 7：分栏 / 水印 / 页面边框 / 首字下沉 / 行号
 
-- 分节：`w:p/w:pPr/w:sectPr`（分节符）与 body 末尾的 `w:sectPr`。现在 `pmToOoxml`（`:234-243`）
-  只在 body 末尾写**一个**固定 `w:sectPr`，读侧遇到 `w:sectPr` 直接 `continue` 丢弃
-  （`:215`）——所以多节文档保存后会被拍成单节。这是本节第一个要修的保真问题。
+- 分节：`w:p/w:pPr/w:sectPr`（分节符）与 body 末尾的 `w:sectPr`。`pmToOoxml`（`:291-301`）在 body
+  末尾写一个默认 `w:sectPr`，读侧遇到 body 级 `w:sectPr` 直接 `continue` 丢弃（`:264`）——
+  节属性走的是 `section` 载荷而不是 PM 文档，所以单节文档靠 `replaceProseMirror` 把原节点换回来。
+  段内分节符（`w:pPr/w:sectPr`）目前只靠 `rawPpr` 透传，经编辑器会丢（见下面"①的实测"）。
 - 分栏：`w:cols w:num="2" w:space="twips"` + 每栏 `w:col`；编辑器需要 `section` 级属性承载，
   决定用「页面设置」面板（已有页面尺寸/边距的地方）。
 - 页面边框：`w:pgBorders`；水印：`w:headerReference` 里的 `v:shape` 文字（Word 用 WordArt VML，
@@ -677,11 +678,31 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 首字下沉：`w:pPr/w:framePr w:dropRows="3" w:line="…" w:hAnchor="text" w:vAnchor="text"`。
 - 行号：`w:lnNumType w:countBy="1" w:restart="newPage"`（节属性）。
 
-提交切分：① 多节 sectPr 读写保真；② 分栏；③ 页面边框 + 行号；④ 首字下沉；⑤ 水印。
+提交切分：① 节属性读写保真（`bba064e`）；② 分栏；③ 页面边框 + 行号；④ 首字下沉；⑤ 水印。
 
-> ⑤.1 期间实测到的新事实（2026-10-11，隔离探针：打开样例后不编辑、直接保存）：**桌面 app 的保存 payload 会让
-> `<w:sectPr>` 整块消失**，而 `docx-io` 的直接读写路径保留它。也就是上面那条"读侧丢弃"在桌面上还额外严重一层——
-> 单节文档的页面尺寸也保不住。①动手时先定位是渲染侧没带上，还是写侧又丢了一次。
+> ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
+> 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
+> `parseDocument` 的节点只在**原型**上带 `type`，展开拿不到，`serialize()` 的 `isElement`
+> 判不出来就返回空串。桌面 `saveDocx` 每次保存都会把打开时读到的页面设置
+> `setSectionGeometry()` 带回去（`apps/desktop/electron/fileHandlers.ts:285`），于是这一步
+> 每次都走到那条坏分支——整块节属性被一个"无名元素"替换掉。这也解释了为什么
+> `docx-io` 只调 `replaceProseMirror` 的直接读写路径看着是好的：那条路径不重建节属性。
+> 顺带修的第二处：`w:pgMar` 原本缺失时**追加在末尾**，会排到 `w:cols` / `w:docGrid` 之后，
+> 违反 `CT_SectPr` 的顺序（ECMA-376 §17.6.1 把 `pgMar` 定在 `pgSz` 之后、`pgBorders`/`lnNumType`/
+> `cols`/`docGrid` 之前），现在插在 `pgSz` 后面。
+> 实测两份：`docx.test.ts` 里复刻 app 保存路径（open → toProseMirror → setSectionGeometry →
+> replaceProseMirror → toBytes）的两条用例，断言未建模的 `w:cols` / `w:pgBorders` /
+> `w:lnNumType` / `w:docGrid` 逐字留下、顺序不动、二次保存字节一致；真实桌面 app（独立
+> `--user-data-dir` + CDP，`tmp/sect-app-probe.mjs`）打开一份带全字段的 `.docx` 直接点保存，
+> 读回来的 `document.xml` 里
+> `<w:sectPr><w:pgSz w:w="11906" …/><w:pgMar …/><w:pgBorders …>…</w:pgBorders><w:lnNumType …/>`
+> `<w:cols w:space="425" w:num="2"/><w:docGrid …/></w:sectPr>` **与打开时一致**，正文两段一字不缺。
+> 修之前的同一探针：`document.xml` 里 `<w:sectPr` 命中 0 次、`w:pgSz` 也 0 次（段内分节符那条
+> 因为不走 `buildSectPr` 才活着）。
+> 仍然没解决的：段内分节符（分节符那一段的 `w:pPr/w:sectPr`）靠 `rawPpr` 透传，而
+> `rawPpr` 在 Tiptap 的段落 schema 里没有注册，所以**经编辑器**的多节文档仍会被拍成单节——
+> 这条与排名 4 记下的 `rawPpr` 缺口是同一个，属独立一片，不夹进本节。
+> 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**。
 
 ## 八、总验收表（每个功能提交都要填满）
 
@@ -800,6 +821,31 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   段落标记那条修订经编辑器丢失，已记为缺口。
 - Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。
 - 提交：`5197192` `bee11e4` `ced2499` 已推送，`git ls-remote origin main` = `ced2499`。
+
+### 8.5 排名 7 ①（节属性在桌面保存链路的保真）验收记录（`bba064e`）
+
+- 往返用例：`docx.test.ts` 新增 2 条——"keeps every child of sectPr when the app re-applies its page
+  setup"（复刻 `saveDocx` 的顺序，断言 `w:cols`/`w:pgBorders`/`w:lnNumType`/`w:docGrid` 逐字留下、
+  `pgSz`→`pgMar`→`pgBorders`→`lnNumType`→`cols` 的相对顺序不动、二次保存字节一致）、
+  "inserts w:pgMar right after w:pgSz when the source section has no margins"。
+  公共夹具 `saveTwice()` 扩了 `{ sectPr, applyPageSetup }` 两个入参而不是另起一个平行 helper
+  （AGENTS §3.2：同一段"打开→保存→重开"的逻辑已经有第二处在长）。
+- live 用例：本片**不涉及**编辑器节点或标记——节属性走 `section` 载荷（`HeaderFooterPayload`），
+  不进 PM 文档，所以 §5.3 的注册要求不适用；相应的 `docBlocks.live.test.ts` 没有新条目。
+- 局部格式：不涉及（不碰 `w:rPr`）。
+- 撤销：不涉及——修的是序列化环节，没新增 op；保存仍走 `.tmp` → `rename`（§2.4）。
+- 类型 + 测试：`pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包 docx-io **251**（+2）/
+  desktop 264（24 个文件）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、
+  `packages/shared`、`apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针（`tmp/sect-app-probe.mjs`，独立 `--user-data-dir` + CDP）打开带全字段节属性的
+  `.docx`、不编辑直接点保存，读回 `document.xml`：`w:pgSz`/`w:pgMar`/`w:pgBorders`/`w:lnNumType`/
+  `w:cols`/`w:docGrid` 六项全在且与打开时一致，正文两段一字不缺。修前同一探针是
+  `<w:sectPr` 0 次、`w:pgSz` 0 次。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。顺序合规性按 ECMA-376 §17.6.1 的
+  `CT_SectPr` 序列推断，不是实测。
+- 遗留（写清楚，不算本片做完）：段内分节符仍靠 `rawPpr` 透传，经编辑器会丢，多节文档在桌面上
+  仍被拍成单节；与排名 4 记下的 `rawPpr` 注册缺口同属一片独立改动。
+- 提交：`bba064e` 已推送，`git ls-remote origin main` = `bba064e`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
