@@ -554,6 +554,32 @@ describe("书签锚点（真实 schema）", () => {
   });
 });
 
+describe("域芯片（真实 schema）", () => {
+  const field = (instr: string, display: string) => ({
+    type: "field",
+    attrs: { kind: instr.split(" ")[0]!, instr, display },
+  });
+
+  it("指令与含制表符的缓存结果活过 doc JSON", () => {
+    const doc = harness([para([field(`TOC \\o "1-3" \\h`, "第一章\t3"), text("后面")])]).state.doc;
+    const json = JSON.parse(JSON.stringify(doc.toJSON())) as {
+      content: { content: { type: string; attrs: Record<string, unknown> }[] }[];
+    };
+    expect(json.content[0]!.content[0]!.attrs).toMatchObject({
+      instr: `TOC \\o "1-3" \\h`,
+      display: "第一章\t3",
+    });
+    // 缓存结果是芯片上的字，不是正文：算进字数就会让改动块定位错位。
+    expect(doc.textContent).toBe("后面");
+  });
+
+  it("Word 还没算过结果的域仍是一个域节点，不会退化成文字", () => {
+    const doc = harness([para([field("DATE", "")])]).state.doc;
+    expect(doc.firstChild!.childCount).toBe(1);
+    expect(doc.firstChild!.child(0).type.name).toBe("field");
+  });
+});
+
 describe("超链接与正文色", () => {
   const GONGWEN = templateById("gongwen")!;
   const linkMark = {

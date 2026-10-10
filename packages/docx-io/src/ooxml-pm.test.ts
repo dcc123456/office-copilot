@@ -981,6 +981,78 @@ describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
   });
 });
 
+describe("域（w:fldChar / w:instrText / w:fldSimple）", () => {
+  /** Word 自己生成的目录条目：外层 TOC 域的结果里套超链接 + PAGEREF 子域。 */
+  const TOC_ENTRY = bodyXml(
+    `<w:p>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h \\z \\u </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:hyperlink w:anchor="_Toc1">` +
+      `<w:r><w:t>第一章</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \\h </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>3</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:hyperlink>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:p>`,
+  );
+
+  it("嵌套域不再劫持外层：一条 TOC 只产出一个 field 节点", () => {
+    const para = ooxmlToPm(TOC_ENTRY).content[0]!;
+    expect(para.content).toEqual([
+      {
+        type: "field",
+        attrs: {
+          kind: "TOC",
+          instr: `TOC \\o "1-3" \\h \\z \\u`,
+          display: "第一章\t3",
+        },
+      },
+    ]);
+  });
+
+  it("写回时把 \\t 还原成 <w:tab/>，再读一遍还是同一个域", () => {
+    const once = pmToOoxml(ooxmlToPm(TOC_ENTRY));
+    expect(once).toContain(
+      `<w:r><w:t xml:space="preserve">第一章</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t xml:space="preserve">3</w:t></w:r>`,
+    );
+    // 子域的指令不能混进外层：外层 instr 只有一句 TOC。
+    expect(once.match(/PAGEREF/g)).toBeNull();
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  /** begin 后直接 end：Word 插了域但还没算过结果。 */
+  const UNCALCULATED = bodyXml(
+    `<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> DATE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`,
+  );
+
+  it("Word 没算过结果的域不编占位文字", () => {
+    expect(ooxmlToPm(UNCALCULATED).content[0]!.content?.[0]).toMatchObject({
+      type: "field",
+      attrs: { instr: "DATE", display: "" },
+    });
+    // 写出去也不能凭空长出 "{DATE}" 这种用户没写过的文字。
+    const xml = pmToOoxml(ooxmlToPm(UNCALCULATED));
+    expect(xml).not.toContain("<w:t");
+    expect(pmToOoxml(ooxmlToPm(xml))).toBe(xml);
+  });
+
+  it("简单域的缓存结果按字面保留，首尾空格不 trim", () => {
+    const para = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:fldSimple w:instr=" PAGE   \\* MERGEFORMAT  "><w:r><w:t xml:space="preserve"> 12 </w:t></w:r></w:fldSimple></w:p>`,
+      ),
+    ).content[0]!;
+    expect(para.content?.[0]).toMatchObject({
+      type: "field",
+      attrs: { kind: "PAGE", instr: `PAGE   \\* MERGEFORMAT`, display: " 12 " },
+    });
+  });
+});
+
 describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {
   /** 一段里夹一个起点、下一段收尾：正是 ECMA-376 §17.5.2.1 例子那种跨段书签。 */
   const SPANNING = bodyXml(

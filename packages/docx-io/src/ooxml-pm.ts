@@ -656,26 +656,26 @@ interface InlineCtx {
 
 function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
   const out: PMNode[] = [];
-  // State for complex fields: fldChar begin/separate/end pairs span
-  // multiple runs. We buffer the instrText and the cached result so
-  // they become one PM field node.
+  // 复合域的 begin/separate/end 跨多个 run，而域的结果里还能再套域（目录的每条条目
+  // 里就有一个 PAGEREF 域）。所以按深度计数：只有最外层那一对 begin/end 产出 field 节点，
+  // 内层的指令与文字一律当作"缓存结果的文本"收走——否则内层那次 begin 会把外层的指令清零。
+  let fieldDepth = 0;
   let fieldInstr: string | null = null;
-  let fieldDisplay: string[] = [];
+  let fieldDisplay = "";
 
   const flushField = () => {
     if (fieldInstr === null) return;
-    const instr = fieldInstr.trim();
-    const display = fieldDisplay.join("").trim() || placeholderFor(instr);
     out.push({
       type: "field",
       attrs: {
-        kind: fieldKind(instr),
-        instr,
-        display,
+        kind: fieldKind(fieldInstr),
+        instr: fieldInstr.trim(),
+        // 缓存结果按字面留着，不 trim：目录条目的"标题⇥页码"就靠那个制表符对齐。
+        display: fieldDisplay,
       },
     });
     fieldInstr = null;
-    fieldDisplay = [];
+    fieldDisplay = "";
   };
 
   for (const child of children(p)) {
@@ -688,24 +688,31 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
         if (sub.name === "w:fldChar") {
           const t = sub.attributes?.["w:fldCharType"] as string | undefined;
           if (t === "begin") {
-            fieldInstr = "";
-            fieldDisplay = [];
-          } else if (t === "separate") {
-            // Switch from collecting instr to collecting display text.
+            if (fieldDepth === 0) {
+              fieldInstr = "";
+              fieldDisplay = "";
+            }
+            fieldDepth++;
           } else if (t === "end") {
-            flushField();
+            fieldDepth = Math.max(0, fieldDepth - 1);
+            if (fieldDepth === 0) flushField();
           }
+          // "separate" 只是"从这里起是结果"的记号；收什么由 fieldDepth 决定，不必单独分支。
           consumed = true;
-        } else if (sub.name === "w:instrText" && fieldInstr !== null) {
-          fieldInstr += textOf(sub);
+        } else if (sub.name === "w:instrText") {
+          // 只有最外层那一段指令属于这个域；内层域的指令是它自己结果的一部分。
+          if (fieldDepth === 1 && fieldInstr !== null) fieldInstr += textOf(sub);
           consumed = true;
-        } else if (sub.name === "w:t" && fieldInstr !== null) {
-          // The cached result sits between separate and end.
-          fieldDisplay.push(textOf(sub));
+        } else if (fieldDepth > 0) {
+          fieldDisplay += fieldResultText(sub);
           consumed = true;
         }
       }
       if (!consumed) out.push(...runToInlines(child, ctx));
+    } else if (fieldDepth > 0 && (child.name === "w:fldSimple" || child.name === "w:hyperlink")) {
+      // 外层域的结果里嵌了简单域或超链接（`\h` 生成的目录条目就是整条被 w:hyperlink 包着的）：
+      // 另立节点会让外层那条域的 begin/end 配不上对，所以整段折成缓存文本。
+      fieldDisplay += fieldResultText(child);
     } else if (child.name === "w:fldSimple") {
       // Simple field: <w:fldSimple w:instr="PAGE"><w:r>...</w:r></w:fldSimple>
       const instr = (child.attributes?.["w:instr"] as string | undefined) ?? "";
@@ -714,8 +721,8 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
         type: "field",
         attrs: {
           kind: fieldKind(instr),
-          instr,
-          display: texts.trim() || placeholderFor(instr),
+          instr: instr.trim(),
+          display: texts,
         },
       });
     } else if (child.name === "w:hyperlink") {
@@ -755,19 +762,28 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
   return inlines.filter((n) => n !== FLOAT_SLOT_MARK);
 }
 
+/**
+ * 域结果里的任意元素 → 缓存文本（递归到 run 的子元素）。
+ *
+ * OOXML 的制表符与换行是**元素**（`<w:tab/>`、`<w:br/>`）而不是字符，只取 `w:t`
+ * 会让目录条目的"标题⇥页码"塌成"标题页码"，所以这里换成字面字符；
+ * `fieldResultRuns` 是它的反面。
+ *
+ * @param el 域结果里遇到的一个元素（run、run 的子元素、超链接或简单域）。
+ * @returns 这个元素贡献的文字；不贡献文字的（rPr 等）返回空串。
+ */
+function fieldResultText(el: Element): string {
+  if (el.name === "w:t") return textOf(el);
+  if (el.name === "w:tab") return "\t";
+  if (el.name === "w:br") return "\n";
+  if (el.name === "w:noBreakHyphen") return "\u2011";
+  if (el.name === "w:rPr" || el.name === "w:pPr") return "";
+  return children(el).map(fieldResultText).join("");
+}
+
 function fieldKind(instr: string): string {
   const m = instr.trim().match(/^([A-Za-z]+)/);
   return m && m[1] ? m[1].toUpperCase() : "FIELD";
-}
-
-function placeholderFor(instr: string): string {
-  const k = fieldKind(instr);
-  if (k === "PAGE") return "1";
-  if (k === "NUMPAGES") return "1";
-  if (k === "DATE") return "YYYY/MM/DD";
-  if (k === "AUTHOR") return "(作者)";
-  if (k === "FILENAME") return "(文件名)";
-  return `{${k}}`;
 }
 
 /**
@@ -2029,14 +2045,46 @@ function runPropertiesParts(marks: PMMark[], link?: LinkStyle | null): RunProper
 
 function fieldXml(node: Extract<PMNode, { type: "field" }>): string {
   const instr = node.attrs.instr ?? node.attrs.kind ?? "PAGE";
-  const display = node.attrs.display ?? placeholderFor(instr);
+  const display = node.attrs.display ?? "";
   return (
     `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
     `<w:r><w:instrText xml:space="preserve"> ${escapeXml(instr)} </w:instrText></w:r>` +
     `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
-    `<w:r><w:t xml:space="preserve">${escapeXml(display)}</w:t></w:r>` +
+    fieldResultRuns(display) +
     `<w:r><w:fldChar w:fldCharType="end"/></w:r>`
   );
+}
+
+/**
+ * 缓存结果文本 → 结果 run 序列，是 `fieldResultText` 的反向换算。
+ *
+ * display 里的 `\t`、`\n` 必须还原成 `<w:tab/>`、`<w:br/>` 元素：OOXML 的 run 里
+ * 没有"制表符字符"，把它写进 `<w:t>` 只会变成一个不可见字符，目录条目的页码对齐就没了。
+ *
+ * @param display 编辑器里的缓存结果，可含 `\t` / `\n` / `\u2011`。
+ * @returns 零个或多个 `<w:r>`；display 为空时返回空串——Word 允许域还没有算过结果。
+ */
+function fieldResultRuns(display: string): string {
+  if (!display) return "";
+  let xml = "";
+  let pending = "";
+  const flush = () => {
+    if (pending) xml += `<w:r><w:t xml:space="preserve">${escapeXml(pending)}</w:t></w:r>`;
+    pending = "";
+  };
+  for (const char of display) {
+    if (char === "\t") {
+      flush();
+      xml += `<w:r><w:tab/></w:r>`;
+    } else if (char === "\n") {
+      flush();
+      xml += `<w:r><w:br/></w:r>`;
+    } else {
+      pending += char;
+    }
+  }
+  flush();
+  return xml;
 }
 
 /**

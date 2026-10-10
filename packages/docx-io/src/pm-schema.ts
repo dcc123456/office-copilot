@@ -151,6 +151,13 @@ export type PMNode =
        * The `display` attr is the cached result shown in the editor and
        * written into `<w:t>` so Word/WPS can display something even
        * before it recalculates fields.
+       *
+       * `display` 是缓存结果的**字面文本**：`\t` / `\n` 分别对应 OOXML 的
+       * `<w:tab/>` / `<w:br/>`（目录条目的"标题⇥页码"就靠它对齐），空串表示 Word
+       * 还没算过结果——我们不替用户编一个占位文字写回文档。
+       *
+       * 局限：一个节点只表示**同段落内** begin/end 配对的域。跨段落的域（Word 生成的多行
+       * 目录）读回来只有第一段成为 field 节点，后面的条目退化成普通文字。
        */
       type: "field";
       attrs: {

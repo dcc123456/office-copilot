@@ -242,6 +242,30 @@ describe("DocxFile", () => {
     expect(twice).toBe(once);
   });
 
+  it("keeps a TOC field with a nested PAGEREF through a real save", async () => {
+    // Word 生成的目录条目里嵌着 PAGEREF 子域，缓存结果还带着制表符；
+    // 这一整段必须经 fromBytes → toProseMirror → replaceProseMirror → toBytes 稳定回来。
+    const toc =
+      `<w:p>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; \\h </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:hyperlink w:anchor="_Toc1">` +
+      `<w:r><w:t>第一章</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>3</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
+    const { once, twice } = await saveTwice([toc]);
+    // 指令里的引号在文本位置（不是属性值），docx.ts 落盘前会重新序列化一遍，
+    // `&quot;` 于是回到 `"` —— 这在 XML 文本里是合法的，别按属性位置的写法去断言。
+    expect(once).toContain(`TOC \\o "1-3" \\h`);
+    expect(once).toContain(`<w:t xml:space="preserve">第一章</w:t>`);
+    expect(once).toContain(`<w:r><w:tab/></w:r>`);
+    expect(twice).toBe(once);
+  });
+
   it("keeps an imported paragraph border through two real saves", async () => {
     const { once, twice } = await saveTwice([
       `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr><w:r><w:t>Word 里插入的分隔线</w:t></w:r></w:p>`,
