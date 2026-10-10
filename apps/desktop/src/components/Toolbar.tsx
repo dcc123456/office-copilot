@@ -14,6 +14,7 @@ import {
   AlignRight,
   AlignJustify,
   Table as TableIcon,
+  TableOfContents,
   Image as ImageIcon,
   Link as LinkIcon,
   Highlighter,
@@ -66,6 +67,7 @@ export type ToolbarAction =
   | "print"
   | "find-replace"
   | "page-setup"
+  | "insert-toc"
   | "styles"
   | "beautify"
   | "revert-beautify";
@@ -362,6 +364,9 @@ export function Toolbar({
           }
         >
           <Pilcrow size={16} />
+        </Btn>
+        <Btn title="插入目录" onClick={() => onAction("insert-toc")}>
+          <TableOfContents size={16} />
         </Btn>
         <Btn
           title="分割线"

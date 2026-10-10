@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest";
 import { getSchema } from "@tiptap/core";
 import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
-import { EditorState } from "@tiptap/pm/state";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
 import { executeOps } from "./docBlocks.js";
 import {
   collectTocEntries,
   nextBookmarkId,
   planTocInsertion,
+  tocAnchorForSelection,
   tocEntryJson,
   tocLevelOf,
   tocPageNumberRefresh,
@@ -22,14 +23,20 @@ import {
 
 const schema = getSchema(EDITOR_EXTENSIONS);
 
-function harness(content: unknown): Editor {
+function harness(content: unknown, selFrom?: number): Editor {
+  const doc = schema.nodeFromJSON({ type: "doc", content });
   let state = EditorState.create({
     schema,
-    doc: schema.nodeFromJSON({ type: "doc", content }),
+    doc,
+    // 不给选区就用默认的文档开头，`tocAnchorForSelection` 那条用例要能指定光标。
+    ...(selFrom === undefined ? {} : { selection: TextSelection.create(doc!, selFrom) }),
   });
   return {
     get state() {
       return state;
+    },
+    get isDestroyed() {
+      return false;
     },
     view: {
       dispatch: (tr: Parameters<typeof state.apply>[0]) => {
@@ -159,12 +166,13 @@ describe("条目段落的 JSON", () => {
     });
   });
 
-  it("关掉显示页码就既不写制表符也不写域", () => {
+  it("关掉显示页码就既不写制表符也不写域，连制表位都不留", () => {
     const json = tocEntryJson(entry, { ...OPTIONS, showPageNumbers: false }, {
       first: true,
       last: true,
     });
     expect(json.content).toHaveLength(3); // fieldBegin + 标题 + fieldEnd
+    expect(json.attrs?.tabStops).toBeUndefined();
     expect((json.content as Record<string, unknown>[])[1]).toMatchObject({
       type: "text",
       text: "小节",
@@ -220,11 +228,11 @@ describe("插入目录的 op 与撤销（真实 schema）", () => {
     expect(editor.state.doc.toJSON()).toEqual(beforeJSON);
   });
 
-  it("指定 after 时目录插在那一段之后，而不是文档开头", () => {
+  it("指定 position 时目录插在那一段之后，而不是文档开头", () => {
     const editor = harness(source);
     const plan = planTocInsertion(editor, {
       ...OPTIONS,
-      after: { by: "blockText", text: "正文", nth: 0 },
+      position: { at: "after", after: { by: "blockText", text: "正文", nth: 0 } },
     });
     expect(plan.ok).toBe(true);
     executeOps(editor, plan.ops, plan.after);
@@ -245,6 +253,54 @@ describe("插入目录的 op 与撤销（真实 schema）", () => {
     const levels = planTocInsertion(editor, { ...OPTIONS, levels: 0 });
     expect(levels.reason).toBe("bad-levels");
     expect(levels.ops).toEqual([]);
+  });
+});
+
+describe("插入位置取自光标（Word 在光标处插入目录）", () => {
+  const source = [heading(1, "第一章"), para([text("正文")]), heading(2, "小节"), para([text("结尾")])];
+  // 正文段里第一个字符的位置：第一段 heading 的 nodeSize（1 + 3 字 + 1）再加一。
+  const insideBody = schema.nodeFromJSON({ type: "doc", content: source })!.child(0).nodeSize + 1;
+
+  it("光标在第二段里，就得到那一段的内容地址", () => {
+    expect(tocAnchorForSelection(harness(source, insideBody))).toEqual({
+      at: "after",
+      after: { by: "blockText", text: "正文", nth: 0 },
+    });
+  });
+
+  it("光标在表格段落里也照样给得出锚点（表格按内容寻址）", () => {
+    const doc = [
+      heading(1, "第一章"),
+      {
+        type: "table",
+        content: [
+          {
+            type: "tableRow",
+            content: [{ type: "tableCell", content: [para([text("甲")])] }],
+          },
+        ],
+      },
+    ];
+    // 光标要真的落在单元格文字里：表格、行、单元格、段落各占一层开合（+4）。
+    const insideTable = schema.nodeFromJSON({ type: "doc", content: doc })!.child(0).nodeSize + 4;
+    expect(tocAnchorForSelection(harness(doc, insideTable)).at).toBe("after");
+  });
+
+  it("位置一路带到 op：目录确实插在光标那段之后", () => {
+    const withSel = harness(source, insideBody);
+    const plan = planTocInsertion(withSel, {
+      ...OPTIONS,
+      position: tocAnchorForSelection(withSel),
+    });
+    expect(executeOps(withSel, plan.ops, plan.after).ok).toBe(true);
+    expect(texts(withSel.state.doc)).toEqual([
+      "第一章",
+      "正文",
+      "第一章\t",
+      "小节\t",
+      "小节",
+      "结尾",
+    ]);
   });
 });
 

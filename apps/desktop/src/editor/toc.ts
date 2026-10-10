@@ -6,6 +6,7 @@ import {
   addressOf,
   runOps,
   type Address,
+  type Anchor,
   type Block,
   type CoreOp,
   type JsonNode,
@@ -27,6 +28,13 @@ import { pageNumberOf } from "./extensions/PagedLayout.js";
  * - 条目靠右对齐制表位 + 前导符对齐页码，所以排名 5 ① 的制表位数据层是这里的前提。
  */
 
+/**
+ * 目录插在哪。Word 的「目录」是在光标处插入的，所以只有这两种：文档开头，
+ * 或选区所在那一段之后。{ at: "end" } 不在这张表里——倒序插入靠的是"每次都插在同一
+ * 个锚点后面"，文档末尾没有锚点可复用了，硬做要多写一条排序分支，不值。
+ */
+export type TocPosition = { at: "start" } | { at: "after"; after: Address };
+
 /** Word「目录」对话框里可勾的那几项。 */
 export interface TocOptions {
   /** 收录的最高大纲级别（`\o "1-N"`），1–9。 */
@@ -37,8 +45,8 @@ export interface TocOptions {
   leader: TabStopLeader;
   /** 正文区宽度，CSS px（`SectionGeometry.contentWidth`）；换算是 `cssPxToPt`，不在本文件里。 */
   contentWidthPx: number;
-  /** 目录插在这一块之后；缺省 = 插到文档最前面。 */
-  after?: Address;
+  /** 插入位置；缺省 = 文档最前面。 */
+  position?: TocPosition;
 }
 
 /** 一条目录条目对应的标题。 */
@@ -181,12 +189,16 @@ export function tocEntryJson(
   opts: TocOptions,
   edge: { first: boolean; last: boolean },
 ): JsonNode {
-  const stop: TabStop = {
-    positionPt: cssPxToPt(opts.contentWidthPx),
-    alignment: "right",
-    leader: opts.leader,
-  };
-  const attrs: Record<string, unknown> = { tabStops: [stop] };
+  const attrs: Record<string, unknown> = {};
+  // 制表位只为页码而存在：不显示页码时写它，等于给一段没有制表符的文字加格式。
+  if (opts.showPageNumbers) {
+    const stop: TabStop = {
+      positionPt: cssPxToPt(opts.contentWidthPx),
+      alignment: "right",
+      leader: opts.leader,
+    };
+    attrs.tabStops = [stop];
+  }
   if (entry.level > 1) attrs.indent = (entry.level - 1) * LEVEL_INDENT_PT;
 
   const children: unknown[] = [];
@@ -216,6 +228,26 @@ export function tocEntryJson(
 }
 
 /**
+ * 选区所在的那一段，作为「插在这一段之后」的位置——Word 在光标处插入目录。
+ *
+ * 按顶层块算，所以表格、图片里光标也能当锚点（`addressOf` 认这两种地址）；
+ * 选区跨段时取起始那段。
+ *
+ * @param editor 桌面编辑器。
+ * @returns 位置描述；光标落在块模型给不出地址的那一段（例如未建模的顶层节点）时
+ *          退回 `{ at: "start" }`，界面因此永远拿得到一个可用位置。
+ */
+export function tocAnchorForSelection(editor: Editor): TocPosition {
+  const { doc, selection } = editor.state;
+  let index = -1;
+  doc.forEach((node, offset, i) => {
+    if (offset <= selection.from && selection.from < offset + node.nodeSize) index = i;
+  });
+  const addr = index >= 0 ? addressOf(blocksOf(doc), index) : null;
+  return addr ? { at: "after", after: addr } : { at: "start" };
+}
+
+/**
  * 生成一次目录插入的 op，并在块模型上模拟出结果——和 `planEdit` 同一套语义：
  * 实际落地与模拟不一致时 `executeOps` 会整批放弃（AGENTS §2.4）。
  *
@@ -241,7 +273,7 @@ export function planTocInsertion(editor: Editor, opts: TocOptions): TocPlan {
   const entries = collectTocEntries(state.doc, opts.levels, (pos) => pageNumberOf(state, pos));
   if (!entries.length) return { ...empty, reason: "no-headings" };
 
-  const anchor = opts.after ? { at: "after" as const, after: opts.after } : { at: "start" as const };
+  const anchor: Anchor = opts.position ?? { at: "start" };
   const ops: CoreOp[] = entries.map(
     (entry): CoreOp => ({
       kind: "addBookmark",
@@ -344,6 +376,48 @@ export function tocPageNumberRefresh(
     }
   }
   return changed ? tr.setMeta("addToHistory", false) : null;
+}
+
+/**
+ * 插完目录后盯着分页收敛，把条目里缓存的页码刷成分页现在说的数。
+ *
+ * 不能只刷一次：`PagedLayout` 的测量在 requestAnimationFrame 里跑，字体到位、
+ * 上一轮插入的分页符落定之后才出最终计划，第一遍读到的还是旧页码。所以按帧检查，
+ * 连续 `settleMs` 没有页码要改就收手，`deadlineMs` 是无条件兜底。
+ *
+ * @param editor 桌面编辑器。
+ * @param opts.settleMs   多久没有再改动就停止观察，默认 600ms。
+ * @param opts.deadlineMs 最长观察多久，默认 5000ms。
+ * @returns 停止观察的函数；对话框关闭或组件卸载时调用，免得向已销毁的编辑器派发事务。
+ */
+export function watchTocPageNumbers(
+  editor: Editor,
+  opts: { settleMs?: number; deadlineMs?: number } = {},
+): () => void {
+  const settleMs = opts.settleMs ?? 600;
+  const deadlineMs = opts.deadlineMs ?? 5000;
+  const startedAt = Date.now();
+  let lastChangeAt = startedAt;
+  let stopped = false;
+  let frame = 0;
+  const stop = () => {
+    stopped = true;
+    cancelAnimationFrame(frame);
+  };
+  const tick = () => {
+    if (stopped) return;
+    if (editor.isDestroyed) return stop();
+    const now = Date.now();
+    const tr = tocPageNumberRefresh(editor.state, (pos) => pageNumberOf(editor.state, pos));
+    if (tr) {
+      editor.view.dispatch(tr);
+      lastChangeAt = now;
+    }
+    if (now - lastChangeAt >= settleMs || now - startedAt >= deadlineMs) return stop();
+    frame = requestAnimationFrame(tick);
+  };
+  frame = requestAnimationFrame(tick);
+  return stop;
 }
 
 /**

@@ -7,6 +7,13 @@ import { Toolbar, type ToolbarAction } from "./components/Toolbar.js";
 import { Outline } from "./components/Outline.js";
 import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
 import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
+import { TocDialog } from "./components/TocDialog.js";
+import {
+  insertToc,
+  watchTocPageNumbers,
+  type TocOptions,
+  type TocReject,
+} from "./editor/toc.js";
 import type {
   LinkStyle,
   PaneStyle,
@@ -101,6 +108,7 @@ export function App() {
     [docStyleFormats],
   );
   const [pageSetupOpen, setPageSetupOpen] = useState(false);
+  const [tocOpen, setTocOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [aiCollapsed, setAiCollapsed] = useState(false);
   const [showAI, setShowAI] = useState(true);
@@ -430,6 +438,31 @@ export function App() {
     })();
   }, [editor, filePath, setLastTemplate, refreshCanRevert]);
 
+  /** 上一次目录页码观察器的停止函数：再插一次目录前先掐掉旧的循环。 */
+  const tocWatch = useRef<(() => void) | null>(null);
+  useEffect(() => () => tocWatch.current?.(), []);
+
+  /**
+   * 「插入目录」对话框点确定：落 op、写修改历史，然后盯分页把页码刷对。
+   *
+   * @param opts 对话框选项；`contentWidthPx` 是 CSS px，磅的换算只在 docx-io 边界发生。
+   * @returns 成功返回 null（对话框据此关闭）；失败返回引擎的拒绝码，中文文案在对话框里拼。
+   */
+  const handleInsertToc = useCallback(
+    async (opts: TocOptions): Promise<TocReject | null> => {
+      if (!editor) return "ops-failed";
+      const result = await insertToc(editor, filePath ?? "未命名文档", opts);
+      if (!result.ok) return result.reason ?? "ops-failed";
+      setDirty(true);
+      toast(`已插入目录（${result.entries} 条）。`, "success");
+      // 目录自己占了版面，标题会被往后推：分页收敛之前读到的页码都是旧的。
+      tocWatch.current?.();
+      tocWatch.current = watchTocPageNumbers(editor);
+      return null;
+    },
+    [editor, filePath],
+  );
+
   const handleToolbarAction = useCallback(
     (action: ToolbarAction) => {
       switch (action) {
@@ -453,6 +486,9 @@ export function App() {
           break;
         case "page-setup":
           setPageSetupOpen(true);
+          break;
+        case "insert-toc":
+          setTocOpen(true);
           break;
         case "styles":
           setStylePaneOpen((v) => !v);
@@ -698,6 +734,7 @@ export function App() {
       handleSaveAs: () => void handleSaveAs(),
       handlePrint: () => void handlePrint(),
       openPageSetup: () => setPageSetupOpen(true),
+      openToc: () => setTocOpen(true),
       showFindBar: () => setShowFind(true),
       toggleOutline: () => setOutlineCollapsed((v) => !v),
       toggleAI: () => {
@@ -864,6 +901,13 @@ export function App() {
         lastTemplateId={lastTemplateId}
         onClose={() => setTemplateOpen(false)}
         onPick={applyTemplate}
+      />
+      <TocDialog
+        open={tocOpen}
+        editor={editor}
+        contentWidthPx={section?.contentWidth ?? 602}
+        onClose={() => setTocOpen(false)}
+        onInsert={handleInsertToc}
       />
       <HistoryPanel
         open={historyOpen}

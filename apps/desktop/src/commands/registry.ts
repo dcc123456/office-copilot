@@ -14,6 +14,7 @@ import {
   Wand2,
   SpellCheck,
   Table2,
+  TableOfContents,
   Workflow,
 } from "lucide-react";
 import type { ThemeId } from "../uiStore.js";
@@ -25,6 +26,7 @@ export interface CommandContext {
   handleSaveAs: () => void;
   handlePrint: () => void;
   openPageSetup: () => void;
+  openToc: () => void;
   showFindBar: () => void;
   toggleOutline: () => void;
   toggleAI: () => void;
@@ -63,6 +65,8 @@ export const COMMANDS: Command[] = [
   { id: "file.save-as", title: "另存为…", keywords: "save as", icon: Download, group: "文件", shortcut: "⌘⇧S", run: (c) => c.handleSaveAs() },
   { id: "file.print", title: "打印 / 导出 PDF", keywords: "print pdf export", icon: Printer, group: "文件", shortcut: "⌘P", run: (c) => c.handlePrint() },
   { id: "file.page-setup", title: "页面设置…", keywords: "page setup margin", icon: Settings2, group: "文件", run: (c) => c.openPageSetup() },
+
+  { id: "insert.toc", title: "插入目录…", keywords: "insert toc table of contents 目录 目次 标题", icon: TableOfContents, group: "插入", run: (c) => c.openToc() },
 
   { id: "edit.find", title: "查找与替换", keywords: "find replace search", icon: Search, group: "编辑", shortcut: "⌘F", run: (c) => c.showFindBar() },
 
