@@ -126,6 +126,28 @@ export function cssPxToPt(px: number): number {
 }
 
 /**
+ * 厘米 → 磅，给"按 Word 的口径录入位置"的界面用：中文版的制表位/缩进对话框都按厘米
+ * 显示，而段落属性与 `w:pos` 之间只有磅这一层，换算仍然只出自 docx-io（AGENTS §2.1）。
+ *
+ * @param cm 厘米，界面录入的两位小数。
+ * @returns 磅值，保留一位小数——与 `readTabStops`、`cssPxToPt` 同口径，来回换算不漂移。
+ */
+export function cmToPt(cm: number): number {
+  return Math.round(((cm * 72) / 2.54) * 10) / 10;
+}
+
+/**
+ * 磅 → 厘米，`cmToPt` 的逆运算，只用于把段落属性显示回录入框。
+ *
+ * @param pt 段落属性里的磅值。
+ * @returns 厘米，保留两位小数（Word 对话框的显示位数）；导入文档的位置是 0.1pt 精度，
+ *   显示到厘米再录回去可能差 0.1pt，这是 Word 自己的厘米网格，不是我们的换算误差。
+ */
+export function ptToCm(pt: number): number {
+  return Math.round(((pt * 2.54) / 72) * 100) / 100;
+}
+
+/**
  * OOXML colours are bare hex. Mark attrs are hex for anything this app or a
  * .docx produced, but pasted HTML lands as `rgb(...)` — and a value Word cannot
  * read invalidates the whole run properties, so an unreadable colour is dropped

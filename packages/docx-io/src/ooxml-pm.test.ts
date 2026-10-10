@@ -7,6 +7,8 @@ import {
   cssFontSizeToPt,
   ptToCssLetterSpacing,
   cssPxToPt,
+  cmToPt,
+  ptToCm,
   cssColorToOoxmlHex,
   canonColor,
 } from "./ooxml-pm.js";
@@ -983,6 +985,18 @@ describe("段落开关与大纲级别（Word 段落对话框的其余字段）",
       expect(attrs.tabStops).toBeUndefined();
       expect(pPr).toBe(`<w:pPr>${tabs}</w:pPr>`);
     }
+  });
+
+  it("厘米录入与磅来回换算，位置落在 Word 的显示精度上", () => {
+    // 界面按厘米录入（中文版 Word 的制表位对话框就是厘米），换算只能出自这里。
+    expect(cmToPt(2)).toBe(56.7);
+    expect(cmToPt(14.65)).toBe(415.3);
+    expect(ptToCm(415.3)).toBe(14.65);
+    expect(ptToCm(cmToPt(0.5))).toBe(0.5);
+    // 读侧给的 0.1pt 位置显示成厘米、再录回去，最多差一个录入格（0.01cm ≈ 0.28pt），
+    // 这就是 Word 自己按厘米定位置时会有的误差。
+    const positionPt = 415.3;
+    expect(Math.abs(cmToPt(ptToCm(positionPt)) - positionPt)).toBeLessThan(0.5);
   });
 });
 

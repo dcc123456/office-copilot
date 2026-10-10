@@ -16,6 +16,8 @@ export {
   ptToCssLetterSpacing,
   cssLetterSpacingToPt,
   cssPxToPt,
+  cmToPt,
+  ptToCm,
   cssColorToOoxmlHex,
   canonColor,
   lineHeightSpacingAttrs,
