@@ -239,7 +239,7 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | `2dadd0a` |
 | ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | `e9f2806` |
 | ④.1 | 脚注/尾注部件保真（`footnotes.xml`/`endnotes.xml` + Content_Types + rels）+ 正文引用点的行内 atom | `013d8ca` |
-| ④.2 | 脚注正文的编辑与编号：在编辑器里改脚注内容、插入/删除脚注时重排 `w:id` 与 Word 的显示编号 | 待做 |
+| ④.2 | 脚注正文的编辑与编号：在编辑器里改脚注内容、插入/删除脚注时重排 `w:id` 与 Word 的显示编号 | `f005b3c` |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
 
 ③.2 的取舍（都是刻意的，不要当成待修项）：
@@ -271,8 +271,8 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 非数字 id，整个部件标记为 `unmodeled` 且一次都不重写，宁可放弃功能也不静默丢内容。登记复用
 `ensurePartReference`（Content_Types Override + rels，幂等），表头页脚则迁到共享的片段转换入口，
 不再各自留一份实现（§3.2）。编辑器侧 `FootnoteReference`/`EndnoteReference` 两个行内 atom 注册进
-`EDITOR_EXTENSIONS`；芯片显示"注/尾"而不是 Word 的编号，因为 `renderHTML` 拿不到节点在文档里的位置——
-编号与脚注正文的编辑都是 ④.2。
+`EDITOR_EXTENSIONS`；芯片当时只显示"注/尾"，因为 `renderHTML` 拿不到节点在文档里的位置——编号与正文的编辑
+都由 ④.2 补上。
 
 ④.1 的验收与差距：
 
@@ -282,7 +282,35 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
   rels 未重复）。
 - **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
 - 差距：脚注正文在编辑器里**只读**（侧表不进 doc，改了也不会写回），Word 的显示编号没有回写；
-  `w:customMarkFollows` 标过的引用刻意不读；脚注正文里的图片不解析关系，整段原样透传。
+  这两条由 ④.2 关掉。`w:customMarkFollows` 标过的引用刻意不读；脚注正文里的图片不解析关系，整段原样透传。
+
+④.2 的做法（正文编辑与编号）：**编号是派生显示值，绝不进文件**——Word 按引用点在正文里的出现顺序算号
+（ECMA-376 §17.11，`w:id` 只是内部键），所以 `FootnoteNumbering` 插件在 `docChanged` 时遍历一遍正文，
+把号写回芯片的 `number` attrs，并用 `setMeta("addToHistory", false)` 让"重排号数"不掺进用户的撤销栈。
+同一次遍历顺手记下 `kind:id → 第一次出现的 pos`，窗格的排序、跳正文、删引用都读这一份索引，不再各扫
+一遍树（§3.2）。正文的编辑走 `FootnoteBodies` 侧表，随页眉页脚**同一份 payload** 进出主进程，落盘仍然只有
+`DocxFile.setFootnoteBodies` → `applyFootnoteBodies` 一个写手；文字没变的条目由 `sameFragment` 判定后继续
+按原始 XML 字节透传，`separator` 版式件不接受编辑，`unmodeled` 的部件整体无视窗格送来的正文。插入取号用
+`nextFootnoteId`（正常条目里最大的数字 id 加一，版式件不参与，空表从 1 起）。**删引用只删芯片、不删缓存正文**：
+用户接着撤销时字还在，真正没人引用的条目由保存时的 `syncFootnoteIds` 清掉，窗格里那条排在最后、号显示 "?"
+且不可点。脚注正文的嵌套编辑器复用 `NESTED_EXTENSIONS`——页眉页脚是它的第一处使用，这里是第二处（§3.2）。
+
+④.2 的验收与差距：
+
+- 真实 app 实测（构建产物 + CDP 驱动，独立 `--user-data-dir`，不碰用户在跑的实例），样例是脚注两条 + 尾注一条：
+  打开后芯片即 `1 / 2 / 1`（脚注按正文顺序、尾注自己数），窗格列出 3 行带预览；选中第一条后嵌套编辑器给出
+  部件里读出的正文；改成新句子后列表预览与落盘同步；「插入脚注」得到号 2 并把原第二条顶成 3——**派生号跟着
+  正文重排**；删除第一条的引用后号再次重排（原 2 变 1），那条正文变成孤立行显示 "?"；点工具栏「撤销」后芯片
+  回来且正文缓存还在。
+- 保存后读回 `word/footnotes.xml` 的 8 项判定全过：条目 id 齐 `1/2/3`，两条 `separator` 家具保留，
+  三个 `w:footnoteRef` 记号都在，没改的第二条逐字节透传（连 `xml:space="preserve"` 一起），新条目是带记号的
+  空正文，`endnotes.xml` 一字未动，Content_Types 只登记一次。
+- 差距：撤销实测走的是工具栏「撤销」按钮（与 `editor.can().undo()` 同一条路径），CDP 注入的 Cmd+Z 没有送达
+  PM 的 keymap，**键盘路径只有 PM history 背书，不是实测**。同理一次撤销会把 500ms 内的多处改动并成一个历史组
+  （PM history 的 `newGroupDelay`），探针必须拉开间隔才看得清单步语义——真实手速下用户看到的也是并组后的结果。
+- 差距：`w:numberFormat`（`i, ii, ①` 之类）与 `w:customMarkFollows` 仍不读不写，原样透传；脚注正文里的图片仍不
+  解析关系；窗格没有"脚注转尾注"与编号格式入口。
+- **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
 
 ②的已知差距：一个 `field` 节点只表示**同一段内**的 begin/end 配对，Word 生成的多段目录从第二段起读成纯文本
 ——已由 ③.1 解决。缓存结果里的嵌套域指令（如目录条目的 `PAGEREF`）②只保留文本，③.1 起改由边界节点之间的
