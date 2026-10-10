@@ -324,6 +324,25 @@ export function normalise(text: string): string {
   return text.replace(/\s*\n\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
 }
 
+/**
+ * 段落 JSON 里所有文字节点的拼接结果，即 {@link buildJsonBlock} 要拿去核对的 `textContent`。
+ *
+ * 引擎直接给 JSON 的块（目录条目、题注）都带着域、书签这类原子节点，它们自己的显示文字
+ * 不属于正文，所以块模型用来寻址的那段文字只能从 JSON 现算，不能靠调用方手写——
+ * 写错一个字，撤销时就再也找不到回来那条路。
+ *
+ * @param json 段落（或标题）节点 JSON。
+ * @returns 纯文本，顺序与 JSON 里的 `content` 一致。
+ */
+export function jsonContentText(json: JsonNode): string {
+  let out = "";
+  for (const child of json.content ?? []) {
+    const node = child as { type?: string; text?: string };
+    if (node.type === "text") out += node.text ?? "";
+  }
+  return out;
+}
+
 function marksOf(node: PMNode | null) {
   const first = node ? texts(node)[0] : undefined;
   return first?.marks?.length ? first.marks : undefined;

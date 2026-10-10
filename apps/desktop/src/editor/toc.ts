@@ -12,7 +12,7 @@ import {
   type JsonNode,
 } from "../ai/docEdit.js";
 import { commitOps, type CommitResult } from "../ai/agent.js";
-import { blocksOf, locateAll } from "./docBlocks.js";
+import { blocksOf, jsonContentText, locateAll } from "./docBlocks.js";
 import { pageNumberOf } from "./extensions/PagedLayout.js";
 
 /**
@@ -467,21 +467,5 @@ function pagerefPatchNodes(
     if (String(attrs.display ?? "") === display) return;
     out.push({ offset, attrs: { ...attrs, display } });
   });
-  return out;
-}
-
-/**
- * 段落 JSON 里所有文字节点的拼接结果，即建出来那个节点的 `textContent`。
- * 域与书签是原子节点，不贡献文字，所以这里也不该算进它们的 display。
- *
- * @param json 段落节点 JSON。
- * @returns 纯文本，块模型用它寻址。
- */
-function jsonContentText(json: JsonNode): string {
-  let out = "";
-  for (const child of json.content ?? []) {
-    const node = child as { type?: string; text?: string };
-    if (node.type === "text") out += node.text ?? "";
-  }
   return out;
 }

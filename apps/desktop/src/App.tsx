@@ -8,12 +8,14 @@ import { Outline } from "./components/Outline.js";
 import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
 import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
 import { TocDialog } from "./components/TocDialog.js";
+import { CaptionDialog } from "./components/CaptionDialog.js";
 import {
   insertToc,
   watchTocPageNumbers,
   type TocOptions,
   type TocReject,
 } from "./editor/toc.js";
+import { insertCaption, type CaptionOptions, type CaptionReject } from "./editor/captions.js";
 import type {
   FootnoteBodies,
   LinkStyle,
@@ -114,6 +116,7 @@ export function App() {
   );
   const [pageSetupOpen, setPageSetupOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
+  const [captionOpen, setCaptionOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [aiCollapsed, setAiCollapsed] = useState(false);
   const [showAI, setShowAI] = useState(true);
@@ -473,6 +476,25 @@ export function App() {
     [editor, filePath],
   );
 
+  /**
+   * 「插入题注」对话框点确定：落 op、写修改历史。编号不用这里操心——
+   * `CaptionNumbering` 插件会在事务落地后顺手把后面同标签的题注一起重排。
+   *
+   * @param opts 对话框选项。
+   * @returns 成功返回 null（对话框据此关闭）；失败返回引擎的拒绝码。
+   */
+  const handleInsertCaption = useCallback(
+    async (opts: CaptionOptions): Promise<CaptionReject | null> => {
+      if (!editor) return "ops-failed";
+      const result = await insertCaption(editor, filePath ?? "未命名文档", opts);
+      if (!result.ok) return result.reason ?? "ops-failed";
+      setDirty(true);
+      toast(`已插入题注（${opts.label.trim()} ${result.number}）。`, "success");
+      return null;
+    },
+    [editor, filePath],
+  );
+
   const handleToolbarAction = useCallback(
     (action: ToolbarAction) => {
       switch (action) {
@@ -499,6 +521,9 @@ export function App() {
           break;
         case "insert-toc":
           setTocOpen(true);
+          break;
+        case "insert-caption":
+          setCaptionOpen(true);
           break;
         case "styles":
           setStylePaneOpen((v) => !v);
@@ -933,6 +958,12 @@ export function App() {
         contentWidthPx={section?.contentWidth ?? 602}
         onClose={() => setTocOpen(false)}
         onInsert={handleInsertToc}
+      />
+      <CaptionDialog
+        open={captionOpen}
+        editor={editor}
+        onClose={() => setCaptionOpen(false)}
+        onInsert={handleInsertCaption}
       />
       <HistoryPanel
         open={historyOpen}

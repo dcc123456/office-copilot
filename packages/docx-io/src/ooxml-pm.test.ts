@@ -1211,6 +1211,46 @@ describe("域（w:fldChar / w:instrText / w:fldSimple）", () => {
       .content[0]!;
     expect(para.content).toEqual([{ type: "text", text: "正文" }, { type: "fieldEnd" }]);
   });
+
+  /**
+   * Word「插入题注」写出的那一段：`SEQ` 域给编号，编号外面套一条 `_Ref…` 书签，
+   * 交叉引用（⑤.2 的 `REF`/`PAGEREF`）点的就是这条书签。
+   */
+  const CAPTION = bodyXml(
+    `<w:p>` +
+      `<w:pPr><w:pStyle w:val="Caption"/></w:pPr>` +
+      `<w:r><w:t xml:space="preserve">图 </w:t></w:r>` +
+      `<w:bookmarkStart w:id="3" w:name="_Ref123456"/>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> SEQ 图 \\* ARABIC </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>2</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `<w:bookmarkEnd w:id="3"/>` +
+      `<w:r><w:t xml:space="preserve"> 系统架构</w:t></w:r>` +
+      `</w:p>`,
+  );
+
+  it("题注：SEQ 域读成一条域，外面的书签留在段落这一层", () => {
+    const para = ooxmlToPm(CAPTION).content[0]!;
+    expect(para.content).toEqual([
+      { type: "text", text: "图 " },
+      { type: "bookmarkStart", attrs: { id: "3", name: "_Ref123456" } },
+      { type: "field", attrs: { kind: "SEQ", instr: `SEQ 图 \\* ARABIC`, display: "2" } },
+      { type: "bookmarkEnd", attrs: { id: "3" } },
+      { type: "text", text: " 系统架构" },
+    ]);
+  });
+
+  it("题注写回去：指令进 instrText、书签裹着域，逐字节回来", () => {
+    const once = pmToOoxml(ooxmlToPm(CAPTION));
+    expect(once).toContain(
+      `<w:r><w:instrText xml:space="preserve"> SEQ 图 \\* ARABIC </w:instrText></w:r>`,
+    );
+    // 书签包进 run 就成了 run 的内容，Word 读不认，书签等于没写（§17.5.2.1）。
+    expect(once).not.toContain(`<w:r><w:bookmarkStart`);
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
 });
 
 describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {

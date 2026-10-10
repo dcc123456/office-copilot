@@ -16,6 +16,7 @@ import { FloatingImageDrag } from "./FloatingImageDrag.js";
 import { FloatBox, FloatGroup, FloatingTextLayout } from "./FloatingTextBox.js";
 import { Field } from "./Field.js";
 import { FieldBegin, FieldEnd } from "./FieldBoundary.js";
+import { CaptionNumbering } from "./CaptionNumbering.js";
 import { BookmarkEnd, BookmarkStart } from "./Bookmark.js";
 import { FootnoteRefs } from "./FootnoteRef.js";
 import { ParagraphFormatting } from "./ParagraphFormatting.js";
@@ -42,6 +43,7 @@ export const EDITOR_EXTENSIONS: Extensions = [
   Field,
   FieldBegin,
   FieldEnd,
+  CaptionNumbering,
   BookmarkStart,
   BookmarkEnd,
   ...FootnoteRefs,

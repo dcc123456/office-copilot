@@ -15,6 +15,7 @@ import {
   AlignJustify,
   Table as TableIcon,
   TableOfContents,
+  Tag,
   Image as ImageIcon,
   Link as LinkIcon,
   Highlighter,
@@ -71,6 +72,7 @@ export type ToolbarAction =
   | "find-replace"
   | "page-setup"
   | "insert-toc"
+  | "insert-caption"
   | "styles"
   | "footnotes"
   | "beautify"
@@ -372,6 +374,9 @@ export function Toolbar({
         </Btn>
         <Btn title="插入目录" onClick={() => onAction("insert-toc")}>
           <TableOfContents size={16} />
+        </Btn>
+        <Btn title="插入题注" onClick={() => onAction("insert-caption")}>
+          <Tag size={16} />
         </Btn>
         <Btn
           title="脚注与尾注窗格"
