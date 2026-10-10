@@ -974,7 +974,7 @@ function blockToXml(node: PMNode, ctx: WriteCtx = {}): string {
     case "codeBlock":
       return codeBlockXml(node);
     case "horizontalRule":
-      return `<w:p><w:pPr><w:pStyle w:val="HorizontalRule"/></w:pPr></w:p>`;
+      return horizontalRuleXml();
     case "table":
       return tableXml(node, ctx);
     case "image":
@@ -1408,6 +1408,19 @@ function codeBlockXml(node: Extract<PMNode, { type: "codeBlock" }>): string {
     .map((c) => (c.type === "text" ? c.text ?? "" : ""))
     .join("");
   return `<w:p><w:pPr><w:pStyle w:val="Code"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="20"/></w:rPr><w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r></w:p>`;
+}
+
+/**
+ * 分隔线导出成"段落底部单线边框"，也就是 Word 里连打三个 `-` 自动更正后的形态。
+ *
+ * 之前写的是 `<w:pStyle w:val="HorizontalRule"/>`，而本仓不产出 styles.xml，
+ * 那个样式定义根本不存在，Word 只会排出一个空段落 —— 分隔线静默消失。
+ * `w:sz` 的单位是 1/8 磅（ECMA-376 §17.3.4：sz=18 即 2.25 磅），6 = 0.75 磅。
+ *
+ * @returns 一个只带 <w:pBdr> 的完整段落 XML，无正文。
+ */
+function horizontalRuleXml(): string {
+  return `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>`;
 }
 
 function tableXml(

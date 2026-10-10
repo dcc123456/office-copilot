@@ -228,4 +228,32 @@ describe("DocxFile", () => {
     expect(once.indexOf("<w:rPr")).toBeGreaterThan(once.indexOf("<w:spacing"));
     expect(twice).toBe(once);
   });
+
+  it("keeps an imported paragraph border through two real saves", async () => {
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr><w:r><w:t>Word 里插入的分隔线</w:t></w:r></w:p>`,
+    ]);
+    expect(once).toContain("<w:pBdr>");
+    expect(once).toContain('w:sz="6"');
+    expect(twice).toBe(once);
+  });
+
+  /**
+   * 编辑器里插入的分隔线必须落成段落底部边框：本仓不写 styles.xml，
+   * 旧实现引用的 HorizontalRule 样式在文档里不存在，Word 只会排出空段落。
+   */
+  it("saves the editor's horizontal rule as a paragraph bottom border", async () => {
+    const docx = await DocxFile.fromBytes(await makeDocx(["上文"]));
+    const loaded = await docx.toProseMirror();
+    await docx.replaceProseMirror({
+      type: "doc",
+      content: [...loaded.doc.content, { type: "horizontalRule" }],
+    });
+    const zip = await JSZip.loadAsync(docx.toBytes());
+    const body = await zip.file("word/document.xml")!.async("string");
+    expect(body).toContain(
+      '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/>',
+    );
+    expect(body).not.toContain("HorizontalRule");
+  });
 });

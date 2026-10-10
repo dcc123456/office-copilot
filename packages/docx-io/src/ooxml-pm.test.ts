@@ -404,6 +404,26 @@ describe("pmToOoxml round-trip", () => {
   });
 });
 
+describe("分隔线导出为段落底部边框", () => {
+  const hrDoc: PMDoc = {
+    type: "doc",
+    content: [{ type: "horizontalRule" }],
+  };
+
+  it("写 w:pBdr/w:bottom，不再引用本仓没定义的 HorizontalRule 样式", () => {
+    const xml = pmToOoxml(hrDoc);
+    expect(xml).toContain(
+      '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/>',
+    );
+    expect(xml).not.toContain("HorizontalRule");
+  });
+
+  it("带底部边框的空段落原样读回，重存不丢边框", () => {
+    const bordered = `<w:p><w:pPr><w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr></w:pPr></w:p>`;
+    expect(pmToOoxml(ooxmlToPm(bodyXml(bordered)))).toContain(bordered);
+  });
+});
+
 type MarkedNode = { marks?: Array<{ type: string }> };
 
 describe("文档级超链接样式", () => {
