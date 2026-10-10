@@ -346,7 +346,7 @@ export async function insertToc(
 }
 
 /**
- * 把条目里缓存的页码刷成分页现在说的数。
+ * 把 `PAGEREF` 里缓存的页码刷成分页现在说的数——目录条目与交叉引用都靠它。
  *
  * 目录本身占版面，插进去之后标题会整体往后移，第一遍写的页码因此是旧的；分页重排
  * 完成后跑一次，缓存结果就和 Word 打开后按 F9 的结果一致了。只改 `field` 的
@@ -357,7 +357,7 @@ export async function insertToc(
  * @returns 要派发的事务，已经把 `addToHistory` 关掉（页码是派生数据，不是用户的编辑）；
  *          没有条目需要改时返回 null。
  */
-export function tocPageNumberRefresh(
+export function fieldPageNumberRefresh(
   state: EditorState,
   pageOf: (pos: number) => number,
 ): Transaction | null {
@@ -379,7 +379,7 @@ export function tocPageNumberRefresh(
 }
 
 /**
- * 插完目录后盯着分页收敛，把条目里缓存的页码刷成分页现在说的数。
+ * 插完目录或交叉引用后盯着分页收敛，把 `PAGEREF` 里缓存的页码刷成分页现在说的数。
  *
  * 不能只刷一次：`PagedLayout` 的测量在 requestAnimationFrame 里跑，字体到位、
  * 上一轮插入的分页符落定之后才出最终计划，第一遍读到的还是旧页码。所以按帧检查，
@@ -390,7 +390,7 @@ export function tocPageNumberRefresh(
  * @param opts.deadlineMs 最长观察多久，默认 5000ms。
  * @returns 停止观察的函数；对话框关闭或组件卸载时调用，免得向已销毁的编辑器派发事务。
  */
-export function watchTocPageNumbers(
+export function watchFieldPageNumbers(
   editor: Editor,
   opts: { settleMs?: number; deadlineMs?: number } = {},
 ): () => void {
@@ -408,7 +408,7 @@ export function watchTocPageNumbers(
     if (stopped) return;
     if (editor.isDestroyed) return stop();
     const now = Date.now();
-    const tr = tocPageNumberRefresh(editor.state, (pos) => pageNumberOf(editor.state, pos));
+    const tr = fieldPageNumberRefresh(editor.state, (pos) => pageNumberOf(editor.state, pos));
     if (tr) {
       editor.view.dispatch(tr);
       lastChangeAt = now;
@@ -423,9 +423,12 @@ export function watchTocPageNumbers(
 /**
  * 书签名 → 它所在段落的页码。
  *
+ * 不按前缀过滤：目录条目的 `_Toc…` 与题注的 `_Ref…` 都要能被 `PAGEREF` 查到——
+ * Word 的交叉引用同样只对书签名负责，不管这个名字是谁生成的。
+ *
  * @param doc    当前文档。
  * @param pageOf 由段落起始位置求页码。
- * @returns 只含 `_Toc` 开头的书签；求不到页码（分页还没测出来）的段整条跳过。
+ * @returns 文档里出现过的每个书签名；求不到页码（分页还没测出来）的段整条跳过。
  */
 function bookmarkPages(doc: PMNode, pageOf: (pos: number) => number): Map<string, number> {
   const out = new Map<string, number>();
@@ -434,7 +437,7 @@ function bookmarkPages(doc: PMNode, pageOf: (pos: number) => number): Map<string
     block.descendants((node) => {
       if (node.type.name === "bookmarkStart") {
         const name = String(node.attrs.name ?? "");
-        if (name.startsWith("_Toc")) names.push(name);
+        if (name) names.push(name);
       }
       return true;
     });

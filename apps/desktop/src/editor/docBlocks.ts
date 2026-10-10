@@ -419,6 +419,58 @@ function buildJsonBlock(schema: Schema, json: JsonNode, expectText?: string): PM
   return node;
 }
 
+/**
+ * 引擎给的行内 JSON → 节点（交叉引用就是一条 `REF`/`PAGEREF` 域）。
+ *
+ * @param schema 当前文档的 schema。
+ * @param json 行内节点 JSON。
+ * @returns 节点；类型不是行内、schema 里没有它、或 JSON 建不出合法节点时返回 null。
+ */
+function buildInlineNode(schema: Schema, json: JsonNode): PMNode | null {
+  const nodeType = schema.nodes[json.type];
+  if (!nodeType || !nodeType.isInline) return null;
+  try {
+    const node = schema.nodeFromJSON(json as Record<string, unknown>);
+    node.check();
+    return node;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 块模型的文字偏移 → 段落内的 PM 坐标。
+ *
+ * 偏移按**文字字符**数（原子节点不计数，与 `textContent` 同一套口径），所以游标落在
+ * 域芯片中间这种事不会发生：能落到的位置只有文字内部和节点之间。
+ *
+ * @param node 段落（或标题）节点。
+ * @param innerFrom 段落行内内容的起始 PM 坐标。
+ * @param at 段内文字偏移，0 起。
+ * @returns 可以插入行内节点的 PM 坐标；`at` 超出这段文字长度时返回 null。
+ */
+function inlinePosForTextOffset(node: PMNode, innerFrom: number, at: number): number | null {
+  let textSeen = 0;
+  let hit: number | null = null;
+  node.forEach((child, offset) => {
+    if (hit !== null) return;
+    const childText = child.isText ? child.nodeSize : 0;
+    if (at < textSeen + childText) {
+      // 落在这个文字节点内部：PM 的 insert 会把文本一分为二。
+      hit = innerFrom + offset + (at - textSeen);
+      return;
+    }
+    if (at === textSeen + childText && !child.isText) {
+      // 偏移正好停在原子节点之后（原子不占文字，停在其前与其后是同一个偏移）。
+      hit = innerFrom + offset + child.nodeSize;
+      return;
+    }
+    textSeen += childText;
+  });
+  if (hit === null && at === textSeen) return innerFrom + node.content.size;
+  return hit;
+}
+
 function buildTextBlock(schema: Schema, text: string, style: StylePatch): PMNode | null {
   const paraType = schema.nodes.paragraph;
   if (!paraType) return null;
@@ -560,6 +612,37 @@ function runOp(tr: Transaction, op: CoreOp): RunResult {
       if (!target) return { ok: false, tr, reason: "找不到要删除的段落" };
       // A list item is removed as its whole <li> span.
       tr.delete(target.from, target.to);
+      return { ok: true, tr };
+    }
+
+    case "insertInline": {
+      const target = locateAddress(tr.doc, op.addr);
+      const node = target?.textNode;
+      const inner = target?.inner;
+      if (!target || !inner || !node) return { ok: false, tr, reason: "找不到要插入引用的段落" };
+      const inline = buildInlineNode(schema, op.json);
+      if (!inline) return { ok: false, tr, reason: "行内内容的 JSON 不合法，或当前文档没有这个类型" };
+      const pos = inlinePosForTextOffset(node, inner.from, op.at);
+      if (pos === null) return { ok: false, tr, reason: "插入偏移不在这一段里" };
+      tr.insert(pos, inline);
+      return { ok: true, tr };
+    }
+
+    case "removeInline": {
+      const target = locateAddress(tr.doc, op.addr);
+      const node = target?.textNode;
+      const inner = target?.inner;
+      if (!target || !inner || !node) return { ok: false, tr, reason: "找不到要撤掉引用的段落" };
+      const found: number[] = [];
+      node.forEach((child, offset) => {
+        if (child.type.name !== "field") return;
+        if (String(child.attrs.instr ?? "") !== op.instr) return;
+        found.push(inner.from + offset);
+      });
+      if (!found.length) return { ok: false, tr, reason: `这一段没有指令为 ${op.instr} 的域` };
+      // 只撤最后一条：插入后用户又在同一段里引用了同一个目标时，撤销应当退掉最近那一次。
+      const pos = found[found.length - 1]!;
+      tr.delete(pos, pos + 1);
       return { ok: true, tr };
     }
 

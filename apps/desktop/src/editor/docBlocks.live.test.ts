@@ -871,3 +871,60 @@ describe("书签 op 与整段 JSON 插入（真实 schema）", () => {
     expect(editor.state.doc.childCount).toBe(1);
   });
 });
+
+describe("行内 op：插入与撤掉引用域（真实 schema）", () => {
+  const addrOf = (editor: Editor, index: number) => addressOf(blocksOf(editor.state.doc), index)!;
+  const refField = (name: string) => ({
+    type: "field",
+    attrs: { kind: "REF", instr: `REF ${name}`, display: "1" },
+  });
+
+  it("偏移按文字计数：域和书签都不占一个字", () => {
+    const editor = harness([
+      para([text("见"), { type: "field", attrs: { kind: "SEQ", instr: `SEQ 图 \\* ARABIC`, display: "1" } }, text("下图")]),
+    ]);
+    // 「见下图」共 3 个字，偏移 3 是这一段的末尾——中间那条域不参与计数。
+    const r = executeOps(editor, [{ kind: "insertInline", addr: addrOf(editor, 0), at: 3, json: refField("_Ref1") }]);
+    expect(r.ok).toBe(true);
+    const p = editor.state.doc.firstChild!;
+    expect(p.child(p.childCount - 1).type.name).toBe("field");
+    expect(p.textContent).toBe("见下图");
+  });
+
+  it("偏移落在两段文字中间时，域插进那个缝隙而不是开头结尾", () => {
+    const editor = harness([para([text("见"), text("下图")])]);
+    const r = executeOps(editor, [{ kind: "insertInline", addr: addrOf(editor, 0), at: 1, json: refField("_Ref1") }]);
+    expect(r.ok).toBe(true);
+    const p = editor.state.doc.firstChild!;
+    expect(p.child(1).type.name).toBe("field");
+    expect(p.child(2).textContent).toBe("下图");
+  });
+
+  it("撤引用只认指令文字：同段另一个域留着，指令不匹配的整段不写", () => {
+    const editor = harness([
+      para([
+        text("见"),
+        { type: "field", attrs: { kind: "REF", instr: `REF _Ref1`, display: "1" } },
+        { type: "field", attrs: { kind: "PAGEREF", instr: `PAGEREF _Toc9 \\h`, display: "3" } },
+      ]),
+    ]);
+    const before = editor.state.doc.toJSON();
+    const missing = executeOps(editor, [{ kind: "removeInline", addr: addrOf(editor, 0), instr: `REF _Ref7` }]);
+    expect(missing.ok).toBe(false);
+    expect(editor.state.doc.toJSON()).toEqual(before);
+
+    const r = executeOps(editor, [{ kind: "removeInline", addr: addrOf(editor, 0), instr: `REF _Ref1` }]);
+    expect(r.ok).toBe(true);
+    const p = editor.state.doc.firstChild!;
+    expect(p.childCount).toBe(2);
+    expect(p.child(1).attrs.instr).toBe(`PAGEREF _Toc9 \\h`);
+  });
+
+  it("偏移在文字之外就拒绝，且一个字节都不写", () => {
+    const editor = harness([para([text("见下图")])]);
+    const before = editor.state.doc.toJSON();
+    const r = executeOps(editor, [{ kind: "insertInline", addr: addrOf(editor, 0), at: 9, json: refField("_Ref1") }]);
+    expect(r.ok).toBe(false);
+    expect(editor.state.doc.toJSON()).toEqual(before);
+  });
+});

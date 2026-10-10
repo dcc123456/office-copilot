@@ -152,6 +152,43 @@ describe("runOps", () => {
     expect(lines(r.after)).toEqual(["paragraph:一改", "paragraph:二", "paragraph:三"]);
     expect(lines(revert(r.after, r.inverses).after)).toEqual(lines(before));
   });
+
+  it("行内插引用只加域：正文没变，逆操作按指令文字认域", () => {
+    const before = doc("见下图", "图 1 系统架构");
+    const r = runOps(before, [
+      {
+        kind: "insertInline",
+        addr: { by: "blockText", text: "见下图", nth: 0 },
+        at: 3,
+        json: { type: "field", attrs: { kind: "PAGEREF", instr: `PAGEREF _Ref1 \\h`, display: "5" } },
+      },
+    ]);
+    expect(r.skipped).toEqual([]);
+    // 域是行内原子、不贡献文字，所以块模型看到的还是原文——内容寻址的键没被这次写入改掉（§2.5）。
+    expect(lines(r.after)).toEqual(lines(before));
+    expect(r.inverses).toEqual([
+      {
+        kind: "removeInline",
+        addr: { by: "blockText", text: "见下图", nth: 0 },
+        instr: `PAGEREF _Ref1 \\h`,
+      },
+    ]);
+    expect(revert(r.after, r.inverses).ok).toBe(true);
+  });
+
+  it("行内插入的偏移落在段外就不落地", () => {
+    const r = runOps(doc("见下图"), [
+      {
+        kind: "insertInline",
+        addr: { by: "blockText", text: "见下图", nth: 0 },
+        at: 99,
+        json: { type: "field", attrs: { kind: "REF", instr: `REF _Ref1`, display: "" } },
+      },
+    ]);
+    expect(r.applied).toEqual([]);
+    expect(r.inverses).toEqual([]);
+    expect(r.skipped.join("")).toContain("偏移");
+  });
 });
 
 describe("coerceProposal", () => {

@@ -168,7 +168,18 @@ export type CoreOp =
    * 不在模型可提案的词汇里。
    */
   | { kind: "addBookmark"; addr: Address; id: string; name: string }
-  | { kind: "removeBookmark"; addr: Address; id: string; name: string };
+  | { kind: "removeBookmark"; addr: Address; id: string; name: string }
+  /**
+   * 在既有段落内部的某个文字偏移处插入行内结构（交叉引用是一条 `REF`/`PAGEREF` 域，
+   * Word 把它插在句子里，不是新起一段）。`at` 是**块模型的偏移**：从段落文字开头数过去的
+   * 字符数，原子节点（域、书签、图片）不计数，所以仿真时段的文本没变，逆操作也不会牵连别的编辑。
+   */
+  | { kind: "insertInline"; addr: Address; at: number; json: JsonNode }
+  /**
+   * `insertInline` 的逆操作：按**指令文本**认域，而不是按坐标——插入之后用户又在同一段里
+   * 打了几个字，坐标就挪了，指令不会。同一段里指令一模一样的域只删最后那一个。
+   */
+  | { kind: "removeInline"; addr: Address; instr: string };
 
 /** What the model is allowed to ask for. Indexes refer to the outline it was shown. */
 export type AiOp =
@@ -721,6 +732,30 @@ export function applyCore(blocks: Block[], op: CoreOp): ApplyResult {
         blocks.length === 0 || i === 0 ? { at: "start" } : { at: "after", after: addressOf(blocks, i - 1)! };
       return { ok: true, inverse: { kind: "insertBlock", anchor, block: newFromBlock(removed) } };
     }
+    case "insertInline":
+    case "removeInline": {
+      const i = findAddress(blocks, op.addr);
+      if (i < 0) return { ok: false, reason: "找不到目标段落" };
+      const b = blocks[i]!;
+      if (!isTextual(b)) return { ok: false, reason: "该段落不能插行内内容" };
+      if (op.kind === "insertInline" && (op.at < 0 || op.at > b.text.length)) {
+        return { ok: false, reason: "插入偏移不在这一段里" };
+      }
+      if (op.kind === "removeInline") {
+        // 撤插入的 op 只会作为逆操作出现，它自己没有再一层的逆。
+        return { ok: true };
+      }
+      // 域是行内原子：块模型只记文字，所以仿真阶段文字一动不动（§2.5 的内容寻址因此仍然成立）。
+      // 逆操作按指令文本认域，不认坐标——同一段里后来打了字也不会牵连。
+      return {
+        ok: true,
+        inverse: {
+          kind: "removeInline",
+          addr: addressOf(blocks, i)!,
+          instr: String(((op.json.attrs ?? {}) as { instr?: unknown }).instr ?? ""),
+        },
+      };
+    }
     case "addBookmark":
     case "removeBookmark": {
       if (findAddress(blocks, op.addr) < 0) return { ok: false, reason: "找不到目标段落" };
@@ -997,6 +1032,10 @@ export function describeCoreOp(op: CoreOp): string {
       return `给「${addrLabel(op.addr)}」加书签 ${op.name}`;
     case "removeBookmark":
       return `撤掉「${addrLabel(op.addr)}」的书签 ${op.name}`;
+    case "insertInline":
+      return `在「${addrLabel(op.addr)}」插入 ${String(((op.json.attrs ?? {}) as { kind?: unknown }).kind ?? "行内内容")}`;
+    case "removeInline":
+      return `撤掉「${addrLabel(op.addr)}」的引用 ${op.instr}`;
   }
 }
 

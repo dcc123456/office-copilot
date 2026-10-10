@@ -9,13 +9,19 @@ import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
 import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
 import { TocDialog } from "./components/TocDialog.js";
 import { CaptionDialog } from "./components/CaptionDialog.js";
+import { CrossRefDialog } from "./components/CrossRefDialog.js";
 import {
   insertToc,
-  watchTocPageNumbers,
+  watchFieldPageNumbers,
   type TocOptions,
   type TocReject,
 } from "./editor/toc.js";
 import { insertCaption, type CaptionOptions, type CaptionReject } from "./editor/captions.js";
+import {
+  insertCrossRef,
+  type CrossRefOptions,
+  type CrossRefReject,
+} from "./editor/crossrefs.js";
 import type {
   FootnoteBodies,
   LinkStyle,
@@ -117,6 +123,7 @@ export function App() {
   const [pageSetupOpen, setPageSetupOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
   const [captionOpen, setCaptionOpen] = useState(false);
+  const [crossRefOpen, setCrossRefOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [aiCollapsed, setAiCollapsed] = useState(false);
   const [showAI, setShowAI] = useState(true);
@@ -470,7 +477,7 @@ export function App() {
       toast(`已插入目录（${result.entries} 条）。`, "success");
       // 目录自己占了版面，标题会被往后推：分页收敛之前读到的页码都是旧的。
       tocWatch.current?.();
-      tocWatch.current = watchTocPageNumbers(editor);
+      tocWatch.current = watchFieldPageNumbers(editor);
       return null;
     },
     [editor, filePath],
@@ -490,6 +497,27 @@ export function App() {
       if (!result.ok) return result.reason ?? "ops-failed";
       setDirty(true);
       toast(`已插入题注（${opts.label.trim()} ${result.number}）。`, "success");
+      return null;
+    },
+    [editor, filePath],
+  );
+
+  /**
+   * 「插入交叉引用」对话框点确定：把一条 `REF`/`PAGEREF` 域插在光标处。
+   * 插完仍要等分页收敛再刷一次——页码引用第一次写的可能是旧页（与插入目录同一处理）。
+   *
+   * @param opts 对话框选项。
+   * @returns 成功返回 null（对话框据此关闭）；失败返回引擎的拒绝码。
+   */
+  const handleInsertCrossRef = useCallback(
+    async (opts: CrossRefOptions): Promise<CrossRefReject | null> => {
+      if (!editor) return "ops-failed";
+      const result = await insertCrossRef(editor, filePath ?? "未命名文档", opts);
+      if (!result.ok) return result.reason ?? "ops-failed";
+      setDirty(true);
+      toast("已插入交叉引用。", "success");
+      tocWatch.current?.();
+      tocWatch.current = watchFieldPageNumbers(editor);
       return null;
     },
     [editor, filePath],
@@ -524,6 +552,9 @@ export function App() {
           break;
         case "insert-caption":
           setCaptionOpen(true);
+          break;
+        case "insert-crossref":
+          setCrossRefOpen(true);
           break;
         case "styles":
           setStylePaneOpen((v) => !v);
@@ -964,6 +995,12 @@ export function App() {
         editor={editor}
         onClose={() => setCaptionOpen(false)}
         onInsert={handleInsertCaption}
+      />
+      <CrossRefDialog
+        open={crossRefOpen}
+        editor={editor}
+        onClose={() => setCrossRefOpen(false)}
+        onInsert={handleInsertCrossRef}
       />
       <HistoryPanel
         open={historyOpen}

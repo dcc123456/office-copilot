@@ -16,6 +16,7 @@ import {
   Table as TableIcon,
   TableOfContents,
   Tag,
+  Link2,
   Image as ImageIcon,
   Link as LinkIcon,
   Highlighter,
@@ -73,6 +74,7 @@ export type ToolbarAction =
   | "page-setup"
   | "insert-toc"
   | "insert-caption"
+  | "insert-crossref"
   | "styles"
   | "footnotes"
   | "beautify"
@@ -377,6 +379,9 @@ export function Toolbar({
         </Btn>
         <Btn title="插入题注" onClick={() => onAction("insert-caption")}>
           <Tag size={16} />
+        </Btn>
+        <Btn title="插入交叉引用" onClick={() => onAction("insert-crossref")}>
+          <Link2 size={16} />
         </Btn>
         <Btn
           title="脚注与尾注窗格"

@@ -12,7 +12,7 @@ import {
   tocAnchorForSelection,
   tocEntryJson,
   tocLevelOf,
-  tocPageNumberRefresh,
+  fieldPageNumberRefresh,
   type TocOptions,
 } from "./toc.js";
 
@@ -320,7 +320,7 @@ describe("刷新条目缓存页码", () => {
       },
     ]);
     const state = editor.state;
-    const tr = tocPageNumberRefresh(state, () => 4);
+    const tr = fieldPageNumberRefresh(state, () => 4);
     expect(tr).not.toBeNull();
     const next = state.apply(tr!);
     const tocPara = next.doc.child(0);
@@ -329,7 +329,7 @@ describe("刷新条目缓存页码", () => {
     expect(tocPara.textContent).toBe("第一章\t");
     expect(next.doc.lastChild!.textContent).toBe("第一章");
     // 再刷一次就没有要改的了。
-    expect(tocPageNumberRefresh(next, () => 4)).toBeNull();
+    expect(fieldPageNumberRefresh(next, () => 4)).toBeNull();
   });
 
   it("求不出页码（分页还没测出来）时不产生事务", () => {
@@ -340,7 +340,7 @@ describe("刷新条目缓存页码", () => {
         content: [bookmark("1", "_Toc1"), text("第一章"), bookmarkEnd("1")],
       },
     ]);
-    expect(tocPageNumberRefresh(editor.state, () => 0)).toBeNull();
+    expect(fieldPageNumberRefresh(editor.state, () => 0)).toBeNull();
   });
 });
 

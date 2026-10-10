@@ -129,32 +129,58 @@ export function captionJson(
 }
 
 /**
- * 按文档顺序给每条 `SEQ` 域算出应有的号数。
+ * 按文档顺序给每条 `SEQ` 域算出应有的号数，并把引用这些编号的 `REF` 域一起刷成同一个数。
  *
  * 每个标签各数各的（Word 就是按序列名分开计数），所以一张图一张表交替出现也不会互相打乱。
+ * `REF _Ref…` 指向的是题注里那个书签（⑤.2），书签包住的正是这条 `SEQ` 域，所以它的缓存
+ * 结果就是这条域的号数——Word 靠按 F9 一起更新，我们在同一次遍历里顺手算完。
  *
  * @param doc 当前文档。
  * @returns 需要改缓存结果的域：绝对位置 + 换过 `display` 后的 attrs；号数没变的域不在其中。
  */
 export function captionNumberPatches(doc: PMNode): { pos: number; attrs: Record<string, unknown> }[] {
   const counters: Record<string, number> = {};
+  /** `_Ref…` 书签名 → 它包住的 `SEQ` 域号数；交叉引用按这个名字取值，与先后无关。 */
+  const numberByBookmark: Record<string, string> = {};
+  const refs: { pos: number; attrs: Record<string, unknown>; name: string }[] = [];
+  const open = new Map<string, string>();
   const out: { pos: number; attrs: Record<string, unknown> }[] = [];
+
   doc.descendants((node, pos) => {
+    if (node.type.name === "bookmarkStart") {
+      open.set(String(node.attrs.id ?? ""), String(node.attrs.name ?? ""));
+      return;
+    }
+    if (node.type.name === "bookmarkEnd") {
+      open.delete(String(node.attrs.id ?? ""));
+      return;
+    }
     if (node.type.name !== "field") return;
     const attrs = node.attrs as Record<string, unknown>;
-    const label = seqLabelOfInstr(String(node.attrs.instr ?? ""));
-    if (label === null) return;
-    const seen = (counters[label] ?? 0) + 1;
-    counters[label] = seen;
-    const want = String(seen);
-    if (String(attrs.display ?? "") === want) return;
-    out.push({ pos, attrs: { ...attrs, display: want } });
+    const label = seqLabelOfInstr(String(attrs.instr ?? ""));
+    if (label !== null) {
+      const seen = (counters[label] ?? 0) + 1;
+      counters[label] = seen;
+      const want = String(seen);
+      for (const name of open.values()) if (name.startsWith("_Ref")) numberByBookmark[name] = want;
+      if (String(attrs.display ?? "") !== want) out.push({ pos, attrs: { ...attrs, display: want } });
+      return;
+    }
+    const refName = /^REF\s+(\S+)/.exec(String(attrs.instr ?? "").trim())?.[1];
+    if (refName) refs.push({ pos, attrs, name: refName });
   });
+
+  // 引用可能在目标之前（"以下"那种），所以必须等编号全算完再回头刷它们。
+  for (const ref of refs) {
+    const want = numberByBookmark[ref.name];
+    if (want === undefined || String(ref.attrs.display ?? "") === want) continue;
+    out.push({ pos: ref.pos, attrs: { ...ref.attrs, display: want } });
+  }
   return out;
 }
 
 /**
- * 把正文里所有 `SEQ` 域的缓存结果刷成当前文档顺序下的号数。
+ * 把正文里所有 `SEQ` 域、以及引用这些编号的 `REF` 域的缓存结果，刷成当前文档顺序下的号数。
  *
  * 编号是派生显示值，不进撤销栈：Ctrl+Z 要撤的是用户那次编辑，不是后面题注跟着挪号。
  *
