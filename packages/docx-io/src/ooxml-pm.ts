@@ -1007,6 +1007,13 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
           type: child.name === "w:commentRangeStart" ? "commentRangeStart" : "commentRangeEnd",
           attrs: { id },
         });
+    } else if (child.name === "w:ins" || child.name === "w:del") {
+      // 修订跟踪：`w:ins`/`w:del`（`CT_RunTrackChange`）与 `w:r` 平级，包的是**运行块**。
+      // 里面走同一条正文遍历（能有多个 run、能套 hyperlink 与域），出来后统一打一个 revision 标记。
+      // 标记落在外层这一次操作上：嵌套时外层是后发生的改动，Word 显示的也是外层的状态。
+      const inline = collectInline(child, ctx);
+      setRevisionMark(inline, child);
+      out.push(...inline);
     } else if (isElement(child)) {
       for (const sub of children(child)) {
         if (sub.name === "w:r") out.push(...runToInlines(sub, ctx));
@@ -1214,7 +1221,10 @@ function runToInlines(r: Element, ctx: InlineCtx = {}): PMNode[] {
   const out: PMNode[] = [];
   for (const child of children(r)) {
     switch (child.name) {
-      case "w:t": {
+      case "w:t":
+      // 删除掉的文字在 `w:del` 里换成 `w:delText`（同一份 CT_Text）：不给它一个分支，
+      // 被删的文字就在导入时凭空消失，而它恰恰是修订跟踪要给用户看的那部分。
+      case "w:delText": {
         const text = textOf(child);
         if (text) out.push({ type: "text", text, ...(marks.length ? { marks: [...marks] } : {}) });
         break;
@@ -1495,7 +1505,9 @@ function blockToXml(node: PMNode, ctx: WriteCtx = {}): string {
       return node.attrs.ooxml;
     case "text":
     case "hardBreak":
-      return `<w:p>${runXml([node], ctx.link)}</w:p>`;
+      // 段落外冒出来的文字/换行（我们的读侧不会产出，别的应用的 JSON 可能）：走同一条
+      // 行内序列化，修订与颜色才不至于在这里被绕过。
+      return `<w:p>${inlineChildrenToXml([node], ctx.link)}</w:p>`;
     default:
       return "";
   }
@@ -2112,7 +2124,64 @@ function inlineChildrenToXml(
   // Group into runs by marks so consecutive text with identical marks becomes
   // a single <w:r>.
   const groups = groupByMarks(nodes);
-  return groups.map((g) => runXml(g, link)).join("");
+  // 同一次修订的相邻分组并成一个 `w:ins`/`w:del`：Word 写的是"一次改动一个元素、里面若干个
+  // run"，逐组各包一次会让同一个 `w:id` 出现好几条，而"接受此修订"是按 id 找对象的。
+  const parts: string[] = [];
+  let region: { revision: RevisionMark; xml: string[] } | null = null;
+  const flushRegion = () => {
+    if (!region) return;
+    parts.push(wrapRevision(region.xml.join(""), region.revision));
+    region = null;
+  };
+  for (const group of groups) {
+    const revision = regionRevision(group);
+    if (!revision) {
+      flushRegion();
+      parts.push(runXml(group, link));
+      continue;
+    }
+    if (region && JSON.stringify(region.revision) !== JSON.stringify(revision)) flushRegion();
+    if (!region) region = { revision, xml: [] };
+    region.xml.push(runXml(group, link));
+  }
+  flushRegion();
+  return parts.join("");
+}
+
+/** 修订标记的形状；`kind` 是 `ins`/`del`，其余属性原样来自那个元素。 */
+type RevisionMark = Extract<PMMark, { type: "revision" }>;
+
+/**
+ * 这一组要不要由外层并进一个修订元素。
+ *
+ * @param group `groupByMarks` 出的一组行内节点（同组文字共享同一套 marks）。
+ * @returns 组内第一个文字节点上的 `revision` 标记；普通文字、原子节点、锚点返回 null。
+ *   带 `link` 的组也返回 null，由 `runXml` 把修订包在 `w:hyperlink` **里面**——
+ *   `w:ins`/`w:del` 与 `w:hyperlink` 谁在外层没有一手依据，而"链接套修订"是规范里
+ *   唯一写得明的方向（`w:ins` 属 `EG_RunLevelElts` ⊂ `EG_PContent` ⊂ `CT_Hyperlink`）。
+ */
+function regionRevision(group: PMNode[]): RevisionMark | null {
+  const first = group.find((n) => n.type === "text") as PMTextNode | undefined;
+  const marks = first?.marks ?? [];
+  if (marks.some((m) => m.type === "link")) return null;
+  return marks.find((m): m is RevisionMark => m.type === "revision") ?? null;
+}
+
+/**
+ * 一次修订的元素：把已经生成好的运行 XML 包进 `<w:ins>` 或 `<w:del>`。
+ *
+ * @param inner 若干个 `<w:r>`（或域/图片的 run 序列）串起来的字符串。
+ * @param revision 修订标记；`w:id`/`w:author`/`w:date` 缺哪个就不写哪个——编一个默认作者名
+ *   等于往用户的文档里塞署名，比少写一个属性更糟。
+ * @returns 形如 `<w:del w:id="3" w:author="张三">…</w:del>`。
+ */
+function wrapRevision(inner: string, revision: RevisionMark): string {
+  const tag = revision.attrs.kind === "del" ? "del" : "ins";
+  const attrs: string[] = [];
+  if (revision.attrs.id) attrs.push(`w:id="${escapeXml(revision.attrs.id)}"`);
+  if (revision.attrs.author) attrs.push(`w:author="${escapeXml(revision.attrs.author)}"`);
+  if (revision.attrs.date) attrs.push(`w:date="${escapeXml(revision.attrs.date)}"`);
+  return `<w:${tag}${attrs.length ? ` ${attrs.join(" ")}` : ""}>${inner}</w:${tag}>`;
 }
 
 function groupByMarks(nodes: PMNode[]): PMNode[][] {
@@ -2186,6 +2255,9 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
   const marks = first?.marks ?? [];
   const rPr = runPropertiesXml(marks, link);
   const linkMark = marks.find((m): m is Extract<PMMark, { type: "link" }> => m.type === "link");
+  // 删除里的文字元素是 `w:delText`（同一份 CT_Text），写回 `<w:t>` 就变成"这段没被删"。
+  const revision = marks.find((m): m is RevisionMark => m.type === "revision") ?? null;
+  const textTag = revision?.attrs.kind === "del" ? "w:delText" : "w:t";
 
   // Text parts and structural children (br, drawing) must live directly under
   // <w:r>, not inside <w:t>. We split text around structural nodes.
@@ -2200,8 +2272,11 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
       if (index > 0) parts.push("<w:tab/>");
       if (!segment.length) return;
       // Escape newlines as a <w:br/> inside the run（先转义再插记号，反了会把记号也转义掉）。
-      const escaped = escapeXml(segment).replace(/\n/g, `</w:t><w:br/><w:t xml:space="preserve">`);
-      parts.push(`<w:t xml:space="preserve">${escaped}</w:t>`);
+      const escaped = escapeXml(segment).replace(
+        /\n/g,
+        `</${textTag}><w:br/><${textTag} xml:space="preserve">`,
+      );
+      parts.push(`<${textTag} xml:space="preserve">${escaped}</${textTag}>`);
     });
     buffer = "";
   };
@@ -2238,13 +2313,16 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
 
   const wrapped = rPr ? `<w:r>${rPr}${parts.join("")}</w:r>` : `<w:r>${parts.join("")}</w:r>`;
   if (linkMark) {
+    // 带链接的修订由这里包：`w:ins`/`w:del` 进 `w:hyperlink` 里面是规范写得明的方向，
+    // 反过来（hyperlink 进 ins 里）没有依据，见 `regionRevision` 的注释。
+    const body = revision ? wrapRevision(wrapped, revision) : wrapped;
     const href = linkMark.attrs.href;
     if (href.startsWith("relationship:")) {
-      return `<w:hyperlink r:id="${href.slice("relationship:".length)}">${wrapped}</w:hyperlink>`;
+      return `<w:hyperlink r:id="${href.slice("relationship:".length)}">${body}</w:hyperlink>`;
     }
     // 读侧把 `w:anchor` 折成 `#名字`（浏览器式的站内锚点），写侧就得把那个 `#` 去掉：
     // `w:anchor` 装的是书签名本身，留着 `#` 会让 Word 指向不存在的书签，且每次存盘多长一个。
-    return `<w:hyperlink w:anchor="${escapeXml(href.replace(/^#/, ""))}">${wrapped}</w:hyperlink>`;
+    return `<w:hyperlink w:anchor="${escapeXml(href.replace(/^#/, ""))}">${body}</w:hyperlink>`;
   }
   return wrapped;
 }
@@ -2812,6 +2890,34 @@ function addMark(nodes: PMNode[], mark: PMMark): void {
     if (n.type === "text") {
       n.marks = [...(n.marks ?? []), mark];
     }
+  }
+}
+
+/**
+ * 给 `w:ins` / `w:del` 里收出的节点打上修订标记，属性取那个元素自己的。
+ *
+ * 只给文字节点加（与 `addMark` 同语义）：原子节点（图片、域、引用点）没有地方放 marks。
+ * 已经带 `revision` 的换成**外层**这一次的操作——嵌套时外层是后发生的改动，
+ * 留着内层会把"删除里包着插入"显示成插入（取舍见规格排名 4 判据）。
+ *
+ * @param nodes 从 `w:ins`/`w:del` 里 `collectInline` 出来的行内节点（就地修改）。
+ * @param el `w:ins` 或 `w:del` 元素；`w:id`/`w:author`/`w:date` 原样带走，读不到就不写，
+ *   不补默认值（§2.1：编号与署名都不是我们该换算的东西）。
+ * @returns 无返回值；里面没有文字节点时（例如只有一个批注锚点）什么都不改。
+ */
+function setRevisionMark(nodes: PMNode[], el: Element): void {
+  const attrs: RevisionMark["attrs"] = { kind: el.name === "w:del" ? "del" : "ins" };
+  const id = el.attributes?.["w:id"] as string | undefined;
+  const author = el.attributes?.["w:author"] as string | undefined;
+  const date = el.attributes?.["w:date"] as string | undefined;
+  if (id) attrs.id = id;
+  if (author) attrs.author = author;
+  if (date) attrs.date = date;
+  const mark: RevisionMark = { type: "revision", attrs };
+  for (const n of nodes) {
+    if (n.type !== "text") continue;
+    const rest = (n.marks ?? []).filter((m) => m.type !== "revision");
+    n.marks = [...rest, mark];
   }
 }
 

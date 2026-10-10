@@ -44,7 +44,28 @@ export type PMMark =
         backgroundColor?: string | null;
       };
     }
-  | { type: "link"; attrs: { href: string; target?: string | null } };
+  | { type: "link"; attrs: { href: string; target?: string | null } }
+  /**
+   * 修订跟踪：`w:ins`（插入）/ `w:del`（删除）包住的运行（ECMA-376 的 `CT_RunTrackChange`）。
+   *
+   * 做成 mark 而不是节点：修订是**字符属性**（同一段里可以一半是插入一半不是），而且必须让
+   * 被改的文字留在原地——用节点表示就得把插入的文字搬进一个原子节点，光标、选区、撤销全乱。
+   * `kind` 存原始操作名（不是"接受/拒绝"后的语义），`id`/`author`/`date` 一律**原样存字符串**：
+   * 单位换算与归一化只在 docx-io 进出口（§2.1），而 `w:id` 是文档级编号空间，改动会让 Word
+   * 的"接受此修订"找不到对象。
+   *
+   * 嵌套（`w:del` 里再包 `w:ins`）只保留**外层**那一次操作：外层是后发生的，Word 显示的正是
+   * 它的状态（内层 `w:delText` 会被外层的 `w:t` 语义覆盖）。这是刻意的取舍，见规格排名 4 判据。
+   */
+  | {
+      type: "revision";
+      attrs: {
+        kind: "ins" | "del";
+        id?: string | null;
+        author?: string | null;
+        date?: string | null;
+      };
+    };
 
 export interface PMTextNode {
   type: "text";

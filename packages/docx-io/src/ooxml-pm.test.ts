@@ -1612,6 +1612,119 @@ describe("批注锚点（w:commentRangeStart / End / Reference）", () => {
   });
 });
 
+describe("修订跟踪（w:ins / w:del / w:delText）", () => {
+  /** Word 写修订的形状：`w:ins`/`w:del` 与 `w:r` 平级，删除的文字换成 `w:delText`。 */
+  const TRACKED = bodyXml(
+    `<w:p><w:r><w:t>正文</w:t></w:r>` +
+      `<w:ins w:id="1" w:author="张三" w:date="2026-01-02T03:04:05Z"><w:r><w:t>插入的字</w:t></w:r></w:ins>` +
+      `<w:del w:id="2" w:author="李四"><w:r><w:delText>删掉的字</w:delText></w:r></w:del></w:p>`,
+  );
+
+  it("reads ins/del into a revision mark instead of dropping the deleted text", () => {
+    const inlines = ooxmlToPm(TRACKED).content[0]!.content!;
+    expect(inlines.map((n) => n.text)).toEqual(["正文", "插入的字", "删掉的字"]);
+    expect(inlines[0]!.marks ?? []).toEqual([]);
+    expect(inlines[1]!.marks).toEqual([
+      { type: "revision", attrs: { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" } },
+    ]);
+    expect(inlines[2]!.marks).toEqual([
+      { type: "revision", attrs: { kind: "del", id: "2", author: "李四" } },
+    ]);
+  });
+
+  it("writes the region back with the same element, attributes and delText", () => {
+    const once = pmToOoxml(ooxmlToPm(TRACKED));
+    expect(once).toContain(
+      `<w:ins w:id="1" w:author="张三" w:date="2026-01-02T03:04:05Z"><w:r><w:t xml:space="preserve">插入的字</w:t></w:r></w:ins>`,
+    );
+    expect(once).toContain(
+      `<w:del w:id="2" w:author="李四"><w:r><w:delText xml:space="preserve">删掉的字</w:delText></w:r></w:del>`,
+    );
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  it("merges the split runs of one revision into a single element", () => {
+    // Word 的一次插入是若干个 run（各有自己的字符样式）；按 marks 分组必然切开，
+    // 逐组各包一次会让同一个 `w:id` 出现两条，而"接受此修订"是按 id 找对象的。
+    const xml = pmToOoxml(
+      ooxmlToPm(
+        bodyXml(
+          `<w:p><w:ins w:id="5" w:author="张三">` +
+            `<w:r><w:t>普通</w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>加粗</w:t></w:r></w:ins></w:p>`,
+        ),
+      ),
+    );
+    expect(xml.match(/<w:ins /g)).toHaveLength(1);
+    expect(xml.match(/<\/w:ins>/g)).toHaveLength(1);
+    const region = xml.match(/<w:ins [^>]*>([\s\S]*?)<\/w:ins>/)![1]!;
+    expect(region.match(/<w:r>/g)).toHaveLength(2);
+    expect(region).toContain("普通");
+    expect(region).toContain("加粗");
+  });
+
+  it("keeps the outer operation when ins nests in del", () => {
+    // 先插入、后删除：Word 把后来的那次写在外面，显示状态由外层决定，所以标记取外层。
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:del w:id="8" w:author="王五"><w:ins w:id="7" w:author="张三">` +
+          `<w:r><w:delText>先插后删</w:delText></w:r></w:ins></w:del></w:p>`,
+      ),
+    );
+    expect(pm.content[0]!.content![0]!.marks).toEqual([
+      { type: "revision", attrs: { kind: "del", id: "8", author: "王五" } },
+    ]);
+    const xml = pmToOoxml(pm);
+    expect(xml).not.toContain("<w:ins");
+    expect(xml).toContain(
+      `<w:del w:id="8" w:author="王五"><w:r><w:delText xml:space="preserve">先插后删</w:delText></w:r></w:del>`,
+    );
+  });
+
+  it("puts the revision inside the hyperlink — 只有这个方向有规范依据", () => {
+    const xml = pmToOoxml(
+      ooxmlToPm(
+        bodyXml(
+          `<w:p><w:hyperlink r:id="rId5"><w:ins w:id="9" w:author="张三">` +
+            `<w:r><w:t>链接里的插入</w:t></w:r></w:ins></w:hyperlink></w:p>`,
+        ),
+      ),
+    );
+    expect(xml).toContain(`<w:hyperlink r:id="rId5"><w:ins w:id="9" w:author="张三"><w:r>`);
+    expect(xml).not.toMatch(/<w:ins[^>]*><w:hyperlink/);
+  });
+
+  it("carries a paragraph-mark revision through pPr/rPr untouched", () => {
+    // 段落标记自己的增删在 `w:pPr/w:rPr` 里，没有运行可走；这份靠 rawPpr 原样透传。
+    const xml = pmToOoxml(
+      ooxmlToPm(
+        bodyXml(
+          `<w:p><w:pPr><w:rPr><w:ins w:id="3" w:author="张三" w:date="2026-01-02T03:04:05Z"/></w:rPr></w:pPr>` +
+            `<w:r><w:t>本段被插入</w:t></w:r></w:p>`,
+        ),
+      ),
+    );
+    expect(xml).toContain(`<w:rPr><w:ins w:id="3" w:author="张三" w:date="2026-01-02T03:04:05Z"/></w:rPr>`);
+    expect(xml).not.toContain(`w:author="张三"><w:r>`);
+  });
+
+  it("invents no author when the document did not name one", () => {
+    const xml = pmToOoxml(
+      ooxmlToPm(bodyXml(`<w:p><w:ins w:id="4"><w:r><w:t>x</w:t></w:r></w:ins></w:p>`)),
+    );
+    expect(xml).toContain(`<w:ins w:id="4"><w:r>`);
+    expect(xml).not.toContain("w:author");
+  });
+
+  it("keeps a deleted tab in the same deletion — 制表符也是被删掉的内容", () => {
+    const xml = pmToOoxml(
+      ooxmlToPm(bodyXml(`<w:p><w:del w:id="6"><w:r><w:delText>a</w:delText></w:r><w:r><w:tab/></w:r></w:del></w:p>`)),
+    );
+    expect(xml).toContain(
+      `<w:del w:id="6"><w:r><w:delText xml:space="preserve">a</w:delText><w:tab/></w:r></w:del>`,
+    );
+  });
+});
+
 describe("本 app 生成的目录写进 docx", () => {
   /**
    * `apps/desktop/src/editor/toc.ts` 的 `tocEntryJson` 产出的那份 PM 文档，原样搬来：
@@ -1734,5 +1847,26 @@ describe("DocxFile toProseMirror / replaceProseMirror", () => {
     const paras = reopen.listParagraphs().map((p) => p.text);
     expect(paras.join("|")).toContain("alpha");
     expect(paras.join("|")).toContain("beta");
+  });
+
+  it("keeps tracked insertions and deletions across open → save", async () => {
+    // 桌面 app 每次保存都是"读原文件 → 换正文 → 写回"，这条就是那条链路：
+    // 一次存盘不能把修订悄悄接受掉，也不能把被删的文字弄没。
+    const bytes = await minimalDocx(
+      bodyXml(
+        `<w:p><w:r><w:t>正文</w:t></w:r>` +
+          `<w:del w:id="1" w:author="张三"><w:r><w:delText>删掉</w:delText></w:r></w:del></w:p>`,
+      ),
+    );
+    const docx = await DocxFile.fromBytes(bytes);
+    const { doc } = await docx.toProseMirror();
+    await docx.replaceProseMirror(doc);
+    const reopen = await DocxFile.fromBytes(await docx.toBytes());
+    const again = (await reopen.toProseMirror()).doc;
+    const inlines = again.content[0]!.content!;
+    expect(inlines.map((n) => n.text).join("")).toBe("正文删掉");
+    expect(inlines.at(-1)!.marks).toEqual([
+      { type: "revision", attrs: { kind: "del", id: "1", author: "张三" } },
+    ]);
   });
 });
