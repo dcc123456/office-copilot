@@ -39,6 +39,7 @@ import {
   Wand2,
   RotateCcw,
   MessageSquareQuote,
+  FileDiff,
 } from "lucide-react";
 
 import { ParagraphPopover } from "./ParagraphPopover.js";
@@ -66,6 +67,8 @@ interface ToolbarProps {
   footnotesOpen?: boolean;
   /** 批注侧栏是否开着，同一个作用。 */
   commentsOpen?: boolean;
+  /** 修订开关是否开着：开着时按钮亮着，本次编辑会记成插入/删除。 */
+  trackChangesOn?: boolean;
 }
 
 export type ToolbarAction =
@@ -82,6 +85,7 @@ export type ToolbarAction =
   | "styles"
   | "footnotes"
   | "comments"
+  | "track-changes"
   | "beautify"
   | "revert-beautify";
 
@@ -128,6 +132,7 @@ export function Toolbar({
   stylesOpen,
   footnotesOpen,
   commentsOpen,
+  trackChangesOn,
 }: ToolbarProps) {
   const setLink = () => void promptSetLink(editor);
 
@@ -412,6 +417,13 @@ export function Toolbar({
         </Btn>
         <Btn title="批注侧栏" active={commentsOpen} onClick={() => onAction("comments")}>
           <MessageSquareQuote size={16} />
+        </Btn>
+        <Btn
+          title="修订：开着时本次编辑记为插入与删除"
+          active={trackChangesOn}
+          onClick={() => onAction("track-changes")}
+        >
+          <FileDiff size={16} />
         </Btn>
         <Btn
           title="分割线"

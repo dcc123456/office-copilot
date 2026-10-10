@@ -35,7 +35,7 @@ import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
 import { CommentPane } from "./components/CommentPane.js";
-import { insertCommentOnSelection } from "./editor/comments.js";
+import { commentStamp, insertCommentOnSelection } from "./editor/comments.js";
 import { AIPanel } from "./ai/AIPanel.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { FindBar } from "./components/FindBar.js";
@@ -119,6 +119,8 @@ export function App() {
   const [commentPaneOpen, setCommentPaneOpen] = useState(false);
   const [commentBodies, setCommentBodies] = useState<CommentBody[]>([]);
   const [commentSelectedId, setCommentSelectedId] = useState<string | null>(null);
+  // 修订开关：开着时本次编辑记成 w:ins/w:del。它是一份插件状态，换文档必须跟着关掉。
+  const [trackChangesOn, setTrackChangesOn] = useState(false);
   // 样式窗格的数据随文档走：打开 / 新建时从主进程带回来的 styles.xml 清单换一次。
   const [docStyles, setDocStyles] = useState<PaneStyle[]>([]);
   // 同一份 styles.xml 的另一面：每条样式合并出来的可见格式，拼成文档作用域的样式表。
@@ -201,9 +203,21 @@ export function App() {
   // 看到最新一份（handleSave 的依赖里塞 state 会让每个菜单项跟着重建）。
   const styleEditsRef = useRef<StyleEdit[]>([]);
 
+  /**
+   * 关掉修订开关。
+   *
+   * 换文档（新建 / 打开 / 拖入 / 最近文件）前必须调用：开关是编辑器插件的状态，不跟着文档走，
+   * 开着的时候 `setContent` 会把整份新文档的每个字都记成"本次插入"。
+   */
+  const stopTracking = useCallback(() => {
+    setTrackChangesOn(false);
+    editor?.commands.disableTrackChanges();
+  }, [editor]);
+
   // Reusable file actions (used by both menu and toolbar).
   const handleNew = useCallback(() => {
     if (!editor) return;
+    stopTracking();
     editor.commands.setContent({
       type: "doc",
       content: [
@@ -225,7 +239,7 @@ export function App() {
     setFilePath(null);
     setDirty(false);
     setStarted(true);
-  }, [editor]);
+  }, [editor, stopTracking]);
 
   const handleOpen = useCallback(async () => {
     if (!editor) return;
@@ -234,6 +248,7 @@ export function App() {
       if (!r.canceled && r.message) toast(r.message, "error");
       return;
     }
+    stopTracking();
     editor.commands.setContent(r.doc as never);
     setHeaderDoc((r.header as never) ?? null);
     setFooterDoc((r.footer as never) ?? null);
@@ -250,7 +265,7 @@ export function App() {
     setStarted(true);
     if (r.path) window.officeCopilot.addRecent(r.path);
     if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
-  }, [editor]);
+  }, [editor, stopTracking]);
 
   const openPath = useCallback(
     async (p: string, guardDirty = false) => {
@@ -269,6 +284,7 @@ export function App() {
         if (r.message) toast(r.message, "error");
         return;
       }
+      stopTracking();
       editor.commands.setContent(r.doc as never);
       setHeaderDoc((r.header as never) ?? null);
       setFooterDoc((r.footer as never) ?? null);
@@ -286,7 +302,7 @@ export function App() {
       window.officeCopilot.addRecent(p);
       if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
     },
-    [editor],
+    [editor, stopTracking],
   );
 
   // Drag a .docx from Finder/Explorer anywhere onto the window to open it.
@@ -420,6 +436,24 @@ export function App() {
     setCommentPaneOpen(true);
     setDirty(true);
   }, [editor, commentBodies]);
+
+  /**
+   * 开关修订。
+   *
+   * 署名每次现读设置（同批注那条）：改完名字不用重启，下一次打开开关就跟着变。
+   * 没填作者就留空——`CT_TrackChange` 的 `w:author` 是可选属性，编一个名字比留空更糟。
+   */
+  const toggleTrackChanges = useCallback(async () => {
+    if (!editor) return;
+    if (trackChangesOn) {
+      setTrackChangesOn(false);
+      editor.commands.disableTrackChanges();
+      return;
+    }
+    const settings = await window.officeCopilot.getSettings();
+    setTrackChangesOn(true);
+    editor.commands.enableTrackChanges({ author: settings.authorName, date: commentStamp() });
+  }, [editor, trackChangesOn]);
 
   const handlePrint = useCallback(async () => {
     if (!editor) return;
@@ -603,6 +637,9 @@ export function App() {
         case "comments":
           setCommentPaneOpen((v) => !v);
           break;
+        case "track-changes":
+          void toggleTrackChanges();
+          break;
         case "beautify":
           setTemplateOpen(true);
           break;
@@ -611,7 +648,7 @@ export function App() {
           break;
       }
     },
-    [handleNew, handleOpen, handleSave, handleSaveAs, handlePrint, revertBeautify],
+    [handleNew, handleOpen, handleSave, handleSaveAs, handlePrint, revertBeautify, toggleTrackChanges],
   );
 
   const runFormatDocument = useCallback(() => {
@@ -975,6 +1012,7 @@ export function App() {
               stylesOpen={stylePaneOpen}
               footnotesOpen={footnotePaneOpen}
               commentsOpen={commentPaneOpen}
+              trackChangesOn={trackChangesOn}
               dirty={dirty}
             />
           ) : null}

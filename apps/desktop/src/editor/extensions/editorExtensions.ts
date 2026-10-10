@@ -12,6 +12,7 @@ import CharacterCount from "@tiptap/extension-character-count";
 import { TextStyle, TextStyleCommands } from "./TextStyle.js";
 import { VertAlign } from "./VertAlign.js";
 import { Revision } from "./Revision.js";
+import { TrackChanges } from "./TrackChanges.js";
 import { Drawing, PageBreak } from "./Drawing.js";
 import { PagedLayout } from "./PagedLayout.js";
 import { FloatingImageDrag } from "./FloatingImageDrag.js";
@@ -36,6 +37,7 @@ export const EDITOR_EXTENSIONS: Extensions = [
   Underline,
   VertAlign,
   Revision,
+  TrackChanges,
   TextAlign.configure({ types: ["heading", "paragraph"] }),
   Link.configure({ openOnClick: false, autolink: true }),
   Drawing,
