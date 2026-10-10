@@ -12,7 +12,7 @@ import {
 } from "./xml.js";
 import type { PPrAttrs, PMDoc, PMMark, PMNode, PMTextNode } from "./pm-schema.js";
 import { NumberingMap, readListProps, type NumberingKind } from "./numbering.js";
-import { StyleMap } from "./styles.js";
+import { StyleMap, fitStyleId } from "./styles.js";
 import {
   anchorGeom,
   hasPicture,
@@ -237,7 +237,7 @@ type WriteCtx = {
   link?: LinkStyle | null;
   /**
    * 这份文档的 styles.xml 视图。段落 attrs 里的 styleId 要先对着它复核"级别/类型
-   * 还匹配"才敢原样写回——详见 `styleIdFitsNode`。
+   * 还匹配"才敢原样写回——详见 `fitStyleId`。
    */
   styles?: StyleMap;
 };
@@ -1158,37 +1158,13 @@ function paragraphPprXml(
     .map((el) => ({ name: el.name, xml: serialize(el) }))
     .filter((part) => !covered.has(part.name) && part.name !== "w:pStyle");
   const parts: PprPart[] = [];
-  const style = pStylePart(styleIdFitsNode(a.styleId, opts), rawStyle, opts.pStyle);
+  const applied = fitStyleId(a.styleId, opts.headingLevel, opts.styles);
+  const style = pStylePart(applied, rawStyle, opts.pStyle);
   if (style) parts.push(style);
   parts.push(...rawParts);
   if (opts.numPr) parts.push({ name: "w:numPr", xml: opts.numPr });
   parts.push(...modeled);
   return pprFromParts(parts);
-}
-
-/**
- * 按样式表复核 attrs.styleId 与这段落"现在是什么"还配不配。
- *
- * 编辑器里改标题级别、把标题转成正文时只动节点的 type / level，styleId 留在 attrs
- * 里没人负责跟着改——照原样写回的话 Word 仍按旧的那一级排版，用户的操作等于没生效。
- *
- * @param styleId attrs 里的具名样式 id。
- * @param opts.headingLevel 标题节点现在的级别；非标题段落是 undefined。
- * @param opts.styles 文档样式表。没有它就判断不了这个 id 是不是标题样式，只能放行。
- * @returns 仍然成立的 id；级别换了时返回这一级真正的样式 id（样式表没有这一级就返回
- *   undefined，让调用方按节点类型推断）；标题被改成正文返回 null（引用必须删掉）；
- *   不是标题样式或无从判断时原样返回。
- */
-function styleIdFitsNode(
-  styleId: string | null | undefined,
-  opts: { headingLevel?: number; styles?: StyleMap },
-): string | null | undefined {
-  if (typeof styleId !== "string" || !opts.styles) return styleId;
-  const declaredLevel = opts.styles.headingLevel(styleId);
-  if (declaredLevel === undefined) return styleId;
-  if (opts.headingLevel === declaredLevel) return styleId;
-  if (opts.headingLevel === undefined) return null;
-  return opts.styles.styleIdForHeadingLevel(opts.headingLevel);
 }
 
 /**

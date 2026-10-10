@@ -960,6 +960,18 @@ describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
     ]);
   });
 
+  it("编辑器里新建的标题也先问样式表，别写本文档没声明的 Heading2", () => {
+    // WPS 写的文档里 heading 2 的 styleId 是 "3"；照节点类型推断会写成 "Heading2"，
+    // 而这个名字在这份 styles.xml 里根本不存在，Word 只会当普通段落排。
+    expect(styleRefs(pmToOoxml(headingDoc(2), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="3"/>`,
+    ]);
+    // 样式表没有这一级时才退回推断——新建文档连 styles.xml 都没有，行为照旧。
+    expect(styleRefs(pmToOoxml(headingDoc(4), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="Heading4"/>`,
+    ]);
+  });
+
   it("没有样式表可对照时不猜：非标题样式一律放行", () => {
     // 只有样式表知道这个 id 是不是标题样式，无从判断就不能删用户的引用。
     expect(styleRefs(pmToOoxml(paraDoc({ styleId: "af3" }), { styles: TWO_HEADINGS }))).toEqual([

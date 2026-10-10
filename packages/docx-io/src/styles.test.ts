@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { StyleMap } from "./styles.js";
+import { StyleMap, fitStyleId, headingLookupFromPaneStyles } from "./styles.js";
 
 /** Word 自己写出的 styles.xml 是紧凑一行的，夹具照这个形态来。 */
 const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
@@ -118,5 +118,45 @@ describe("StyleMap：不认识的部件不抢写", () => {
   it("没有 styles.xml 时是一张空表，不抛错", () => {
     expect(StyleMap.fromXml(undefined).definitions()).toEqual([]);
     expect(StyleMap.fromXml("<w:styles />").definitions()).toEqual([]);
+  });
+});
+
+describe("StyleMap.paneStyles：样式窗格的数据源（排名 2 的读侧终点）", () => {
+  const map = StyleMap.fromXml(ONLY_STYLES);
+
+  it("只列段落样式：写了 uiPriority 的在前，没写的按声明次序垫底", () => {
+    expect(map.paneStyles()).toEqual([
+      { styleId: "1", name: "heading 1", headingLevel: 1, isDefault: false },
+      // Normal 没有 uiPriority 所以垫底；字符样式 a0、表格样式 a1 根本不进窗格。
+      { styleId: "a", name: "Normal", isDefault: true },
+    ]);
+  });
+
+  it("w:hidden / w:semiHidden 的段落样式不列出，但样式表照旧认得它们", () => {
+    const hidden = StyleMap.fromXml(
+      `<w:styles ${W}>` +
+        `<w:style w:type="paragraph" w:styleId="p1"><w:name w:val="普通段落"/></w:style>` +
+        `<w:style w:type="paragraph" w:styleId="p2"><w:name w:val="隐藏段落"/><w:hidden/></w:style>` +
+        `<w:style w:type="paragraph" w:styleId="p3"><w:name w:val="半隐藏段落"/><w:semiHidden/></w:style>` +
+        `</w:styles>`,
+    );
+    expect(hidden.paneStyles().map((s) => s.styleId)).toEqual(["p1"]);
+    // 窗格看不见不等于样式不存在：段落里已有的引用写回时仍要判定为已声明。
+    expect(hidden.isDeclared("p2")).toBe(true);
+  });
+
+  it("没有 styles.xml 时窗格是空列表，不抛错", () => {
+    expect(StyleMap.fromXml(undefined).paneStyles()).toEqual([]);
+  });
+
+  it("清单能拼出 fitStyleId 的查询面，窗格高亮因此与写侧同一条规则", () => {
+    const lookup = headingLookupFromPaneStyles(map.paneStyles());
+    expect(lookup.headingLevel("1")).toBe(1);
+    expect(lookup.styleIdForHeadingLevel(1)).toBe("1");
+    // 清单里没有的级别查不到 id，交给调用方按节点类型推断。
+    expect(lookup.styleIdForHeadingLevel(3)).toBeUndefined();
+    // 段落套着一级标题、级别已经改成 2：窗格显示与导出都该指向二级那条。
+    expect(fitStyleId("1", 2, lookup)).toBeUndefined();
+    expect(fitStyleId("1", 1, lookup)).toBe("1");
   });
 });

@@ -122,6 +122,83 @@ function innerXml(el: Element): string {
 }
 
 /**
+ * 样式窗格里的一条样式：只带"列出来 + 点一下"所需的字段，不含任何 XML，
+ * 所以可以原样通过 Electron 的 IPC 送到渲染层（渲染层拿不到 styles.xml 全文）。
+ */
+export interface PaneStyle {
+  styleId: string;
+  /** `w:name` 原值。内建样式是英文（"heading 1"），界面要显示的中文名由渲染层映射。 */
+  name: string;
+  /** 这一级的标题样式（1–6）；不是标题样式时 undefined。套用它时段落要同时变成这一级的标题。 */
+  headingLevel?: number;
+  /** @w:default：该类型的默认样式。Word 的"清除样式"就是把段落退回这条。 */
+  isDefault: boolean;
+}
+
+/**
+ * `fitStyleId` 需要的最小查询面。`StyleMap` 天生满足它；渲染层只拿到窗格清单
+ * （`PaneStyle[]`），用它拼出同一个接口，两处走的就是同一条判定规则。
+ */
+export interface HeadingStyleLookup {
+  /** 该样式在 styles.xml 里声明的标题级别；不是标题样式时 undefined。 */
+  headingLevel(styleId: string): number | undefined;
+  /** 本文档为某一级标题声明的样式 id；没声明时 undefined（不许凭空造 id）。 */
+  styleIdForHeadingLevel(level: number): string | undefined;
+}
+
+/**
+ * 判定一段现在该对外承认哪个具名样式 id。
+ *
+ * 编辑器里改标题级别、把标题转成正文时只动节点的 type / level，styleId 留在 attrs
+ * 里没人负责跟着改——照原样写回的话 Word 仍按旧的那一级排版，用户的操作等于没生效。
+ *
+ * @param styleId attrs 里的具名样式 id：字符串=套用，null=用户清除过，undefined=没建模过。
+ * @param headingLevel 段落当前的标题级别；正文传 undefined。
+ * @param styles 本文档的样式表视图；没有它就没法判断，只能放行。
+ * @returns 写侧与窗格都该用的 id。标题换了级别时返回这一级真正声明的 id，样式表没有
+ *   这一级就返回 undefined（由调用方按节点类型推断）；标题被改成正文返回 null（引用
+ *   必须删掉）；不是标题样式、或用户显式清除过样式时原样返回。
+ */
+export function fitStyleId(
+  styleId: string | null | undefined,
+  headingLevel: number | undefined,
+  styles: HeadingStyleLookup | undefined,
+): string | null | undefined {
+  if (!styles) return styleId;
+  if (typeof styleId === "string") {
+    const declaredLevel = styles.headingLevel(styleId);
+    if (declaredLevel === undefined || headingLevel === declaredLevel) return styleId;
+    return headingLevel === undefined ? null : styles.styleIdForHeadingLevel(headingLevel);
+  }
+  // null = 用户显式清除过样式，不能替他改主意。
+  if (styleId === null) return null;
+  // 没建模过：正文保持源文档写法；标题在编辑器里新建时天生没有引用，
+  // 只能从样式表取这一级声明的那条，否则会写出本文档不存在的样式 id。
+  return headingLevel === undefined ? undefined : styles.styleIdForHeadingLevel(headingLevel);
+}
+
+/**
+ * 把窗格清单变成 `fitStyleId` 需要的查询面。渲染层只拿到 `PaneStyle[]`（IPC 里
+ * 没有 styles.xml），有了它就不必自己再实现一遍"级别变了样式 id 该怎么改"。
+ *
+ * @param styles `StyleMap.paneStyles()` 的结果。
+ * @returns 只认清单里那几条样式的双向查找；同一级出现多条时取排在最前的。
+ */
+export function headingLookupFromPaneStyles(styles: PaneStyle[]): HeadingStyleLookup {
+  const levelById = new Map<string, number>();
+  const idByLevel = new Map<number, string>();
+  for (const style of styles) {
+    if (style.headingLevel === undefined) continue;
+    levelById.set(style.styleId, style.headingLevel);
+    if (!idByLevel.has(style.headingLevel)) idByLevel.set(style.headingLevel, style.styleId);
+  }
+  return {
+    headingLevel: (styleId) => levelById.get(styleId),
+    styleIdForHeadingLevel: (level) => idByLevel.get(level),
+  };
+}
+
+/**
  * Parsed lookups from word/styles.xml. Real-world .docx files use arbitrary
  * numeric styleIds (WPS writes heading 1 with styleId="2"), so nothing here may
  * assume Word's own ids; and the style pane needs every declared style, not just
@@ -241,5 +318,31 @@ export class StyleMap {
       current = this.byId(current.basedOn);
     }
     return out;
+  }
+
+  /**
+   * 样式窗格要列出的段落样式。
+   *
+   * @returns 按 `w:uiPriority` 升序（没写优先级的排到最后，同级保持 styles.xml 里的
+   *   声明次序）、已过滤 `w:hidden` / `w:semiHidden` 与字符/表格/编号样式的列表。
+   *   空数组表示这份文档没有可显示的段落样式（例如根本没有 styles.xml）。
+   *   被过滤掉的样式只是不出现在窗格里，引用它们的正文不受影响——那是 `w:hidden`
+   *   的语义，不等于"无格式"。
+   */
+  paneStyles(): PaneStyle[] {
+    const priority = (d: StyleDefinition): number => d.uiPriority ?? Number.MAX_SAFE_INTEGER;
+    return this.defs
+      .filter((d) => d.type === "paragraph" && !d.hidden && !d.semiHidden)
+      // Array.prototype.sort 是稳定排序：同优先级（含都没写优先级）时保持声明次序。
+      .sort((a, b) => priority(a) - priority(b))
+      .map((d) => {
+        const level = this.headingLevel(d.styleId);
+        return {
+          styleId: d.styleId,
+          name: d.name ?? d.styleId,
+          ...(level !== undefined ? { headingLevel: level } : {}),
+          isDefault: d.isDefault,
+        };
+      });
   }
 }

@@ -300,6 +300,26 @@ describe("DocxFile", () => {
     expect(refs).toEqual([]);
   });
 
+  it("hands the style pane the paragraph styles this document declares", async () => {
+    const withStyles = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        stylesXml: `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:style w:type="paragraph" w:default="1" w:styleId="1"><w:name w:val="Normal"/></w:style>
+          <w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 1"/></w:style>
+          <w:style w:type="character" w:styleId="3"><w:name w:val="Strong"/></w:style>
+        </w:styles>`,
+      }),
+    );
+    // 窗格要的是"这份文档里能套的样式"，不是 Word 的预置清单：字符样式不在段落窗格里。
+    expect((await withStyles.toProseMirror()).styles).toEqual([
+      { styleId: "1", name: "Normal", isDefault: true },
+      { styleId: "2", name: "heading 1", headingLevel: 1, isDefault: false },
+    ]);
+    // 没带 styles.xml 的文件也要给数组，渲染层不用区分"读不到"和"读到空"。
+    const bare = await DocxFile.fromBytes(await makeDocx(["正文"]));
+    expect((await bare.toProseMirror()).styles).toEqual([]);
+  });
+
   /**
    * 编辑器里插入的分隔线必须落成段落底部边框：本仓不写 styles.xml，
    * 旧实现引用的 HorizontalRule 样式在文档里不存在，Word 只会排出空段落。

@@ -14,7 +14,7 @@ import { ooxmlToPm, pmToOoxml } from "./ooxml-pm.js";
 import type { LinkStyle } from "./ooxml-pm.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
-import { StyleMap } from "./styles.js";
+import { StyleMap, type PaneStyle } from "./styles.js";
 import {
   ensureDefaultHeaderFooter,
   loadHeaderFooters,
@@ -67,6 +67,11 @@ export interface PmLoadResult {
   headers?: HeaderFooterBundle;
   /** Page geometry read from <w:sectPr>; defaults to A4 if absent. */
   section: SectionGeometry;
+  /**
+   * 样式窗格要列出的段落样式，按 uiPriority 排好、隐藏样式已过滤。
+   * 空数组 = 这份文档没有 styles.xml（或里面没有可显示的段落样式）。
+   */
+  styles: PaneStyle[];
 }
 
 /**
@@ -217,7 +222,14 @@ export class DocxFile {
     }
     const section = readSectionGeometry(this.body);
     section.paraSpacingAfter = this.styles.defaultSpacingAfterPx;
-    return { doc: pm, sourceXml, warnings, headers: this.headers, section };
+    return {
+      doc: pm,
+      sourceXml,
+      warnings,
+      headers: this.headers,
+      section,
+      styles: this.styles.paneStyles(),
+    };
   }
 
   /**
@@ -271,7 +283,7 @@ export class DocxFile {
     const xml = pmToOoxml(doc, {
       numbering: this.numbering,
       link: this.pendingStyle?.link ?? null,
-      // 段落 attrs 里的样式 id 要对着本文档的样式表复核，见 styleIdFitsNode。
+      // 段落 attrs 里的样式 id 要对着本文档的样式表复核，见 fitStyleId。
       styles: this.styles,
     });
     const newRoot = parseDocument(xml);
