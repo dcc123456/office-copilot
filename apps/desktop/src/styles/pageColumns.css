@@ -1,0 +1,8 @@
+/* 分栏导引线：编辑视图不重排文本，只在正文区标出栏与栏的边界。 */
+.oc-column-guide {
+  position: absolute;
+  width: 0;
+  border-left: 1px dashed #b8b8b8;
+  pointer-events: none;
+  z-index: 2;
+}

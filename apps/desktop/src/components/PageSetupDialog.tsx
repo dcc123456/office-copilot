@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
+import type { SectionColumns, SectionGeometry } from "@office-copilot/docx-io";
 
 /**
  * Page Setup dialog (Word: 文件 → 页面设置). Lets the user change:
  *   - paper size (A4 / Letter / A3 / Legal / custom)
  *   - orientation (portrait / landscape) — auto-swaps W/H
  *   - margins (top/right/bottom/left) and header/footer distances
+ *   - columns (栏数 + 栏间距)
  *
  * On save we produce a complete SectionGeometry object in CSS px at
  * 96 DPI. The app applies it immediately by replacing the section
@@ -14,22 +16,16 @@ import { useEffect, useState } from "react";
  * cm) for familiarity; the conversion is cm -> px via (cm * 96 / 2.54).
  */
 
-interface SectionGeometryLike {
-  pageWidth: number;
-  pageHeight: number;
-  marginTop: number;
-  marginRight: number;
-  marginBottom: number;
-  marginLeft: number;
-  header: number;
-  footer: number;
-  contentWidth: number;
-  contentHeight: number;
-}
+/** Word 的栏数上限（页面设置对话框里「栏数」输入框能填到的最大数）。 */
+const MAX_COLUMNS = 13;
+/** 文档没设过分栏时对话框显示的栏间距，Word 的新建多栏默认值 1.27 cm。 */
+const DEFAULT_COL_GAP_CM = 1.27;
 
 /**
  * Page geometry in CSS px at 96 DPI. Shared with 美化排版 so a template's
  * margins produce exactly the object the 页面设置 dialog would have.
+ *
+ * @param columns 分栏设置；不传就是"这份文档没设过分栏"，保存时不会写出 `w:cols`。
  */
 export function geometryFor(
   pageWidth: number,
@@ -37,7 +33,8 @@ export function geometryFor(
   margins: { top: number; right: number; bottom: number; left: number },
   header: number,
   footer: number,
-): SectionGeometryLike {
+  columns?: SectionColumns,
+): SectionGeometry {
   return {
     pageWidth,
     pageHeight,
@@ -49,6 +46,30 @@ export function geometryFor(
     footer,
     contentWidth: pageWidth - margins.left - margins.right,
     contentHeight: pageHeight - margins.top - margins.bottom,
+    columns,
+  };
+}
+
+/**
+ * 把对话框里的分栏选择收成 `SectionColumns`。
+ *
+ * @param count 栏数，1 就是单栏（Word 也会老老实实写 `w:num="1"`）。
+ * @param gapPx 栏间距，CSS px。
+ * @param source 文档里原本那份分栏。只有用户没改栏数时才把逐栏宽度原样带回，
+ *   免得"只改了页边距"就把不等宽栏拍平（AGENTS §2.7）。
+ * @returns 要写进节属性的分栏设置。
+ */
+export function columnsFor(
+  count: number,
+  gapPx: number,
+  source: SectionColumns | null | undefined,
+): SectionColumns {
+  const keepWidths = source && source.count === count && !source.equalWidth;
+  return {
+    count,
+    gap: gapPx,
+    equalWidth: !keepWidths,
+    widths: keepWidths ? source!.widths : [],
   };
 }
 
@@ -77,9 +98,9 @@ export function PageSetupDialog({
   onApply,
 }: {
   open: boolean;
-  section: SectionGeometryLike | null;
+  section: SectionGeometry | null;
   onClose: () => void;
-  onApply: (s: SectionGeometryLike) => void;
+  onApply: (s: SectionGeometry) => void;
 }) {
   const [paper, setPaper] = useState<string>("A4");
   const [custom, setCustom] = useState(false);
@@ -94,10 +115,14 @@ export function PageSetupDialog({
   const [ml, setMl] = useState(3.18);
   const [hd, setHd] = useState(1.5);
   const [ft, setFt] = useState(1.75);
+  const [colNum, setColNum] = useState(1);
+  const [colGapCm, setColGapCm] = useState(DEFAULT_COL_GAP_CM);
+  // 文档原本的分栏，用来在"用户没碰栏数"时把不等宽的逐栏宽度原样带回。
+  const [sourceColumns, setSourceColumns] = useState<SectionColumns | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    const g = section ?? {
+    const g: SectionGeometry = section ?? {
       pageWidth: 793.7,
       pageHeight: 1122.5,
       marginTop: cmToPx(2.54),
@@ -126,6 +151,9 @@ export function PageSetupDialog({
     setMl(pxToCm(g.marginLeft));
     setHd(pxToCm(g.header));
     setFt(pxToCm(g.footer));
+    setColNum(g.columns?.count ?? 1);
+    setColGapCm(g.columns ? pxToCm(g.columns.gap) : DEFAULT_COL_GAP_CM);
+    setSourceColumns(g.columns ?? null);
   }, [open, section]);
 
   if (!open) return null;
@@ -171,10 +199,17 @@ export function PageSetupDialog({
         },
         cmToPx(hd),
         cmToPx(ft),
+        columnsFor(colNum, cmToPx(colGapCm), sourceColumns),
       ),
     );
     onClose();
   };
+
+  // 正文区与每栏宽度都用同一份 cm 值，避免 `w - ml - mr` 那种再换算一遍的写法。
+  const bodyWidthCm = pxToCm(w - cmToPx(ml) - cmToPx(mr));
+  const bodyHeightCm = pxToCm(h - cmToPx(mt) - cmToPx(mb));
+  const columnWidthCm =
+    colNum > 1 ? (bodyWidthCm - colGapCm * (colNum - 1)) / colNum : bodyWidthCm;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -303,9 +338,41 @@ export function PageSetupDialog({
               />
             </label>
           </div>
+          <div className="ps-section-title">分栏</div>
+          <div className="ps-grid">
+            <label>
+              栏数
+              <input
+                type="number"
+                min="1"
+                max={MAX_COLUMNS}
+                step="1"
+                value={colNum}
+                onChange={(e) =>
+                  setColNum(
+                    Math.max(
+                      1,
+                      Math.min(MAX_COLUMNS, Math.round(Number(e.target.value) || 1)),
+                    ),
+                  )
+                }
+              />
+            </label>
+            <label>
+              栏间距 (cm)
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                value={colGapCm}
+                disabled={colNum < 2}
+                onChange={(e) => setColGapCm(Math.max(0, Number(e.target.value) || 0))}
+              />
+            </label>
+          </div>
           <div className="ps-hint">
-            当前正文区域 ≈ {pxToCm(w - cmToPx(ml) - cmToPx(mr)).toFixed(2)} cm ×{" "}
-            {pxToCm(h - cmToPx(mt) - cmToPx(mb)).toFixed(2)} cm
+            当前正文区域 ≈ {bodyWidthCm.toFixed(2)} cm × {bodyHeightCm.toFixed(2)} cm
+            {colNum > 1 && `，每栏 ≈ ${columnWidthCm.toFixed(2)} cm`}
           </div>
         </div>
         <div className="modal-footer">

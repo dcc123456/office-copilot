@@ -406,6 +406,9 @@ export function App() {
       marginLeftPx: g.marginLeft,
       headerPx: g.header,
       footerPx: g.footer,
+      columns: section?.columns
+        ? { count: section.columns.count, gapPx: section.columns.gap }
+        : null,
       link: linkStyle,
     });
     const defaultName = filePath
@@ -622,7 +625,9 @@ export function App() {
               },
               base.header,
               base.footer,
-            ) as never,
+              // 模板只改页边距，分栏属于用户自己的版式，原样带过去（AGENTS §2.7）。
+              section?.columns,
+            ),
           );
           setDirty(true);
         }
@@ -970,10 +975,10 @@ export function App() {
       />
       <PageSetupDialog
         open={pageSetupOpen}
-        section={section as SectionGeometry | null}
+        section={section}
         onClose={() => setPageSetupOpen(false)}
         onApply={(s) => {
-          setSection(s as never);
+          setSection(s);
           setDirty(true);
         }}
       />

@@ -23,6 +23,11 @@ export function buildPrintHtml(opts: {
   marginLeftPx: number;
   headerPx: number;
   footerPx: number;
+  /**
+   * 分栏（`w:cols`）：栏数与栏间距，CSS px。栏数小于 2 时不写任何列样式，
+   * 和 Word 的单栏文档一致。
+   */
+  columns?: { count: number; gapPx: number } | null;
   link?: LinkStyle | null;
 }): string {
   const {
@@ -37,12 +42,21 @@ export function buildPrintHtml(opts: {
     marginLeftPx,
     headerPx,
     footerPx,
+    columns,
     link,
   } = opts;
 
   const linkColor =
     link?.color && /^#[0-9a-f]{6}$/i.test(link.color) ? link.color : "#0563c1";
   const linkRule = link?.underline === false ? "none" : "underline";
+
+  // 纸上的分栏用 CSS multi-column：`column-fill: auto` + 正文区实高，才和 Word
+  // 一样"第一栏排满再排第二栏"，而不是把内容平衡成两截短栏。
+  const columnRule =
+    columns && columns.count > 1
+      ? `column-count: ${columns.count}; column-gap: ${columns.gapPx}px; ` +
+        `column-fill: auto; height: ${pageHeightPx - marginTopPx - marginBottomPx}px;`
+      : "";
 
   // Reuse the editor's stylesheet? We inline a minimal stylesheet that
   // makes the output look close to what the user sees.
@@ -68,7 +82,7 @@ export function buildPrintHtml(opts: {
     .pf { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
            bottom: ${footerPx}px; font-size: 10px; color: #666; text-align: center; }
     /* Editor block styles */
-    .ProseMirror { outline: none; }
+    .ProseMirror { outline: none; ${columnRule} }
     p { margin: 0 0 6pt; }
     h1 { font-size: 22pt; margin: 12pt 0 6pt; }
     h2 { font-size: 16pt; margin: 10pt 0 4pt; }

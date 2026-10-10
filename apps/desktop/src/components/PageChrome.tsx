@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { EditorContent, type Editor } from "@tiptap/react";
 import { Pencil } from "lucide-react";
+import type { SectionGeometry } from "@office-copilot/docx-io";
 import { HeaderFooterEditor } from "../editor/extensions/HeaderFooterEditor.js";
 import { renderHeaderFooterHtml } from "../editor/renderHeaderFooter.js";
 import { useUiStore } from "../uiStore.js";
+import "../styles/pageColumns.css";
 
 /**
  * Paginated editing stage that visually mirrors Microsoft Word:
@@ -28,24 +30,7 @@ import { useUiStore } from "../uiStore.js";
 
 type HfDoc = Record<string, unknown> | null;
 
-export interface SectionGeometryLike {
-  pageWidth: number;
-  pageHeight: number;
-  marginTop: number;
-  marginRight: number;
-  marginBottom: number;
-  marginLeft: number;
-  header: number;
-  footer: number;
-  contentWidth: number;
-  contentHeight: number;
-  /** Word's snapped body-line height, in px, when the section has a grid. */
-  linePitch?: number;
-  /** The default paragraph's space-after, in px, from the document's styles. */
-  paraSpacingAfter?: number;
-}
-
-const DEFAULT_GEOM: SectionGeometryLike = {
+const DEFAULT_GEOM: SectionGeometry = {
   pageWidth: 794,
   pageHeight: 1123,
   marginTop: 96,
@@ -75,7 +60,7 @@ export function PageChrome({
   editor: Editor;
   headerDoc: HfDoc;
   footerDoc: HfDoc;
-  section?: SectionGeometryLike | null;
+  section?: SectionGeometry | null;
   onHeaderChange: (doc: HfDoc) => void;
   onFooterChange: (doc: HfDoc) => void;
   children?: ReactNode;
@@ -89,6 +74,31 @@ export function PageChrome({
   const wrapRef = useRef<HTMLDivElement>(null);
   const sizerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 栏边界在正文区里的横向偏移（CSS px，相对页面左缘要再加 marginLeft）。
+   *
+   * 编辑视图不真的把文字排成多栏——`PagedLayout` 按块高度算分页，CSS columns
+   * 会把块拆断让量测失效——所以这里只算导引线的位置：等宽按
+   * (正文宽 - 间距*(栏数-1))/栏数，不等宽用文件里读到的逐栏宽度。
+   * 单栏或没有 `w:cols` 时返回空数组，画不出任何东西。
+   */
+  const columnGuides = useMemo(() => {
+    const cols = g.columns;
+    if (!cols || cols.count < 2) return [];
+    const bounds: number[] = [];
+    if (!cols.equalWidth && cols.widths.length === cols.count) {
+      let x = 0;
+      for (let i = 0; i < cols.widths.length - 1; i++) {
+        x += cols.widths[i]! + cols.gap;
+        bounds.push(x);
+      }
+      return bounds;
+    }
+    const colWidth = (g.contentWidth - cols.gap * (cols.count - 1)) / cols.count;
+    for (let i = 1; i < cols.count; i++) bounds.push(i * (colWidth + cols.gap));
+    return bounds;
+  }, [g.columns, g.contentWidth]);
 
   // Push page geometry into CSS variables for the PagedLayout plugin
   // and the editor styles to consume.
@@ -331,6 +341,20 @@ export function PageChrome({
                 }}
               />
             ))}
+            {/* 分栏导引线：每页一组，位置见 columnGuides。 */}
+            {columnGuides.map((offset, boundary) =>
+              pages.map((p) => (
+                <div
+                  key={`col-${boundary}-${p.i}`}
+                  className="oc-column-guide"
+                  style={{
+                    left: g.marginLeft + offset,
+                    top: p.y + g.marginTop,
+                    height: g.contentHeight,
+                  }}
+                />
+              )),
+            )}
             <div
               className="prosemirror-host"
               style={{
