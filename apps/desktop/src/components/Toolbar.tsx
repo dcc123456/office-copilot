@@ -34,6 +34,7 @@ import {
   Settings2,
   SwatchBook,
   Superscript,
+  Subscript,
   Pilcrow,
   Wand2,
   RotateCcw,
@@ -300,6 +301,20 @@ export function Toolbar({
         </Btn>
         <Btn title="删除线" active={editor.isActive("strike")} onClick={() => editor.chain().focus().toggleStrike().run()}>
           <Strikethrough size={16} />
+        </Btn>
+        <Btn
+          title="上标"
+          active={editor.isActive("vertAlign", { val: "superscript" })}
+          onClick={() => editor.chain().focus().toggleVertAlign({ val: "superscript" }).run()}
+        >
+          <Superscript size={16} />
+        </Btn>
+        <Btn
+          title="下标"
+          active={editor.isActive("vertAlign", { val: "subscript" })}
+          onClick={() => editor.chain().focus().toggleVertAlign({ val: "subscript" }).run()}
+        >
+          <Subscript size={16} />
         </Btn>
         <Btn
           title="格式刷：复制当前样式，选中目标粘贴"

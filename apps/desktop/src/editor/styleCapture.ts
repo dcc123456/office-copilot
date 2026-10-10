@@ -36,7 +36,11 @@ const CAPTURABLE_PARAGRAPH_KEYS = [
 const SWITCH_MARK_TYPES = ["bold", "italic", "underline", "strike", "code"] as const;
 
 /** 样式表建模得了的标记类型名，其余（高亮之类留给后面排名）不参与抓取。 */
-const CAPTURABLE_MARK_NAMES = new Set<string>([...SWITCH_MARK_TYPES, "textStyle"]);
+const CAPTURABLE_MARK_NAMES = new Set<string>([
+  ...SWITCH_MARK_TYPES,
+  "textStyle",
+  "vertAlign",
+]);
 
 /** 抓取失败的原因码；渲染层按码组装中文文案（AGENTS §5.7：引擎不说人话）。 */
 export type CaptureFailureCode = "no-block" | "mixed-paragraph-format" | "mixed-run-format";
@@ -100,6 +104,14 @@ function toPmMark(mark: Mark): PMMark {
       if (typeof value === "string" && value.trim()) kept[key] = value;
     }
     return { type: "textStyle", attrs: kept };
+  }
+  // 上标与下标共用一个标记，样式定义里得记住是哪一档，只留类型名会把它写成上标。
+  if (mark.type.name === "vertAlign") {
+    const val = mark.attrs.val;
+    return {
+      type: "vertAlign",
+      attrs: { val: val === "subscript" ? "subscript" : "superscript" },
+    };
   }
   return { type: mark.type.name as (typeof SWITCH_MARK_TYPES)[number] };
 }

@@ -149,4 +149,38 @@ describe("captureStyleFromSelection", () => {
     if (!result.ok) return;
     expect(result.edit).toEqual({ paragraph: { indent: 18 }, marks: [] });
   });
+
+  it("抓下标要带档位：只留类型名会把它写成上标", () => {
+    const editor = harness(
+      [
+        paragraph(
+          {},
+          [{ type: "text", text: "二氧化碳", marks: [{ type: "vertAlign", attrs: { val: "subscript" } }] }],
+        ),
+      ],
+      (doc) => blockRange(doc, 0),
+    );
+    const result = captureStyleFromSelection(editor);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.edit.marks).toEqual([{ type: "vertAlign", attrs: { val: "subscript" } }]);
+  });
+
+  it("上标与下标混在同一段里算冲突，报的是 vertAlign", () => {
+    // 一条样式定义只有一个 `w:vertAlign`，抓成上标就把用户的下标盖了（AGENTS §2.3）。
+    const editor = harness(
+      [
+        paragraph({}, [
+          { type: "text", text: "平方", marks: [{ type: "vertAlign", attrs: { val: "superscript" } }] },
+          { type: "text", text: "与立方", marks: [{ type: "vertAlign", attrs: { val: "subscript" } }] },
+        ]),
+      ],
+      (doc) => blockRange(doc, 0),
+    );
+    expect(captureStyleFromSelection(editor)).toEqual({
+      ok: false,
+      code: "mixed-run-format",
+      detail: "vertAlign",
+    });
+  });
 });

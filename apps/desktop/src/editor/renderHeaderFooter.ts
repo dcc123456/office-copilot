@@ -26,25 +26,12 @@ export function renderHeaderFooterHtml(
       const t = escapeHtml((n as { text?: string }).text ?? "");
       const marks: PMMark[] = n.marks ?? [];
       const style = markStyle(marks);
-      const open = marks
-        .map((m) => {
-          if (m.type === "bold") return "<b>";
-          if (m.type === "italic") return "<i>";
-          if (m.type === "underline") return "<u>";
-          if (m.type === "strike") return "<s>";
-          return "";
-        })
-        .join("");
-      const close = marks
+      const tags = marks.map(inlineTagOf).filter((tag): tag is string => tag !== null);
+      const open = tags.map((tag) => `<${tag}>`).join("");
+      const close = tags
         .slice()
         .reverse()
-        .map((m) => {
-          if (m.type === "bold") return "</b>";
-          if (m.type === "italic") return "</i>";
-          if (m.type === "underline") return "</u>";
-          if (m.type === "strike") return "</s>";
-          return "";
-        })
+        .map((tag) => `</${tag}>`)
         .join("");
       return `<span style="${style}">${open}${t}${close}</span>`;
     }
@@ -64,6 +51,29 @@ export function renderHeaderFooterHtml(
     return "";
   };
   return doc.content.map(renderNode).join("");
+}
+
+/**
+ * 行内标记 → 语义标签名（不带尖括号），认不出的标记返回 null 表示不产标签。
+ *
+ * @param mark docx-io 的行内标记。
+ * @returns 标签名；`vertAlign` 的上下两档分别给 `sup` / `sub`，因为它们是同一个标记的两个值。
+ */
+function inlineTagOf(mark: PMMark): string | null {
+  switch (mark.type) {
+    case "bold":
+      return "b";
+    case "italic":
+      return "i";
+    case "underline":
+      return "u";
+    case "strike":
+      return "s";
+    case "vertAlign":
+      return mark.attrs.val === "subscript" ? "sub" : "sup";
+    default:
+      return null;
+  }
 }
 
 function markStyle(marks: PMMark[]): string {

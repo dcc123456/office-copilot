@@ -57,6 +57,7 @@ const style = (attrs: Partial<Record<string, string | null>>) => [
 const bold = () => ({ type: "bold" });
 const italic = () => ({ type: "italic" });
 const underline = () => ({ type: "underline" });
+const vertAlign = (val: "superscript" | "subscript") => ({ type: "vertAlign", attrs: { val } });
 
 const para = (content: unknown[]) => ({ type: "paragraph", content });
 const heading = (level: number, content: unknown[]) => ({ type: "heading", attrs: { level }, content });
@@ -109,7 +110,7 @@ const mixedBoldDoc = [
 ];
 
 /**
- * 用真实 schema 跑一条 ParagraphFormatting 命令。
+ * 用真实 schema 跑一条扩展自己的命令。
  *
  * harness 的 editor 是手搓的最小对象，没有 Tiptap 的 `commands` / `chain` 装配，
  * 所以取扩展配置里那份命令实现本身，喂给它同样的 CommandProps，dispatch 用 harness 的 view。
@@ -118,13 +119,19 @@ const mixedBoldDoc = [
  * @param name 要跑的命令名。
  * @param args 该命令的入参。
  * @param words 要选中的文字：每处文字所在的块都会落进命令的选区。
- * @returns 命令的返回值（选区里有段落或标题才为 true）。
+ * @param source 命令所在的扩展，默认段落格式那一个（标记类的命令传自己的扩展）。
+ * @returns 命令的返回值（选区里能落这个格式才为 true）。
+ * @throws 选区里找不到要选的文字，或那份扩展根本没有这条命令——是用例写错了，不该静默通过。
  */
 function runFormatCommand(
   editor: Editor,
-  name: "setParagraphFormat" | "applyNamedStyle",
+  name: string,
   args: unknown[],
   words: string[],
+  source: { config: { addCommands?: () => Record<string, unknown> } } =
+    ParagraphFormatting as unknown as {
+      config: { addCommands?: () => Record<string, unknown> };
+    },
 ): boolean {
   let from = -1;
   let to = -1;
@@ -138,12 +145,14 @@ function runFormatCommand(
     editor.state.tr.setSelection(TextSelection.create(editor.state.doc, from, to)),
   );
   const commands = (
-    ParagraphFormatting.config.addCommands as (this: unknown) => Record<
-      "setParagraphFormat" | "applyNamedStyle",
+    source.config.addCommands as (this: unknown) => Record<
+      string,
       (...args: unknown[]) => (props: CommandProps) => boolean
     >
   ).call({ options: {} });
-  return commands[name](...args)({
+  const command = commands[name];
+  if (!command) throw new Error(`扩展里没有命令 ${name}`);
+  return command(...args)({
     editor,
     state: editor.state,
     dispatch: editor.view.dispatch,
@@ -794,6 +803,35 @@ describe("字符样式维度", () => {
     expect(blocks[0]!.style.italic).toBe(true);
     applyStyles(editor, [{ index: 0, style: bodyOps(blocks)[0]! }]);
     expect(marksOfRun(editor, "斜体的正文")).not.toContain("italic");
+  });
+
+  it("套整段字符样式时不拍平用户手打的下标", () => {
+    // 上标/下标不在 AI 与模板的字符样式词表里（`CHAR_STYLE_KEYS`），所以既不参与"这段
+    // 是否统一"的投票，也不会被整段 addMark/removeMark 扫到——化学式的角标必须活着。
+    const editor = harness([
+      para([text("溶解度："), text("H"), text("2", [vertAlign("subscript")]), text("O")]),
+    ]);
+    const blocks = blocksOf(editor.state.doc);
+    expect(blocks[0]!.mixed ?? []).not.toContain("vertAlign");
+    applyStyles(editor, [{ index: 0, style: bodyOps(blocks)[0]! }]);
+    expect(marksOfRun(editor, "2")).toContain("vertAlign");
+    expect(marksOfRun(editor, "溶解度")).not.toContain("vertAlign");
+    expect(run(editor, "2").attrs.fontFamily).toBe("仿宋");
+  });
+
+  it("真实 schema 收下上标与下标两个档位，档位不会被默认值抹平", () => {
+    // 标记的 `val` 缺省是 superscript，所以"下标读回上标"这种错只会在这里露出来。
+    const editor = harness([
+      para([text("x", [vertAlign("superscript")]), text("y", [vertAlign("subscript")])]),
+    ]);
+    const vals: (string | undefined)[] = [];
+    editor.state.doc.descendants((n) => {
+      if (n.isText) {
+        for (const m of n.marks) if (m.type.name === "vertAlign") vals.push(m.attrs.val);
+      }
+      return true;
+    });
+    expect(vals).toEqual(["superscript", "subscript"]);
   });
 });
 

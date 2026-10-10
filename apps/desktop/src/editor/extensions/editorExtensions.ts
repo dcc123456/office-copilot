@@ -10,6 +10,7 @@ import TableHeader from "@tiptap/extension-table-header";
 import Placeholder from "@tiptap/extension-placeholder";
 import CharacterCount from "@tiptap/extension-character-count";
 import { TextStyle, TextStyleCommands } from "./TextStyle.js";
+import { VertAlign } from "./VertAlign.js";
 import { Drawing, PageBreak } from "./Drawing.js";
 import { PagedLayout } from "./PagedLayout.js";
 import { FloatingImageDrag } from "./FloatingImageDrag.js";
@@ -31,6 +32,7 @@ import { FormatPainter } from "./FormatPainter.js";
 export const EDITOR_EXTENSIONS: Extensions = [
   StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
   Underline,
+  VertAlign,
   TextAlign.configure({ types: ["heading", "paragraph"] }),
   Link.configure({ openOnClick: false, autolink: true }),
   Drawing,

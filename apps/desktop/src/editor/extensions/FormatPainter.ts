@@ -1,5 +1,6 @@
 import { Extension } from "@tiptap/core";
 import type { Editor } from "@tiptap/core";
+import type { VertAlignValue } from "./VertAlign.js";
 
 /**
  * Format painter: click to "pick up" the marks at the current selection,
@@ -145,6 +146,9 @@ function applySnapshot(editor: Editor, s: StoredStyle): void {
         break;
       case "strike":
         chain.setStrike();
+        break;
+      case "vertAlign":
+        chain.setVertAlign(attrs as { val: VertAlignValue });
         break;
       case "code":
         chain.setCode();
