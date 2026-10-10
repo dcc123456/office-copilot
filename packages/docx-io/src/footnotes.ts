@@ -3,6 +3,7 @@ import { children, parseDocument, serialize, wordPartPath } from "./xml.js";
 import { FOOTNOTE_ID, ooxmlFragmentToPm, pmToOoxmlFragment, samePmFragment } from "./ooxml-pm.js";
 import { emptyPmDoc } from "./pm-schema.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
+import { nextAnnotationId } from "./annotation-id.js";
 import type { NumberingMap } from "./numbering.js";
 import type { StyleMap } from "./styles.js";
 
@@ -203,13 +204,10 @@ function footnoteRefOccurrences(doc: PMDoc): FootnoteRefOccurrence[] {
 export function nextFootnoteId(
   entries: readonly { id: string; role?: string }[],
 ): string {
-  let max = 0;
-  for (const entry of entries) {
-    if (entry.role) continue;
-    const value = Number(entry.id);
-    if (Number.isFinite(value) && value > max) max = value;
-  }
-  return String(max + 1);
+  return nextAnnotationId(
+    entries.filter((entry) => !entry.role).map((entry) => entry.id),
+    1,
+  );
 }
 
 /**

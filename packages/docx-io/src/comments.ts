@@ -9,6 +9,7 @@ import {
 } from "./ooxml-pm.js";
 import { emptyPmDoc } from "./pm-schema.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
+import { nextAnnotationId } from "./annotation-id.js";
 import type { NumberingMap } from "./numbering.js";
 import type { StyleMap } from "./styles.js";
 
@@ -184,12 +185,7 @@ export function collectCommentRefs(doc: PMDoc): Set<string> {
  * @returns 可以用的 id（字符串）。
  */
 export function nextCommentId(entries: readonly { id: string }[]): string {
-  let max = -1;
-  for (const entry of entries) {
-    const value = Number(entry.id);
-    if (Number.isFinite(value) && value > max) max = value;
-  }
-  return String(max + 1);
+  return nextAnnotationId(entries.map((entry) => entry.id));
 }
 
 /**

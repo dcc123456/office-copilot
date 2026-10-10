@@ -48,6 +48,8 @@ export type {
 // 以前只有 docx.test.ts 深 import 得到，渲染层按 §3 禁止深 import，所以从这里出去。
 export { FALLBACK_COMMENT_AUTHOR, nextCommentId } from "./comments.js";
 export type { CommentBody, CommentEntry, CommentStore } from "./comments.js";
+// 批注/脚注/书签/修订各自有一个编号空间，但"取最大数字 id 加一"是同一份算法，从包口出去复用。
+export { nextAnnotationId } from "./annotation-id.js";
 // 脚注与批注窗格新建条目时要的空正文，实现早就在 pm-schema 里，只是没从包口出去。
 export { emptyPmDoc } from "./pm-schema.js";
 export type {

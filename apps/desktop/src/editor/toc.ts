@@ -1,4 +1,4 @@
-import { cssPxToPt, type TabStop, type TabStopLeader } from "@office-copilot/docx-io";
+import { cssPxToPt, nextAnnotationId, type TabStop, type TabStopLeader } from "@office-copilot/docx-io";
 import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
@@ -120,14 +120,12 @@ export function tocLevelOf(node: PMNode): number | null {
  * @returns 整数字符串形式的下一个 id；文档里没有书签时是 "1"。
  */
 export function nextBookmarkId(doc: PMNode): string {
-  let highest = 0;
+  const ids: string[] = [];
   doc.descendants((node) => {
-    if (node.type.name !== "bookmarkStart") return true;
-    const id = Number(node.attrs.id ?? 0);
-    if (Number.isFinite(id) && id > highest) highest = id;
+    if (node.type.name === "bookmarkStart") ids.push(String(node.attrs.id ?? ""));
     return true;
   });
-  return String(highest + 1);
+  return nextAnnotationId(ids, 1);
 }
 
 /**
