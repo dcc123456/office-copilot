@@ -385,3 +385,47 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 - AI 代理与人类同样受 **`AGENTS.md`** 约束，尤其是第 2 节「领域不变量」（单位/颜色换算只在
   `packages/docx-io`、局部格式不许被拍平、写入原子且可撤销）。收尾自检要求逐包核对测试结果，
   并注意根 `pnpm test` 对"某包没有测试用例"也是全绿。
+
+## 五、与 Microsoft Word 的功能差距（联网核对 + 本机实测）
+
+研究口径：先按 Word 桌面版（Microsoft 365 / Word 2019 中文界面）的功能面列清单，再逐条在本仓
+按**能力**搜实现（不是按名字搜），有实现的给出仓库路径。结论分四档：
+**必须**（不做就称不上"Word 替代品"，且能落到现有引擎）/ **建议**（真实文档工作常用）/
+**观察**（Word 有但本产品定位不需要）/ **不加**（与"本地改写 + 出可用 .docx"的目标冲突）。
+
+一手来源：Microsoft 支持文档
+[在粘贴文本时控制其格式](https://support.microsoft.com/zh-CN/Word/control-the-formatting-when-you-paste-text)
+（粘贴三态：保留源格式 / 合并格式 / 只保留文本）、
+[格式化您的 Word 文件](https://support.microsoft.com/zh-tw/word/format-your-word-document)、
+[Word 中用于"智能剪切和粘贴"设置的选项](https://support.microsoft.com/kb/297680)；
+右键菜单随对象变化的行为取自
+[Word右键菜单，你用好了么？](https://www.sohu.com/a/158622654_417040)（文字/表格/图片三种落点给
+不同命令，剪贴板命令的可用态随选区变化）。**转述不可信**：菜单里的每一条命令都以本仓能真实落地的
+编辑器命令为准来对齐，落不了地的（如"新建批注"）就不进菜单，只在下面这张表里记账。
+
+| Word 功能 | 本项目现状 | 判断 | 依据 |
+| --- | --- | --- | --- |
+| 右键编辑菜单（剪切/复制/粘贴三态、格式刷、字体/段落对话框、超链接、图片环绕） | **本次已补**：`apps/desktop/src/editor/contextMenu.ts` + `components/EditorContextMenu.tsx` | 必须 | Word 最高频的入口；缺它时表格右键菜单也压根没挂载（`TableContextMenu` 曾被 import 未渲染） |
+| 段落对话框的完整字段（对齐/行距/缩进之外：大纲级别、段前分页、与下段同页、段中不分页、孤行控制、对齐到网格） | 只有对齐/行距/段前后/左缩进/首行缩进（`editor/extensions/ParagraphFormatting.ts`、`components/ParagraphPopover.tsx`） | 必须 | 公文/论文套版全靠这些开关；OOXML 里就是 `w:keepNext`/`w:pageBreakBefore`/`w:widowControl`，docx-io 已能读写同类 `w:pPr`，成本主要在 schema |
+| 悬挂缩进 / 右缩进 | 无（只有 `indent`、`indentFirst`） | 必须 | 参考文献、公文回执行都靠悬挂缩进 |
+| 上标 / 下标、字符缩放、文字方向（纵排）、项目符号自定义字符、多级列表编号 | 全无上标下标扩展（`package.json` 未装 `@tiptap/extension-subscript/superscript`）；字距 `letterSpacing` 有属性无入口（本次已在「字体」面板给出） | 建议 | 科技/学术文档常用；StarterKit 已含 `Code`，补两个 mark 即可，但要同步 `EDITOR_EXTENSIONS` + docx 往返用例（AGENTS §5.3） |
+| 具名样式与样式库（样式窗格、修改样式、清除格式） | 无具名样式；只有"正文/标题 1-6"下拉 + 整篇模板 `editor/templates.ts` | 必须 | 这是与 Word 最大的一处结构性差距：Word 文档的样式名是跨文档一致排版与生成目录/交叉引用的前提。清除所有格式本次已进右键菜单 |
+| 查找替换：按格式替换、通配符、转到 | `components/FindBar.tsx` 只有文本 + 区分大小写 + 全部替换（AI 侧 `replace_text` 支持 regex，见 `packages/word-tools/src/index.ts`） | 建议 | 中文文档日常够用；通配符属于进阶，先不做 |
+| 拼写检查 / 语法检查 / 同义词 / 自动更正 | 明确关掉（`App.tsx` 的 `spellcheck:"false"`），只有 AI"纠正全文错别字"命令 | 建议（用 AI 路线，不做红波浪线） | 本项目已有 LLM 通道，中文分词拼写库（如 Hunspell）不适配中文，装原生依赖也违背 AGENTS §6.4 |
+| 批注 / 修订（跟踪修订、接受/拒绝、显示标记） | 无批注、无修订；有 diff 视图与修改历史（`ai/diff.ts`、`components/HistoryPanel.tsx`） | 必须 | 协同改稿的实际前提。我们的 modlog + 内容寻址撤销（AGENTS §2.5）已经是"半个修订"，缺的是 OOXML `w:ins/w:del` 的读写与 UI |
+| 比较文档 / 并排查看 | 无 | 建议 | AI 改写前后对比已由 diff 视图覆盖，Word 那份"比较两版文档"属于人肉核对场景，优先级低于修订 |
+| 超链接：打开 / 编辑 / 删除、书签、交叉引用、题注、目录、索引、引文 | 链接插入/编辑/删除有；右键新增"打开超链接"（经协议白名单，`components/linkPrompt.ts`）；书签/交叉引用/目录域全无（`editor/extensions/Field.ts` 只支持页码/日期等内联域） | 必须（目录 + 交叉引用） | 长文档刚需，且 `w:fldSimple` 通道已存在，补 TOC 域是同一套机制 |
+| 表格：排序、文字转表格、表格属性（对齐/缩进/边框底纹/平均分布） | 行列增删、合并拆分、表头、垂直对齐、单元格底色有（`components/TableContextMenu.tsx`）；排序与文字↔表格互转无 | 建议 | 中文材料里"文字转表格"很常用，实现只在 `docx-io` 加一层解析 |
+| 图片：裁剪、文字环绕可视化编辑、另存为图片、替代文字 | 环绕属性有（`Drawing.ts` 的 `wrap`）但此前无 UI，右键菜单已补"文字环绕"；裁剪/替代文字无 | 建议 | 环绕属性能写进 OOXML 但看不见效果，先在右键菜单给入口，裁剪要引入画布交互，成本另计 |
+| 页眉页脚 / 页码 / 分节符 / 多栏 / 水印 / 页面边框 / 首字下沉 / 行号 | 页眉页脚与页码有（`HeaderFooterEditor.tsx` + `renderHeaderFooter.ts`）；分节符（同一文档多套页眉）、分栏、水印、页面边框、首字下沉、行号无 | 必须（分节、分栏） | 公文与论文的硬需求；分节还牵动 docx-io 的 `w:sectPr` 多节往返 |
+| 封面页、主题（字体/配色主题）、文档保护、宏 | 无封面页部件；`uiStore` 的"主题"只是界面皮肤，不是 Word 主题；无文档保护、无宏 | 观察 | 宏与本产品"AI 改写"的定位冲突；文档保护是协同议题 |
+| 阅读视图 / Web 版式 / 大纲视图 | 只有分页排版 + 大纲侧栏 | 不加 | 桌面形态的目标是改写与导出，多视图会稀释交付物（可用的 .docx） |
+| 自动图文集 / 快速部件 / 自动图文集库 | 无；有模板级美化排版与页眉页脚留底 | 观察 | 与"模板 + AI"两条路线重叠，先用模板覆盖 |
+| AI 反向差距：Word 有 Copilot（改写/起草/总结），本项目已具备扩写/缩写/润色/排版 | 已覆盖，本次并入右键菜单 | — | 这是我们相对 Word 的差异化，不属于差距 |
+
+本轮落地范围（一次只推进一个能力，AGENTS §0）：**只做右键编辑菜单**。字体/段落对话框复用了
+既有面板（`ParagraphFields` 从 `ParagraphPopover` 抽出，字号候选与颜色表抽到
+`editor/fontOptions.ts`），粘贴三态经主进程 `clipboard:read` 读剪贴板，"合并格式"的实现是
+"插入后清掉该段的 `textStyle` 标记"——保留结构（加粗/列表/标题）而去掉直接字符格式，语义对齐
+Microsoft 对 Merge Formatting 的描述。批注、修订、目录、样式库、分节分栏按上表的"必须"档排队。
+
