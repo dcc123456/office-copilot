@@ -16,6 +16,7 @@ import type { LinkStyle } from "./ooxml-pm.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
 import { StyleMap, type PaneStyle } from "./styles.js";
+import { resolvedStyles, type ResolvedStyle } from "./style-format.js";
 import {
   ensureDefaultHeaderFooter,
   loadHeaderFooters,
@@ -73,6 +74,12 @@ export interface PmLoadResult {
    * 空数组 = 这份文档没有 styles.xml（或里面没有可显示的段落样式）。
    */
   styles: PaneStyle[];
+  /**
+   * 样式链解析出的可见格式，供渲染层生成文档作用域的样式表（单位与编辑器 attrs 一致：
+   * pt / 倍数 / CSS px / #rrggbb）。`styleId: null` 那条是文档默认段落样式，给没有
+   * `w:pStyle` 的段落。空数组 = 这份文档什么都排不出来，渲染层因此不注入任何规则。
+   */
+  styleFormats: ResolvedStyle[];
 }
 
 /**
@@ -230,6 +237,7 @@ export class DocxFile {
       headers: this.headers,
       section,
       styles: this.styles.paneStyles(),
+      styleFormats: resolvedStyles(this.styles),
     };
   }
 

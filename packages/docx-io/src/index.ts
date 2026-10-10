@@ -19,13 +19,14 @@ export {
   canonColor,
   lineHeightSpacingAttrs,
 } from "./ooxml-pm.js";
-export type { LinkStyle } from "./ooxml-pm.js";
+export type { LinkStyle, RunStyleProps } from "./ooxml-pm.js";
 export { NumberingMap } from "./numbering.js";
 export {
   StyleMap,
   fitStyleId,
   headingLookupFromPaneStyles,
 } from "./styles.js";
+export type { ResolvedStyle, ResolvedStyleFormat } from "./style-format.js";
 export type {
   StyleDefinition,
   StyleType,

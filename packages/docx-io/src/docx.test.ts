@@ -320,6 +320,42 @@ describe("DocxFile", () => {
     expect((await bare.toProseMirror()).styles).toEqual([]);
   });
 
+  it("hands the renderer the resolved formatting of every declared paragraph style", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        stylesXml: `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:eastAsia="宋体"/></w:rPr></w:rPrDefault></w:docDefaults>
+          <w:style w:type="paragraph" w:default="1" w:styleId="1"><w:name w:val="Normal"/>
+            <w:pPr><w:jc w:val="both"/></w:pPr><w:rPr><w:sz w:val="21"/></w:rPr></w:style>
+          <w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 1"/><w:basedOn w:val="1"/>
+            <w:pPr><w:spacing w:before="340" w:line="576" w:lineRule="auto"/></w:pPr>
+            <w:rPr><w:b/><w:sz w:val="44"/></w:rPr></w:style>
+        </w:styles>`,
+      }),
+    );
+    // 样式链在 docx-io 里合完再交给渲染层：单位仍是编辑器那套（pt / 倍数 / CSS px），
+    // 渲染层只管把它们拼成选择器，不再出现第二处换算（AGENTS §2.1）。
+    expect((await docx.toProseMirror()).styleFormats).toEqual([
+      // 默认那条样式出现两次是刻意的：一次给"没有引用"的段落（styleId: null），
+      // 一次给它自己的 id——Word 文档里大量段落就是显式写着 Normal 的。
+      { styleId: null, format: { textAlign: "justify", fontFamily: "宋体", fontSize: "14px" } },
+      { styleId: "1", format: { textAlign: "justify", fontFamily: "宋体", fontSize: "14px" } },
+      {
+        styleId: "2",
+        format: {
+          textAlign: "justify",
+          spacingBefore: 17,
+          lineHeight: "2.4",
+          fontFamily: "宋体",
+          fontSize: "29.3px",
+          bold: true,
+        },
+      },
+    ]);
+    const bare = await DocxFile.fromBytes(await makeDocx(["正文"]));
+    expect((await bare.toProseMirror()).styleFormats).toEqual([]);
+  });
+
   /**
    * 编辑器里插入的分隔线必须落成段落底部边框：本仓不写 styles.xml，
    * 旧实现引用的 HorizontalRule 样式在文档里不存在，Word 只会排出空段落。

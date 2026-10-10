@@ -222,6 +222,18 @@ export class StyleMap {
    * floating boxes anchored to those paragraphs are measured against.
    */
   defaultSpacingAfterPx = 0;
+  /**
+   * `w:docDefaults/w:pPrDefault/w:pPr` 的内部 XML。ISO/IEC 29500-1 §17.7.2.5 说这些
+   * 属性"applied first in the style hierarchy"，所以样式链解析要把它垫在最底下。
+   */
+  docDefaultsPPrInner?: string;
+  /** `w:docDefaults/w:rPrDefault/w:rPr` 的内部 XML，同上。 */
+  docDefaultsRPrInner?: string;
+  /**
+   * @w:default 的段落样式 id。Word 把它当作"没有 `w:pStyle` 的段落"与"清除样式"的落点，
+   * 真实文档里通常是 Normal——但 id 由文档自己决定，这里不假设它叫 Normal。
+   */
+  defaultParagraphStyleId?: string;
 
   static fromXml(xml: string | undefined | null): StyleMap {
     const map = new StyleMap();
@@ -244,6 +256,7 @@ export class StyleMap {
           map.listById.add(id);
         }
         if (def.type === "paragraph" && def.isDefault) {
+          map.defaultParagraphStyleId = id;
           const pPr = firstChild(s, "w:pPr");
           const spacing = pPr && firstChild(pPr, "w:spacing");
           // `w:after` counts twentieths of a point; 15 of them make a CSS px.
@@ -251,6 +264,13 @@ export class StyleMap {
             Number(spacing?.attributes?.["w:after"] ?? 0) / TWIPS_PER_PX;
         }
       }
+      const defaults = firstChild(root, "w:docDefaults");
+      const pPrDefault = defaults && firstChild(defaults, "w:pPrDefault");
+      const rPrDefault = defaults && firstChild(defaults, "w:rPrDefault");
+      const defaultsPPr = pPrDefault && firstChild(pPrDefault, "w:pPr");
+      const defaultsRPr = rPrDefault && firstChild(rPrDefault, "w:rPr");
+      if (defaultsPPr) map.docDefaultsPPrInner = innerXml(defaultsPPr);
+      if (defaultsRPr) map.docDefaultsRPrInner = innerXml(defaultsRPr);
     } catch {
       // Ignore malformed styles.
     }

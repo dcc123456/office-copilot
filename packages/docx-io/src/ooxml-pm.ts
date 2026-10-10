@@ -392,8 +392,11 @@ function paragraphFromXml(
  * Read a `<w:pPr>` into PM attrs: 具名样式 id、`<w:spacing>`、`<w:ind>` 与分页开关
  * (points / CSS ratio)。All unit conversions happen here so the UI can stay in
  * familiar points.
+ *
+ * 样式定义里的 `<w:pPr>` 走同一个函数（`style-format.ts` 解析样式链时调用）：
+ * 单位换算只允许发生在 docx-io 的进出口，正文与样式各写一份就会对不上。
  */
-function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
+export function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
   const out: PPrAttrs = {};
   if (!pPr) return out;
   // 样式 id 原样带走，不与样式名互换：id↔名称的对应只有 styles.xml 知道。
@@ -498,7 +501,14 @@ function twipsToPoints(
   return undefined;
 }
 
-function jcToTextAlign(jc: string | undefined): string | undefined {
+/**
+ * `w:jc`/@w:val → 编辑器的 `textAlign`。
+ *
+ * @param jc OOXML 的对齐值。
+ * @returns left 与读不懂的写法返回 undefined：那是 Word 的默认值，写成直接格式
+ *   会在保存时多出用户没做过的改动。样式链解析与正文读侧共用这一份判断。
+ */
+export function jcToTextAlign(jc: string | undefined): string | undefined {
   switch (jc) {
     case "center":
       return "center";
@@ -666,66 +676,110 @@ function placeholderFor(instr: string): string {
   return `{${k}}`;
 }
 
+/**
+ * `<w:rPr>` 里的直接字符格式，读成编辑器 attrs 的词汇：字号/字距是 CSS px，颜色 #rrggbb。
+ *
+ * run 与样式定义读的是同一张属性表，因此只留这一份实现：样式链解析（`style-format.ts`）
+ * 复制一遍就会出现"正文里读得到、样式里读不到"的分歧（AGENTS §3.2）。
+ *
+ * @param rPr 已解析的 `w:rPr` 元素；undefined 表示这份 run/样式没写字符属性。
+ * @returns 只带这份 rPr 真写过的项。四个开关是三态：true/false 是写过——
+ *   `<w:b w:val="0"/>` 是 Word 用来**显式取消**从样式继承来的加粗——undefined 才是"没提过"。
+ *   颜色读不懂时整个不出现，宁可丢色也不把 Word 认不了的值往下带。
+ */
+export interface RunStyleProps {
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  /** 中文那一支字体（`w:eastAsia`），没有它才回落到西文那支。 */
+  fontFamily?: string;
+  /** 中西文各一支时（模板标配：宋体 + Times New Roman）的西文那支。 */
+  fontFamilyWest?: string;
+  /** CSS px，不是 pt。 */
+  fontSize?: string;
+  /** CSS px，允许负值（OOXML 的 `w:spacing` 收紧字距）。 */
+  letterSpacing?: string;
+  color?: string;
+  /** `w:highlight` 的荧光笔色，其次才是 `w:shd` 的底纹填充。 */
+  backgroundColor?: string;
+}
+
+/**
+ * 读一个 `<w:rPr>`（或 `<w:rPrDefault>` 里的 `w:rPr`）。
+ *
+ * @param rPr 已解析的元素，undefined 表示没有字符属性。
+ * @returns 见 {@link RunStyleProps}；元素为 undefined 时是空对象。
+ */
+export function readRunProperties(rPr: Element | undefined): RunStyleProps {
+  const out: RunStyleProps = {};
+  if (!rPr) return out;
+  // 元素在就是"写过"，值决定开还是关；元素不在才是 undefined。
+  for (const [key, tag] of [
+    ["bold", "w:b"],
+    ["italic", "w:i"],
+    ["underline", "w:u"],
+    ["strike", "w:strike"],
+  ] as const) {
+    const el = firstChild(rPr, tag);
+    if (el) out[key] = flagOn(el);
+  }
+  const rFonts = firstChild(rPr, "w:rFonts");
+  if (rFonts) {
+    const attrs = rFonts.attributes ?? {};
+    const eastAsia = attrs["w:eastAsia"] as string | undefined;
+    const west =
+      (attrs["w:ascii"] as string | undefined) || (attrs["w:hAnsi"] as string | undefined);
+    if (eastAsia || west) out.fontFamily = eastAsia || west;
+    if (eastAsia && west && eastAsia !== west) out.fontFamilyWest = west;
+  }
+  const sz = firstChild(rPr, "w:sz");
+  if (sz) {
+    const half = Number(val(sz));
+    if (half && !Number.isNaN(half)) out.fontSize = ptToCssFontSize(half / 2);
+  }
+  const spacing = firstChild(rPr, "w:spacing");
+  if (spacing) {
+    const twips = Number(val(spacing));
+    if (Number.isFinite(twips) && twips !== 0) {
+      out.letterSpacing = ptToCssLetterSpacing(twips / 20);
+    }
+  }
+  const color = firstChild(rPr, "w:color");
+  if (color) {
+    const c = canonColor(colorVal(val(color)));
+    if (c) out.color = c;
+  }
+  const highlight = firstChild(rPr, "w:highlight");
+  if (highlight) {
+    const v = val(highlight);
+    const c = v ? canonColor(WORD_HIGHLIGHT[v] ?? colorVal(v)) : null;
+    if (c) out.backgroundColor = c;
+  }
+  const shd = firstChild(rPr, "w:shd");
+  if (shd && out.backgroundColor === undefined) {
+    const c = canonColor(colorVal(shd.attributes?.["w:fill"] as string | undefined));
+    if (c) out.backgroundColor = c;
+  }
+  return out;
+}
+
 function runToInlines(r: Element, ctx: InlineCtx = {}): PMNode[] {
-  const rPr = firstChild(r, "w:rPr");
+  const props = readRunProperties(firstChild(r, "w:rPr"));
   const marks: PMMark[] = [];
+  if (props.bold === true) marks.push({ type: "bold" });
+  if (props.italic === true) marks.push({ type: "italic" });
+  if (!ctx.inLink && props.underline === true) marks.push({ type: "underline" });
+  if (props.strike === true) marks.push({ type: "strike" });
   const textStyle: NonNullable<Extract<PMMark, { type: "textStyle" }>["attrs"]> = {};
-  if (rPr) {
-    if (flagOn(firstChild(rPr, "w:b"))) marks.push({ type: "bold" });
-    if (flagOn(firstChild(rPr, "w:i"))) marks.push({ type: "italic" });
-    if (!ctx.inLink && flagOn(firstChild(rPr, "w:u"))) marks.push({ type: "underline" });
-    if (flagOn(firstChild(rPr, "w:strike"))) marks.push({ type: "strike" });
-    const rFonts = firstChild(rPr, "w:rFonts");
-    if (rFonts) {
-      const attrs = rFonts.attributes ?? {};
-      const eastAsia = attrs["w:eastAsia"] as string | undefined;
-      const west =
-        (attrs["w:ascii"] as string | undefined) ||
-        (attrs["w:hAnsi"] as string | undefined);
-      textStyle.fontFamily = eastAsia || west || null;
-      // Two different faces really are in use: 中文用宋体、西文用 Times New Roman
-      // is the standard pairing in every template we ship.
-      if (eastAsia && west && eastAsia !== west) textStyle.fontFamilyWest = west;
-    }
-    const sz = firstChild(rPr, "w:sz");
-    if (sz) {
-      const half = Number(val(sz));
-      if (half && !Number.isNaN(half)) textStyle.fontSize = ptToCssFontSize(half / 2);
-    }
-    const spacing = firstChild(rPr, "w:spacing");
-    if (spacing) {
-      const twips = Number(val(spacing));
-      if (Number.isFinite(twips) && twips !== 0) {
-        textStyle.letterSpacing = ptToCssLetterSpacing(twips / 20);
-      }
-    }
-    const color = firstChild(rPr, "w:color");
-    if (color && !ctx.inLink) {
-      const c = canonColor(colorVal(val(color)));
-      if (c) textStyle.color = c;
-    }
-    const highlight = firstChild(rPr, "w:highlight");
-    if (highlight) {
-      const v = val(highlight);
-      const c = v ? canonColor(WORD_HIGHLIGHT[v] ?? colorVal(v)) : null;
-      if (c) textStyle.backgroundColor = c;
-    }
-    const shd = firstChild(rPr, "w:shd");
-    if (shd && !textStyle.backgroundColor) {
-      const c = canonColor(colorVal(shd.attributes?.["w:fill"] as string | undefined));
-      if (c) textStyle.backgroundColor = c;
-    }
-  }
-  if (
-    textStyle.fontFamily != null ||
-    textStyle.fontFamilyWest != null ||
-    textStyle.fontSize != null ||
-    textStyle.letterSpacing != null ||
-    textStyle.color != null ||
-    textStyle.backgroundColor != null
-  ) {
-    marks.push({ type: "textStyle", attrs: textStyle });
-  }
+  if (props.fontFamily !== undefined) textStyle.fontFamily = props.fontFamily;
+  if (props.fontFamilyWest !== undefined) textStyle.fontFamilyWest = props.fontFamilyWest;
+  if (props.fontSize !== undefined) textStyle.fontSize = props.fontSize;
+  if (props.letterSpacing !== undefined) textStyle.letterSpacing = props.letterSpacing;
+  // 链接文字的颜色由 link 决定，rPr 里那条 w:color 不能再盖上去。
+  if (props.color !== undefined && !ctx.inLink) textStyle.color = props.color;
+  if (props.backgroundColor !== undefined) textStyle.backgroundColor = props.backgroundColor;
+  if (Object.keys(textStyle).length) marks.push({ type: "textStyle", attrs: textStyle });
 
   const out: PMNode[] = [];
   for (const child of children(r)) {
