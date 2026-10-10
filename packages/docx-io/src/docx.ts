@@ -24,6 +24,17 @@ import {
   serializeHeaderFooters,
   type HeaderFooterBundle,
 } from "./headerFooter.js";
+import {
+  FOOTNOTE_CONTENT_TYPE,
+  FOOTNOTE_PART,
+  FOOTNOTE_REL_TYPE,
+  collectFootnoteRefs,
+  loadFootnotes,
+  serializeFootnotePart,
+  syncFootnoteIds,
+  type FootnoteKind,
+  type FootnoteStore,
+} from "./footnotes.js";
 
 export interface DocxParagraph {
   index: number;
@@ -81,6 +92,11 @@ export interface PmLoadResult {
    * `w:pStyle` 的段落。空数组 = 这份文档什么都排不出来，渲染层因此不注入任何规则。
    */
   styleFormats: ResolvedStyle[];
+  /**
+   * 脚注与尾注部件的条目，按 `w:id` 对应正文里的引用点。
+   * 两个数组都空 = 这份文档没有脚注/尾注；正文里插入新引用时保存会自动补条目。
+   */
+  footnotes: FootnoteStore;
 }
 
 /**
@@ -157,6 +173,8 @@ export class DocxFile {
    */
   private stylesXml?: string;
   private headers: HeaderFooterBundle = { entries: {} };
+  /** 脚注/尾注部件的条目；正文只放引用点，内容住在这里。 */
+  private footnotes: FootnoteStore = { footnote: [], endnote: [], unmodeled: [] };
   private pendingSection?: SectionGeometry;
   private pendingStyle?: DocStyle;
 
@@ -191,6 +209,7 @@ export class DocxFile {
     const headers = await loadHeaderFooters(zip, xml, relsXml, numbering, styles);
     const file = new DocxFile(zip, root, numbering, styles, headers);
     file.stylesXml = stylesXml;
+    file.footnotes = await loadFootnotes(zip, relsXml, numbering, styles);
     return file;
   }
 
@@ -246,6 +265,7 @@ export class DocxFile {
       section,
       styles: this.styles.paneStyles(),
       styleFormats: resolvedStyles(this.styles),
+      footnotes: this.footnotes,
     };
   }
 
@@ -349,6 +369,9 @@ export class DocxFile {
     // point to them. If the original doc had no header/footer at all, we
     // create the parts + relationships now.
     await this.writeHeaderFooters();
+
+    // 脚注/尾注部件：正文里的引用点决定条目的增删，没被编辑过的条目按原始 XML 透传。
+    await this.writeFootnoteParts(doc);
 
     return warnings;
   }
@@ -458,6 +481,31 @@ export class DocxFile {
         arr.unshift(...newRefs);
       }
       this.zip.file(DOC_XML, serialize(this.root));
+    }
+  }
+
+  /**
+   * 按正文里的引用点重写脚注与尾注部件，并保证它们在包里登记过。
+   *
+   * 引用点是唯一真相：删掉引用就删掉条目（Word 也是这个语义），新引用补一条空正文。
+   * 某个部件里有任何条目没能建模（id 不是十进制）时整个部件原样保留、永不重写，
+   * 否则按条目重建会把读不进来的那几条丢掉。
+   *
+   * @param doc 即将写进正文的 PM doc，引用点从它身上收集（单位无关，只读 attrs.id）。
+   * @returns 无返回值；某一边一条条目都没有时既不写文件也不登记关系。
+   */
+  private async writeFootnoteParts(doc: PMDoc): Promise<void> {
+    this.footnotes = syncFootnoteIds(this.footnotes, collectFootnoteRefs(doc));
+    for (const kind of ["footnote", "endnote"] as FootnoteKind[]) {
+      if (this.footnotes.unmodeled.includes(kind)) continue;
+      const xml = serializeFootnotePart(kind, this.footnotes[kind], this.numbering);
+      if (!xml) continue;
+      this.zip.file(FOOTNOTE_PART[kind], xml);
+      await this.ensurePartReference(
+        FOOTNOTE_PART[kind],
+        FOOTNOTE_REL_TYPE[kind],
+        FOOTNOTE_CONTENT_TYPE[kind],
+      );
     }
   }
 

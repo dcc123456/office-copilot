@@ -1,6 +1,6 @@
 import type JSZip from "jszip";
-import { children, firstChild, parseDocument, serialize, type Element } from "./xml.js";
-import { ooxmlToPm, pmToOoxml } from "./ooxml-pm.js";
+import { children, firstChild, parseDocument } from "./xml.js";
+import { ooxmlFragmentToPm, pmToOoxmlFragment } from "./ooxml-pm.js";
 import type { PMDoc } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
 import { StyleMap } from "./styles.js";
@@ -125,12 +125,7 @@ function parseHeaderFooterXml(
   numbering: NumberingMap,
   styles: StyleMap,
 ): PMDoc {
-  const root = parseDocument(xml);
-  // ooxmlToPm expects a full <w:document><w:body>…</w:body></w:document>
-  // tree; wrap the header/footer's paragraphs in one.
-  const inner = children(root).map(serialize).join("");
-  const wrapper = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${inner}</w:body></w:document>`;
-  return ooxmlToPm(wrapper, numbering, styles);
+  return ooxmlFragmentToPm(parseDocument(xml), numbering, styles);
 }
 
 /**
@@ -149,14 +144,9 @@ export function serializeHeaderFooters(
       out.set(entry.path, entry.rawXml);
       continue;
     }
-    let inner = pmToOoxml(entry.pm, { numbering });
-    // Strip the <w:sectPr>…</w:sectPr> that pmToOoxml appends to every
-    // document — headers/footers must not carry their own sectPr.
-    inner = inner.replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, "");
-    // Unwrap <w:document><w:body>…</w:body></w:document> so we can place
-    // the paragraphs directly inside <w:hdr>/<w:ftr>.
-    const bodyMatch = inner.match(/<w:body[^>]*>([\s\S]*)<\/w:body>/);
-    const bodyContent = bodyMatch ? bodyMatch[1]! : inner;
+    // 页眉页脚不带自己的 sectPr，也不能留着 <w:document><w:body> 那层壳：
+    // 段落要直接落在 <w:hdr>/<w:ftr> 下面。
+    const bodyContent = pmToOoxmlFragment(entry.pm, { numbering });
     const tag = entry.type.startsWith("footer") ? "w:ftr" : "w:hdr";
     const xml =
       `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +

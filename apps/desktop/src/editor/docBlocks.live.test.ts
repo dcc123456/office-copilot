@@ -632,6 +632,37 @@ describe("跨段域的边界（真实 schema）", () => {
   });
 });
 
+describe("脚注与尾注的引用点（真实 schema）", () => {
+  const fn = (id: string) => ({ type: "footnoteReference", attrs: { id } });
+  const en = (id: string) => ({ type: "endnoteReference", attrs: { id } });
+
+  it("id 活过 doc JSON，且不占正文：脚注文字在部件里，不在树上", () => {
+    const doc = harness([para([text("正文甲"), fn("1")]), para([text("正文乙"), en("2")])]).state.doc;
+    expect(doc.textContent).toBe("正文甲正文乙");
+    expect(blocksOf(doc).map((b) => b.text)).toEqual(["正文甲", "正文乙"]);
+    expect(doc.firstChild!.child(1).type.name).toBe("footnoteReference");
+    const json = JSON.parse(JSON.stringify(doc.toJSON())) as {
+      content: { content: { type: string; attrs?: Record<string, unknown> }[] }[];
+    };
+    expect(json.content[0]!.content[1]).toMatchObject({
+      type: "footnoteReference",
+      attrs: { id: "1" },
+    });
+    expect(json.content[1]!.content[1]).toMatchObject({
+      type: "endnoteReference",
+      attrs: { id: "2" },
+    });
+  });
+
+  it("一段里两个脚注夹着文字，顺序与各自的 id 都不串位", () => {
+    const doc = harness([para([text("前"), fn("3"), text("中"), fn("4"), text("后")])]).state.doc;
+    expect(doc.firstChild!.childCount).toBe(5);
+    expect(doc.firstChild!.child(1).attrs.id).toBe("3");
+    expect(doc.firstChild!.child(3).attrs.id).toBe("4");
+    expect(doc.textContent).toBe("前中后");
+  });
+});
+
 describe("超链接与正文色", () => {
   const GONGWEN = templateById("gongwen")!;
   const linkMark = {

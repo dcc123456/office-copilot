@@ -10,6 +10,10 @@ async function makeDocx(
     stylesXml?: string;
     /** 原样插进 body 的 <w:p>…</w:p>，用来造带 pPr 的真实段落。 */
     rawParagraphs?: string[];
+    /** 额外部件：zip 路径 → 内容。脚注/尾注这类旁路部件由调用方自己写全。 */
+    parts?: Record<string, string>;
+    /** 插进 `word/_rels/document.xml.rels` 的 `<Relationship>` 片段；给了才会生成该部件。 */
+    documentRels?: string;
   } = {},
 ): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -43,6 +47,18 @@ async function makeDocx(
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>`,
   );
+  // 真实 Word 包里这些部件在 [Content_Types].xml 里都有 Override；夹具省掉，
+  // 正好让用例能断言"保存时登记被补上"，第二次保存再断言不重复登记。
+  if (extra.documentRels) {
+    zip.file(
+      "word/_rels/document.xml.rels",
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${extra.documentRels}</Relationships>`,
+    );
+  }
+  for (const [path, content] of Object.entries(extra.parts ?? {})) {
+    zip.file(path, content);
+  }
   return zip.generateAsync({ type: "uint8array" });
 }
 
@@ -537,5 +553,182 @@ describe("DocxFile", () => {
     expect(zip.file("word/styles.xml")).toBeNull();
     // 关系与内容类型也不许出现悬空引用：Word 会因为指向不存在的部件而判文档损坏。
     expect(await zip.file("[Content_Types].xml")!.async("string")).not.toContain("/word/styles.xml");
+  });
+});
+
+/**
+ * 排名 3 ④：脚注 / 尾注部件。
+ *
+ * 正文里只有一个引用点 `<w:footnoteReference w:id/>`，脚注正文住在
+ * `word/footnotes.xml`，靠同一个 id 对应；部件里还带着分隔符那几条 Word 自己
+ * 用的条目，我们没有建模，必须原样带走（§2.7：判不了角色的不产生改动）。
+ */
+const FN_REL =
+  '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>';
+const EN_REL =
+  '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>';
+
+/** Word 写出来的脚注部件：分隔符条目在前，正文条目开头带编号记号。 */
+const FOOTNOTES_XML =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+  `<w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+  `<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>` +
+  `<w:footnote w:id="1"><w:p>` +
+  `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteRef/></w:r>` +
+  `<w:r><w:t xml:space="preserve">参见《民法典》第五百零九条。</w:t></w:r></w:p></w:footnote>` +
+  `</w:footnotes>`;
+
+const ENDNOTES_XML =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+  `<w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>` +
+  `<w:endnote w:id="2"><w:p>` +
+  `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteRef/></w:r>` +
+  `<w:r><w:t xml:space="preserve">尾注正文。</w:t></w:r></w:p></w:endnote>` +
+  `</w:endnotes>`;
+
+/** 正文两段，各带一个引用点。 */
+const REF_PARAGRAPHS = [
+  `<w:p><w:r><w:t>正文甲</w:t></w:r>` +
+    `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>`,
+  `<w:p><w:r><w:t>正文乙</w:t></w:r>` +
+    `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="2"/></w:r></w:p>`,
+];
+
+function footnotedDocx(): Promise<Uint8Array> {
+  return makeDocx([], {
+    rawParagraphs: REF_PARAGRAPHS,
+    documentRels: FN_REL + EN_REL,
+    parts: { "word/footnotes.xml": FOOTNOTES_XML, "word/endnotes.xml": ENDNOTES_XML },
+  });
+}
+
+describe("脚注与尾注部件往返", () => {
+  /** 打开 → 走一遍编辑器保存路径 → 重开，返回保存出来的包。 */
+  async function savedOnce(
+    bytes: Uint8Array,
+    edit?: (doc: PMDoc) => PMDoc,
+  ): Promise<Uint8Array> {
+    const docx = await DocxFile.fromBytes(bytes);
+    const loaded = await docx.toProseMirror();
+    await docx.replaceProseMirror(edit ? edit(loaded.doc) : loaded.doc);
+    return docx.toBytes();
+  }
+
+  const part = async (bytes: Uint8Array, path: string): Promise<string> => {
+    const zip = await JSZip.loadAsync(bytes);
+    return (await zip.file(path)?.async("string")) ?? "";
+  };
+
+  it("读回引用点，脚注正文与分隔符条目一起进 store", async () => {
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    expect(loaded.doc.content[0]!.content).toEqual([
+      { type: "text", text: "正文甲" },
+      { type: "footnoteReference", attrs: { id: "1" } },
+    ]);
+    expect(loaded.doc.content[1]!.content?.at(-1)).toMatchObject({
+      type: "endnoteReference",
+      attrs: { id: "2" },
+    });
+    expect(loaded.footnotes.footnote.map((e) => e.id)).toEqual(["-1", "0", "1"]);
+    expect(loaded.footnotes.footnote[0]!.role).toBe("separator");
+    expect(loaded.footnotes.endnote.map((e) => e.id)).toEqual(["-1", "2"]);
+    expect(loaded.footnotes.unmodeled).toEqual([]);
+  });
+
+  it("保存一次就补齐 Content_Types 与关系，且分隔符与正文条目原样带走", async () => {
+    const out = await savedOnce(await footnotedDocx());
+    const body = await part(out, "word/document.xml");
+    expect(body).toContain('<w:footnoteReference w:id="1"/>');
+    expect(body).toContain('<w:endnoteReference w:id="2"/>');
+    const fn = await part(out, "word/footnotes.xml");
+    expect(fn).toContain('<w:footnote w:type="separator" w:id="-1">');
+    expect(fn).toContain("参见《民法典》第五百零九条。");
+    expect(fn).toContain("<w:footnoteRef/>");
+    // 保存时登记被补上：夹具里没写 Override，Word 认的是包里的登记。
+    const zip = await JSZip.loadAsync(out);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct).toContain('PartName="/word/footnotes.xml"');
+    expect(ct).toContain("wordprocessingml.footnotes+xml");
+    expect(ct).toContain("wordprocessingml.endnotes+xml");
+    const rels = await zip.file("word/_rels/document.xml.rels")!.async("string");
+    expect(rels.match(/relationships\/footnotes/g)).toHaveLength(1);
+    expect(rels.match(/relationships\/endnotes/g)).toHaveLength(1);
+  });
+
+  it("保存两次不再多登记，部件内容逐字节稳定", async () => {
+    const once = await savedOnce(await footnotedDocx());
+    const twice = await savedOnce(once);
+    expect(await part(twice, "word/footnotes.xml")).toBe(await part(once, "word/footnotes.xml"));
+    const zip = await JSZip.loadAsync(twice);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct.match(/\/word\/footnotes\.xml/g)).toHaveLength(1);
+  });
+
+  it("删掉正文里的引用点，部件里那条脚注也一起消失，分隔符留下", async () => {
+    const out = await savedOnce(await footnotedDocx(), (doc) => ({
+      ...doc,
+      content: doc.content.map((p) => ({
+        ...p,
+        content: (p.content ?? []).filter((i) => i.type !== "footnoteReference"),
+      })),
+    }));
+    const fn = await part(out, "word/footnotes.xml");
+    expect(fn).not.toContain("参见《民法典》");
+    expect(fn).toContain('<w:footnote w:type="separator" w:id="-1">');
+    // 尾注没被牵连。
+    expect(await part(out, "word/endnotes.xml")).toContain("尾注正文。");
+  });
+
+  it("正文插入一个新引用点，部件补一条空正文条目并带上编号记号", async () => {
+    const out = await savedOnce(await footnotedDocx(), (doc) => ({
+      ...doc,
+      content: [
+        ...doc.content,
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "新脚注" },
+            { type: "footnoteReference", attrs: { id: "9" } },
+          ],
+        },
+      ],
+    }));
+    const fn = await part(out, "word/footnotes.xml");
+    expect(fn).toContain('<w:footnote w:id="9">');
+    expect(fn).toContain("<w:footnoteRef/>");
+    expect(await part(out, "word/document.xml")).toContain('<w:footnoteReference w:id="9"/>');
+  });
+
+  it("部件里没有建模不了的条目时，整个部件原样透传不重写", async () => {
+    const out = await savedOnce(
+      await makeDocx([], {
+        rawParagraphs: [REF_PARAGRAPHS[0]!],
+        documentRels: FN_REL,
+        parts: {
+          "word/footnotes.xml": FOOTNOTES_XML.replace('w:id="1"', 'w:id="not-a-number"'),
+        },
+      }),
+    );
+    // id 不是十进制 → 这个部件不能按条目重建，否则那一条就丢了。
+    expect(await part(out, "word/footnotes.xml")).toContain('w:id="not-a-number"');
+  });
+
+  it("本来没有脚注的文档，保存后不会凭空多出部件", async () => {
+    const out = await savedOnce(await makeDocx(["只有一段"]));
+    expect(await part(out, "word/footnotes.xml")).toBe("");
+    const zip = await JSZip.loadAsync(out);
+    expect(await zip.file("[Content_Types].xml")!.async("string")).not.toContain("footnotes+xml");
+  });
+
+  it("正文段落顺序与文字都不因脚注改动", async () => {
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    expect(loaded.doc.content.map((p) => p.content?.map((i) => (i.type === "text" ? i.text : i.type)))).toEqual([
+      ["正文甲", "footnoteReference"],
+      ["正文乙", "endnoteReference"],
+    ]);
   });
 });

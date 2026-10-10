@@ -249,6 +249,22 @@ export type PMNode =
       attrs: { id: string };
     }
   | {
+      /**
+       * 脚注引用点：`<w:r><w:footnoteReference w:id="N"/></w:r>`（ECMA-376 §17.11.18）。
+       *
+       * 正文里只有这一个引用点，脚注的**内容**住在 `word/footnotes.xml` 部件里，
+       * 靠同一个 `w:id` 对应；所以这个节点是行内 atom，不带 content。
+       * `w:id` 是 ST_DecimalNumber，原样存字符串（可以是负数，部件里的分隔符条目就是 -1）。
+       */
+      type: "footnoteReference";
+      attrs: { id: string };
+    }
+  | {
+      /** 尾注引用点，形状与脚注一致，内容部件是 `word/endnotes.xml`。 */
+      type: "endnoteReference";
+      attrs: { id: string };
+    }
+  | {
       type: "table";
       attrs?: Record<string, unknown>;
       content?: PMNode[];

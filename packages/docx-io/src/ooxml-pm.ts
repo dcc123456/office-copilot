@@ -280,8 +280,61 @@ export function pmToOoxml(doc: PMDoc, ctx: WriteCtx = {}): string {
 /** `w:id`（ST_DecimalNumber）的合法形状：Word 写的是非负整数。读写两侧共用这一份判据。 */
 const BOOKMARK_ID = /^\d{1,9}$/;
 
+/**
+ * 非 `<w:document>` 部件的正文 → PM doc。
+ *
+ * 页眉页脚（`w:hdr`/`w:ftr`）与脚注尾注部件（`w:footnote`/`w:endnote`）都不是文档根，
+ * 但里面的段落与正文完全同构：包一层临时 `<w:document><w:body>` 就复用同一个转换器，
+ * 不必每种部件再长一套解析。
+ *
+ * @param el 部件根元素，其子元素是 `w:p` 等块级节点。
+ * @param numbering 列表编号表，与正文同一份。
+ * @param styles 样式表，与正文同一份。
+ * @returns PM doc；根元素没有块级子节点时 `content` 为空数组。
+ */
+export function ooxmlFragmentToPm(
+  el: Element,
+  numbering?: NumberingMap,
+  styles?: StyleMap,
+): PMDoc {
+  const inner = children(el)
+    .map((c) => serialize(c))
+    .join("");
+  return ooxmlToPm(
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:document xmlns:w="${W_NS}" xmlns:r="${R_NS}"><w:body>${inner}</w:body></w:document>`,
+    numbering,
+    styles,
+  );
+}
+
+/**
+ * PM doc → 部件正文（既不含根标签，也不含 `<w:sectPr>`），是 `ooxmlFragmentToPm` 的反向。
+ *
+ * 页眉页脚与脚注条目都不许带自己的节属性：`pmToOoxml` 每次都补一个默认 `sectPr`，
+ * 留在那里会让 Word 把这份部件当成新的一节。
+ *
+ * @param doc 要写回的 PM doc。
+ * @param ctx 写侧上下文（编号表、链接样式），与正文同一份。
+ * @returns 可以直接塞进部件根元素里的 XML 片段。
+ */
+export function pmToOoxmlFragment(doc: PMDoc, ctx: WriteCtx = {}): string {
+  const xml = pmToOoxml(doc, ctx).replace(/<w:sectPr[\s\S]*?<\/w:sectPr>/g, "");
+  const body = xml.match(/<w:body[^>]*>([\s\S]*)<\/w:body>/);
+  return body ? body[1]! : xml;
+}
+
 /** 书签的两个行内节点类型，配对只认 id，与它落在哪一段无关。 */
 type BookmarkNode = Extract<PMNode, { type: "bookmarkStart" | "bookmarkEnd" }>;
+
+/**
+ * 脚注/尾注引用的 `w:id`：ST_DecimalNumber，可以是负数——部件里那条分隔符条目
+ * （`w:type="separator"`）Word 就写成 -1。读写两侧共用这一份判据。
+ */
+export const FOOTNOTE_ID = /^-?\d{1,9}$/;
+
+/** 脚注与尾注的引用节点，正文里只有 id，内容在另一个部件。 */
+type FootnoteRefNode = Extract<PMNode, { type: "footnoteReference" | "endnoteReference" }>;
 
 /**
  * 按文档顺序取出树里的所有书签节点（父节点在前，再进 `content`）。
@@ -1127,6 +1180,20 @@ function runToInlines(r: Element, ctx: InlineCtx = {}): PMNode[] {
           }
         }
         // Charts and SmartArt have no model here and are dropped.
+        break;
+      }
+      case "w:footnoteReference":
+      case "w:endnoteReference": {
+        // 引用点在 run 里（§17.11.18），正文只带 id；脚注内容在另一个部件里。
+        // `w:customMarkFollows` 的脚注要的是用户自己写的记号，我们建模不了，整条不读——
+        // 读成普通引用会让 Word 给它重新编号，比不读更糟。
+        const id = child.attributes?.["w:id"] as string | undefined;
+        if (id && FOOTNOTE_ID.test(id) && !child.attributes?.["w:customMarkFollows"]) {
+          out.push({
+            type: child.name === "w:footnoteReference" ? "footnoteReference" : "endnoteReference",
+            attrs: { id },
+          });
+        }
         break;
       }
       default:
@@ -1983,7 +2050,9 @@ function groupByMarks(nodes: PMNode[]): PMNode[][] {
       n.type === "bookmarkStart" ||
       n.type === "bookmarkEnd" ||
       n.type === "fieldBegin" ||
-      n.type === "fieldEnd"
+      n.type === "fieldEnd" ||
+      n.type === "footnoteReference" ||
+      n.type === "endnoteReference"
     ) {
       flush();
       groups.push([n]);
@@ -2011,6 +2080,14 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
   // 合进文本 run 会把域边界和正文混在一个 run 里（Word 会把指令当成正文显示）。
   if (nodes.length === 1 && (nodes[0]!.type === "fieldBegin" || nodes[0]!.type === "fieldEnd")) {
     return fieldBoundaryXml(nodes[0]!);
+  }
+  // 脚注/尾注引用自己就是一个完整 run（带 superscript 的 rPr），合进正文 run 会把
+  // 整段的字符样式套到引用记号上。
+  if (
+    nodes.length === 1 &&
+    (nodes[0]!.type === "footnoteReference" || nodes[0]!.type === "endnoteReference")
+  ) {
+    return footnoteRefXml(nodes[0] as FootnoteRefNode);
   }
   // Determine marks from first text node.
   const first = nodes.find((n) => n.type === "text") as PMTextNode | undefined;
@@ -2330,6 +2407,26 @@ function bookmarkXml(node: BookmarkNode): string {
   if (node.type === "bookmarkEnd") return `<w:bookmarkEnd w:id="${id}"/>`;
   const name = node.attrs.name;
   return `<w:bookmarkStart w:id="${id}"${name ? ` w:name="${escapeXml(name)}"` : ""}/>`;
+}
+
+/**
+ * 脚注/尾注引用点 → 它自己的 run。
+ *
+ * Word 给引用记号套一条 `w:vertAlign superscript` 的 rPr（编号由 Word 在版面上算，
+ * 文件里不存编号），所以我们不写数字、也不存 run 样式；读的时候同样忽略 rPr，
+ * 因此"读→写→读"稳定。
+ *
+ * @param node `footnoteReference` 或 `endnoteReference` 节点。
+ * @returns 一个 `<w:r>`；id 不是 ST_DecimalNumber 时返回空串（宁可不写也不产出违规元素）。
+ */
+function footnoteRefXml(node: FootnoteRefNode): string {
+  const id = String(node.attrs.id ?? "");
+  if (!FOOTNOTE_ID.test(id)) return "";
+  const tag = node.type === "footnoteReference" ? "w:footnoteReference" : "w:endnoteReference";
+  return (
+    `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>` +
+    `<${tag} w:id="${id}"/></w:r>`
+  );
 }
 
 function imageXml(node: Extract<PMNode, { type: "image" }>): string {
