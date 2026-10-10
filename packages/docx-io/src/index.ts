@@ -49,6 +49,7 @@ export type {
   PMDoc,
   PMNode,
   PMMark,
+  VerticalAlign,
   TabStop,
   TabStopAlignment,
   TabStopLeader,

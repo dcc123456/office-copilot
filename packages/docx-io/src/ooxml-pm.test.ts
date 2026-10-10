@@ -360,6 +360,60 @@ describe("字符样式维度", () => {
     expect(rPr.indexOf("<w:color")).toBeLessThan(rPr.indexOf("<w:sz"));
     expect(rPr.indexOf("<w:sz")).toBeLessThan(rPr.indexOf("<w:u"));
   });
+
+  /**
+   * 上标 / 下标是 `<w:vertAlign w:val>` 这一个元素的三档（ECMA-376 §17.3.2.27 的
+   * ST_VerticalAlignRun），所以读出来也只能是一个标记带一个值。
+   */
+  it("上标与下标读成同一个标记的两个值，baseline 读成没有标记", () => {
+    const pm = runs(
+      `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>1</w:t></w:r>`,
+      `<w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>2</w:t></w:r>`,
+      // 缺省位置也是"写过"：Word 用它显式取消样式继承来的上标。
+      `<w:r><w:rPr><w:vertAlign w:val="baseline"/></w:rPr><w:t>3</w:t></w:r>`,
+      // 认不出来的档位整个不写，不能把一个 Word 不认的值带到下一份文件里。
+      `<w:r><w:rPr><w:vertAlign w:val="raised"/></w:rPr><w:t>4</w:t></w:r>`,
+    );
+    expect(marksOf(pm, 0)).toEqual(["vertAlign"]);
+    expect(attrsOf(pm, 0)).toEqual({ val: "superscript" });
+    expect(attrsOf(pm, 1)).toEqual({ val: "subscript" });
+    expect(marksOf(pm, 2)).toEqual([]);
+    expect(marksOf(pm, 3)).toEqual([]);
+  });
+
+  it("上标读进来存回去是同一份 XML，两档不会互相顶掉", () => {
+    const xml = pmToOoxml(
+      runs(
+        `<w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>H</w:t></w:r>`,
+        `<w:r><w:rPr><w:b/><w:vertAlign w:val="superscript"/></w:rPr><w:t>2</w:t></w:r>`,
+      ),
+    );
+    expect(xml).toContain('<w:vertAlign w:val="subscript"/>');
+    expect(xml).toContain("<w:b/><w:vertAlign w:val=\"superscript\"/>");
+    // 一个 run 只有一个 `<w:vertAlign>`：写两条 Word 只认第一条，第二条是静默丢失。
+    expect(xml.match(/<w:vertAlign /g)).toHaveLength(2);
+    expect(pmToOoxml(ooxmlToPm(xml))).toBe(xml);
+  });
+
+  it("`w:vertAlign` 排在 rPr 末尾，与 CT_RPr 的元素顺序一致", () => {
+    const xml = pmToOoxml({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            {
+              type: "text",
+              text: "a",
+              marks: [{ type: "vertAlign", attrs: { val: "superscript" } }, { type: "underline" }],
+            },
+          ],
+        },
+      ],
+    });
+    const rPr = /<w:rPr>(.*)<\/w:rPr>/.exec(xml)?.[1] ?? "";
+    expect(rPr.indexOf("<w:u")).toBeLessThan(rPr.indexOf("<w:vertAlign"));
+  });
 });
 
 describe("canonColor", () => {

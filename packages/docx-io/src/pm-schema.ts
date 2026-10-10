@@ -10,12 +10,21 @@
  * editor.commands.setContent().
  */
 
+/**
+ * `w:vertAlign` 的 `w:val`（ECMA-376 §17.3.2.27 的 ST_VerticalAlignRun，三档：
+ * `baseline` 是缺省位置、`superscript` 抬起来、`subscript` 沉下去，后两档同时按
+ * "有则缩小"排字）。字号缩小是**排版行为**，文档里不写 `w:sz`，所以换算不涉及这里。
+ */
+export type VerticalAlign = "baseline" | "superscript" | "subscript";
+
 export type PMMark =
   | { type: "bold" }
   | { type: "italic" }
   | { type: "underline" }
   | { type: "strike" }
   | { type: "code" }
+  /** 上标 / 下标。OOXML 只有一个 `w:vertAlign` 元素，所以这里也是一个标记带枚举值，而不是两个标记。 */
+  | { type: "vertAlign"; attrs: { val: VerticalAlign } }
   | {
       type: "textStyle";
       attrs: {

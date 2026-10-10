@@ -21,6 +21,7 @@ import type {
   TabStop,
   TabStopAlignment,
   TabStopLeader,
+  VerticalAlign,
 } from "./pm-schema.js";
 import { NumberingMap, readListProps, type NumberingKind } from "./numbering.js";
 import { StyleMap, fitStyleId } from "./styles.js";
@@ -1055,6 +1056,12 @@ export interface RunStyleProps {
   color?: string;
   /** `w:highlight` 的荧光笔色，其次才是 `w:shd` 的底纹填充。 */
   backgroundColor?: string;
+  /**
+   * `w:vertAlign` 的 `w:val`，三档照 ST_VerticalAlignRun。缺省位置（baseline）也是
+   * **写过**的：Word 用 `<w:vertAlign w:val="baseline"/>` 显式取消样式继承来的上标，
+   * 没写过才是 undefined。
+   */
+  vertAlign?: VerticalAlign;
 }
 
 /**
@@ -1113,6 +1120,13 @@ export function readRunProperties(rPr: Element | undefined): RunStyleProps {
     const c = canonColor(colorVal(shd.attributes?.["w:fill"] as string | undefined));
     if (c) out.backgroundColor = c;
   }
+  const vertAlign = firstChild(rPr, "w:vertAlign");
+  if (vertAlign) {
+    // `w:val` 缺省就是 baseline（CT_VerAlignRun 的属性默认值）。读不出认识的档位时整个
+    // 不写：这份结果还会进样式定义，塞一个 Word 不认的值比重丢这个格式更糟。
+    const v = val(vertAlign) || "baseline";
+    if (v === "baseline" || v === "superscript" || v === "subscript") out.vertAlign = v;
+  }
   return out;
 }
 
@@ -1123,6 +1137,10 @@ function runToInlines(r: Element, ctx: InlineCtx = {}): PMNode[] {
   if (props.italic === true) marks.push({ type: "italic" });
   if (!ctx.inLink && props.underline === true) marks.push({ type: "underline" });
   if (props.strike === true) marks.push({ type: "strike" });
+  // 只有抬起/沉下才落成标记：baseline 在编辑器里就是"没有这个标记"，写出来反而多一条 op。
+  if (props.vertAlign === "superscript" || props.vertAlign === "subscript") {
+    marks.push({ type: "vertAlign", attrs: { val: props.vertAlign } });
+  }
   const textStyle: NonNullable<Extract<PMMark, { type: "textStyle" }>["attrs"]> = {};
   if (props.fontFamily !== undefined) textStyle.fontFamily = props.fontFamily;
   if (props.fontFamilyWest !== undefined) textStyle.fontFamilyWest = props.fontFamilyWest;
@@ -2196,6 +2214,8 @@ const RPR_ORDER = [
   "highlight",
   "u",
   "shd",
+  // CT_RPr 里 `vertAlign` 排在 `shd` 之后（`fitText` 与它之间的几档本文器不建模）。
+  "vertAlign",
 ] as const;
 
 /** RPR_ORDER 的带前缀写法，供 `sortParts` 与段落那边用同一套排序。 */
@@ -2258,6 +2278,12 @@ function runPropertiesParts(marks: PMMark[], link?: LinkStyle | null): RunProper
   if (marks.some((m) => m.type === "italic")) put({ name: "w:i", xml: "<w:i/>" });
   if (ownUnderline) put({ name: "w:u", xml: `<w:u w:val="single"/>` });
   if (marks.some((m) => m.type === "strike")) put({ name: "w:strike", xml: "<w:strike/>" });
+  const vertAlign = marks.find(
+    (m): m is Extract<PMMark, { type: "vertAlign" }> => m.type === "vertAlign",
+  )?.attrs.val;
+  // 三档都是 `<w:vertAlign w:val>`，所以只有一条元素可写：上标与下标不可能同时出现，
+  // 后写的会顶掉先写的（Map 按元素名收），Word 那边本来也是同一个属性只认一个值。
+  if (vertAlign) put({ name: "w:vertAlign", xml: `<w:vertAlign w:val="${vertAlign}"/>` });
   if (marks.some((m) => m.type === "code")) {
     put({
       name: "w:rFonts",
