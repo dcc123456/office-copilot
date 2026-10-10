@@ -36,42 +36,14 @@ import {
 
 import { ParagraphPopover } from "./ParagraphPopover.js";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
-import { promptDialog } from "./ui/Dialog.js";
-
-const FONT_FAMILIES = [
-  { label: "默认", value: "" },
-  { label: "宋体", value: "SimSun, 宋体, serif" },
-  { label: "黑体", value: "SimHei, 黑体, sans-serif" },
-  { label: "微软雅黑", value: '"Microsoft YaHei", 微软雅黑, sans-serif' },
-  { label: "苹方", value: '"PingFang SC", sans-serif' },
-  { label: "楷体", value: "KaiTi, 楷体, serif" },
-  { label: "仿宋", value: "FangSong, 仿宋, serif" },
-  { label: "Arial", value: "Arial, sans-serif" },
-  { label: "Times New Roman", value: '"Times New Roman", serif' },
-  { label: "Consolas", value: "Consolas, monospace" },
-];
-
-const FONT_SIZES = [
-  { label: "默认", value: "" },
-  { label: "10", value: "10px" },
-  { label: "12", value: "12px" },
-  { label: "14 (五号)", value: "14px" },
-  { label: "16 (小四)", value: "16px" },
-  { label: "18 (三号)", value: "18px" },
-  { label: "20", value: "20px" },
-  { label: "24", value: "24px" },
-  { label: "28", value: "28px" },
-  { label: "32", value: "32px" },
-];
-
-const HIGHLIGHT_COLORS = [
-  "", "#ffff00", "#00ff00", "#00ffff", "#ff00ff", "#ff8c00",
-  "#ff6b6b", "#a8e6cf", "#dcedc1", "#ffd3b6",
-];
-const FONT_COLORS = [
-  "", "#000000", "#666666", "#a4262c", "#d13438", "#107c10", "#0078d4",
-  "#5c2d91", "#ca5010", "#038387",
-];
+import { promptSetLink } from "./linkPrompt.js";
+import { hasStoredFormat } from "../editor/contextMenu.js";
+import {
+  FONT_COLORS,
+  FONT_FAMILIES,
+  FONT_SIZES,
+  HIGHLIGHT_COLORS,
+} from "../editor/fontOptions.js";
 
 interface ToolbarProps {
   editor: Editor;
@@ -135,28 +107,9 @@ export function Toolbar({
   dirty,
   canRevert,
 }: ToolbarProps) {
-  const setLink = async () => {
-    const previousUrl = editor.getAttributes("link").href as string | undefined;
-    const url = await promptDialog({
-      title: "插入链接",
-      placeholder: "https://…",
-      initialValue: previousUrl ?? "https://",
-    });
-    if (url === null) return;
-    if (url === "") {
-      editor.chain().focus().extendMarkRange("link").unsetLink().run();
-      return;
-    }
-    editor.chain().focus().extendMarkRange("link").setLink({ href: url }).run();
-  };
+  const setLink = () => void promptSetLink(editor);
 
-  const painterActive = Boolean(
-    (
-      editor as unknown as {
-        storage: { formatPainter?: { stored: unknown } };
-      }
-    ).storage.formatPainter?.stored,
-  );
+  const painterActive = hasStoredFormat(editor);
 
   return (
     <div className="toolbar">
@@ -328,12 +281,7 @@ export function Toolbar({
         <Btn
           title="格式刷：复制当前样式，选中目标粘贴"
           onClick={() => {
-            const s = (
-              editor as unknown as {
-                storage: { formatPainter?: { stored: unknown } };
-              }
-            ).storage.formatPainter;
-            if (s?.stored) editor.commands.cancelFormatPaint();
+            if (hasStoredFormat(editor)) editor.commands.cancelFormatPaint();
             else editor.commands.pickFormat();
           }}
           className={painterActive ? "active" : undefined}

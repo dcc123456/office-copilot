@@ -16,6 +16,7 @@ import { StatusBar } from "./components/StatusBar.js";
 import { FindBar } from "./components/FindBar.js";
 import { TableBubbleMenu } from "./components/TableBubbleMenu.js";
 import { TableContextMenu } from "./components/TableContextMenu.js";
+import { EditorContextMenu } from "./components/EditorContextMenu.js";
 import { AISuggestionBubble } from "./ai/AISuggestionBubble.js";
 import { PageChrome } from "./components/PageChrome.js";
 import { SettingsModal } from "./components/SettingsModal.js";
@@ -817,6 +818,10 @@ export function App() {
         onClose={() => setPaletteOpen(false)}
         ctx={commandCtx}
       />
+      {/* 右键菜单挂在页面之外：.page-stage 上有 zoom 的 transform，
+          放进舞台里 position: fixed 会以缩放后的容器为基准，菜单就跑到鼠标外。 */}
+      <EditorContextMenu editor={editor} />
+      <TableContextMenu editor={editor} />
       <DialogHost />
       <ToastHost />
       <EdgeResizer />

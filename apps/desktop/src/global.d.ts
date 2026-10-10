@@ -119,6 +119,7 @@ interface OfficeCopilotAPI {
     html: string,
   ) => Promise<{ ok: true } | { ok: false; message: string }>;
   listRecent: () => Promise<string[]>;
+  readClipboard: () => Promise<{ text: string; html: string }>;
   clearRecent: () => Promise<string[]>;
   addRecent: (path: string) => void;
   onRecentChanged: (cb: (paths: string[]) => void) => () => void;

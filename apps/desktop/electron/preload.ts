@@ -62,6 +62,9 @@ const api = {
     | { ok: true; path: string; dataUrl: string }
     | { ok: false; canceled: true }
   > => ipcRenderer.invoke("file:pick-image"),
+  /** 右键菜单的粘贴来源：主进程读系统剪贴板，渲染层不直接碰 Node 能力。 */
+  readClipboard: (): Promise<{ text: string; html: string }> =>
+    ipcRenderer.invoke("clipboard:read"),
   aiTransform: (payload: AITransformPayload): Promise<AIResult> =>
     ipcRenderer.invoke("ai:transform", payload),
   aiStreamStart: (

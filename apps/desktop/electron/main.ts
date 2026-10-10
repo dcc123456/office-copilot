@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell, ipcMain } from "electron";
+import { app, BrowserWindow, Menu, shell, ipcMain, clipboard } from "electron";
 import path from "node:path";
 import { registerFileHandlers } from "./fileHandlers.js";
 import { registerAIHandlers } from "./aiHandlers.js";
@@ -292,6 +292,13 @@ app.whenReady().then(async () => {
     pendingOpenPath = null;
     return p;
   });
+
+  // 右键菜单要按"剪贴板里有没有东西"决定粘贴是否置灰，并支持三种粘贴方式。
+  // 剪贴板属于系统能力，一律在主进程读，渲染层只经 preload 的白名单访问。
+  ipcMain.handle("clipboard:read", () => ({
+    text: clipboard.readText(),
+    html: clipboard.readHTML(),
+  }));
 
   // 窗口边缘拖拽缩放：渲染层热区条发「起始 bounds + 累计位移 + 边标识」，
   // 边语义（哪侧被拖动、原点是否跟随）在这里统一处理，并夹到最小尺寸。

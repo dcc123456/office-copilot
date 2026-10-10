@@ -1649,6 +1649,66 @@ body.is-window-resizing .ai-panel {
   border-radius: var(--radius-xs);
   cursor: pointer;
 }
+
+/* 正文右键菜单：Word 那种「左勾选位 + 右快捷键位」的行排版 */
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.ctx-item:disabled,
+.ctx-item:disabled:hover {
+  color: var(--text-faint);
+  background: transparent;
+  cursor: default;
+}
+.ctx-check {
+  flex: none;
+  width: 12px;
+  color: var(--accent);
+}
+.ctx-label {
+  flex: 1 1 auto;
+}
+.ctx-hint,
+.ctx-arrow {
+  flex: none;
+  color: var(--text-faint);
+}
+.ctx-submenu {
+  min-width: 0;
+}
+/* 「字体(F)…」/「段落(P)…」面板：复用 .paragraph-popover 的排版，只是由右键菜单唤出 */
+.ctx-panel {
+  width: 280px;
+}
+.ctx-panel select,
+.ctx-panel input {
+  width: 100%;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.font-swatches {
+  grid-template-columns: repeat(6, 1fr);
+}
+.ctx-swatch.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ctx-color-input {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: none;
+  cursor: pointer;
+}
 .ProseMirror img {
   max-width: 100%;
   height: auto;
