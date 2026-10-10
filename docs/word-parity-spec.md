@@ -229,8 +229,20 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
   `w:footnoteReference`/`w:endnoteReference`。**这是本规格里唯一需要新增 zip 部件的一项**，
   要一并补 `[Content_Types].xml` 与 `document.xml.rels`。
 
-提交切分：① 书签（`w:bookmarkStart/End` 往返 + 编辑器锚点）；② 域的读侧保留 + `Field.ts` 扩展
-支持 `instr` 文本与缓存结果；③ 目录生成与插入；④ 脚注/尾注部件；⑤ 题注 SEQ + 交叉引用。
+提交切分（实际落地顺序与提交号）：
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| ① | 书签：`w:bookmarkStart/End` 往返（段内直子元素，落单的一半在序列化前丢掉）+ 编辑器锚点节点 | `ba17b00` |
+| ② | 域读侧：同段 begin/end 配对成一条 `field` 节点，保留 `instr` 与**字面**缓存结果（`\t`⇄`<w:tab/>`、`\n`⇄`<w:br/>`），域内套域按 fieldDepth 折进外层结果；`Field.ts` 属性补 parse/render | `16a0e89` |
+| ③ | 目录生成与插入（含跨段目录的配对标记模型——②里记的"跨段降级"在这一步解决） | 待做 |
+| ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
+| ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
+
+②的已知差距（都写进了 `pm-schema.ts` 的节点注释）：一个 `field` 节点只表示**同一段内**的
+begin/end 配对，Word 生成的多段目录从第二段起读成纯文本；缓存结果里的嵌套域指令（如目录条目
+的 `PAGEREF`）只保留文本不重建结构。这两条都是③要处理的，因为"重新生成目录"必须先能把域跨段
+配对、再把结果写回多段。
 
 ## 四、排名 4：批注 / 修订跟踪
 
