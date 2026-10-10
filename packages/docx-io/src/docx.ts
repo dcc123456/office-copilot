@@ -271,6 +271,8 @@ export class DocxFile {
     const xml = pmToOoxml(doc, {
       numbering: this.numbering,
       link: this.pendingStyle?.link ?? null,
+      // 段落 attrs 里的样式 id 要对着本文档的样式表复核，见 styleIdFitsNode。
+      styles: this.styles,
     });
     const newRoot = parseDocument(xml);
     // Keep the source document's root attributes. A round-tripped floating

@@ -183,6 +183,21 @@ export class StyleMap {
     return this.headingById.get(styleId);
   }
 
+  /**
+   * 某一级的标题样式 id，`headingLevel` 的反向查找。
+   *
+   * @param level 标题级别 1–6。
+   * @returns 文档里这一级的标题样式 id；同一级声明了多条时取 styles.xml 里最先出现
+   *   的那条。文档没有这一级的标题样式时返回 undefined——不能凭空造一个没声明的 id，
+   *   Word 对未定义的引用是按默认样式排的，段落会直接丢掉标题格式。
+   */
+  styleIdForHeadingLevel(level: number): string | undefined {
+    for (const def of this.defs) {
+      if (this.headingById.get(def.styleId) === level) return def.styleId;
+    }
+    return undefined;
+  }
+
   /** True when styles.xml names this style, so its role is known, not guessed. */
   isDeclared(styleId: string | undefined): boolean {
     return styleId !== undefined && this.declared.has(styleId);

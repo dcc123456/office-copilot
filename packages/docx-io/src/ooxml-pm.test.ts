@@ -915,6 +915,58 @@ describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
     expect(pm.content?.[0]).toMatchObject({ type: "heading", attrs: { level: 1, styleId: "2" } });
     expect(styleRefs(pmToOoxml(pm))).toEqual([`<w:pStyle w:val="2"/>`]);
   });
+
+  /** 声明了 1 级与 2 级标题样式的样式表，id 故意用 WPS 风格的数字。 */
+  const TWO_HEADINGS = StyleMap.fromXml(
+    `<w:styles xmlns:w="${WNS}">` +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="1"><w:name w:val="Normal"/></w:style>` +
+      `<w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 1"/></w:style>` +
+      `<w:style w:type="paragraph" w:styleId="3"><w:name w:val="heading 2"/></w:style>` +
+      `</w:styles>`,
+  );
+  /** 编辑器里的标题段落：level 是用户刚改出来的，styleId 还是导入时那条。 */
+  const headingDoc = (level: number, styleId?: string): PMDoc => ({
+    type: "doc",
+    content: [
+      {
+        type: "heading",
+        attrs: { level, ...(styleId ? { styleId } : {}) },
+        content: [{ type: "text", text: "x", marks: [] }],
+      },
+    ],
+  });
+
+  it("改级别后写出这一级的样式 id，而不是继续用旧的那一级", () => {
+    // id "2" 在这份文档里就是"标题 1"；用户把它改成 2 级后仍写 "2"，Word 里段落
+    // 会退回一级标题，用户的操作等于没生效。
+    expect(styleRefs(pmToOoxml(headingDoc(2, "2"), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="3"/>`,
+    ]);
+  });
+
+  it("级别没变时样式 id 一字不动", () => {
+    expect(styleRefs(pmToOoxml(headingDoc(1, "2"), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="2"/>`,
+    ]);
+  });
+
+  it("标题转成正文后，标题样式的引用必须消失", () => {
+    expect(styleRefs(pmToOoxml(paraDoc({ styleId: "2" }), { styles: TWO_HEADINGS }))).toEqual([]);
+  });
+
+  it("样式表里没有这一级标题样式时退回推断 id，不留下对不上的引用", () => {
+    expect(styleRefs(pmToOoxml(headingDoc(4, "2"), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="Heading4"/>`,
+    ]);
+  });
+
+  it("没有样式表可对照时不猜：非标题样式一律放行", () => {
+    // 只有样式表知道这个 id 是不是标题样式，无从判断就不能删用户的引用。
+    expect(styleRefs(pmToOoxml(paraDoc({ styleId: "af3" }), { styles: TWO_HEADINGS }))).toEqual([
+      `<w:pStyle w:val="af3"/>`,
+    ]);
+    expect(styleRefs(pmToOoxml(headingDoc(2, "2")))).toEqual([`<w:pStyle w:val="2"/>`]);
+  });
 });
 
 describe("DocxFile toProseMirror / replaceProseMirror", () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import JSZip from "jszip";
 import { DocxFile } from "./docx.js";
+import type { PMDoc } from "./pm-schema.js";
 
 async function makeDocx(
   paragraphs: string[],
@@ -246,6 +247,57 @@ describe("DocxFile", () => {
     expect(once.match(/<w:pStyle\b[^>]*>/g)).toEqual([`<w:pStyle w:val="af3"/>`]);
     expect(once).toContain('w:right="200"');
     expect(twice).toBe(once);
+  });
+
+  /**
+   * 编辑器里改完"这段落是什么"再存一遍，看样式引用有没有跟着改对。
+   *
+   * @param raw 源文档里的 `<w:p>` 片段。
+   * @param edit 对加载出来的 PM JSON 的原地修改，模拟用户在编辑器里的操作。
+   * @returns 保存后 document.xml 里全部 `<w:pStyle>` 片段；空数组表示没有样式引用。
+   */
+  async function styleRefsAfterEdit(
+    raw: string,
+    edit: (doc: PMDoc) => void,
+  ): Promise<string[]> {
+    const source = await makeDocx([], {
+      rawParagraphs: [raw],
+      stylesXml: `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+        <w:style w:type="paragraph" w:default="1" w:styleId="1"><w:name w:val="Normal"/></w:style>
+        <w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 1"/></w:style>
+        <w:style w:type="paragraph" w:styleId="3"><w:name w:val="heading 2"/></w:style>
+      </w:styles>`,
+    });
+    const docx = await DocxFile.fromBytes(source);
+    const loaded = await docx.toProseMirror();
+    edit(loaded.doc);
+    await docx.replaceProseMirror(loaded.doc);
+    const saved = await JSZip.loadAsync(await docx.toBytes());
+    const body = await saved.file("word/document.xml")!.async("string");
+    return body.match(/<w:pStyle\b[^>]*>/g) ?? [];
+  }
+
+  it("re-points the heading style when the user changes its level", async () => {
+    const heading = `<w:p><w:pPr><w:pStyle w:val="2"/></w:pPr><w:r><w:t>章节标题</w:t></w:r></w:p>`;
+    // id "2" 在这份文件里声明的是"heading 1"；改成 2 级后 Word 必须收到 "3"，
+    // 既不能继续用 "2"（段落会退回一级标题），也不能写文档里根本没有的 Heading2。
+    expect(
+      await styleRefsAfterEdit(heading, (doc) => {
+        (doc.content![0]!.attrs as Record<string, unknown>).level = 2;
+      }),
+    ).toEqual([`<w:pStyle w:val="3"/>`]);
+    expect(await styleRefsAfterEdit(heading, () => {})).toEqual([`<w:pStyle w:val="2"/>`]);
+  });
+
+  it("drops the heading style when the user converts a heading to body text", async () => {
+    const refs = await styleRefsAfterEdit(
+      `<w:p><w:pPr><w:pStyle w:val="2"/><w:spacing w:after="120"/></w:pPr><w:r><w:t>降级成正文</w:t></w:r></w:p>`,
+      (doc) => {
+        const first = doc.content![0]!;
+        doc.content![0] = { ...first, type: "paragraph" };
+      },
+    );
+    expect(refs).toEqual([]);
   });
 
   /**

@@ -232,7 +232,15 @@ export interface LinkStyle {
   underline?: boolean;
 }
 
-type WriteCtx = { numbering?: NumberingMap; link?: LinkStyle | null };
+type WriteCtx = {
+  numbering?: NumberingMap;
+  link?: LinkStyle | null;
+  /**
+   * 这份文档的 styles.xml 视图。段落 attrs 里的 styleId 要先对着它复核"级别/类型
+   * 还匹配"才敢原样写回——详见 `styleIdFitsNode`。
+   */
+  styles?: StyleMap;
+};
 
 export function pmToOoxml(doc: PMDoc, ctx: WriteCtx = {}): string {
   const bodyChildren = doc.content.map((b) => blockToXml(b, ctx)).join("");
@@ -949,7 +957,7 @@ function unmanaged(el: Element, kind: string): PMNode {
 function blockToXml(node: PMNode, ctx: WriteCtx = {}): string {
   switch (node.type) {
     case "paragraph":
-      return paragraphXml(node, { link: ctx.link });
+      return paragraphXml(node, { link: ctx.link, styles: ctx.styles });
     case "heading":
       return headingXml(node, ctx);
     case "blockquote":
@@ -996,6 +1004,9 @@ function paragraphXml(
     rawPpr?: string;
     numPr?: string;
     link?: LinkStyle | null;
+    /** 标题节点现在的级别；非标题段落不要传。 */
+    headingLevel?: number;
+    styles?: StyleMap;
   } = {},
 ): string {
   const a = node.attrs ?? {};
@@ -1003,6 +1014,8 @@ function paragraphXml(
     pStyle: opts.pStyle,
     numPr: opts.numPr,
     rawPpr: opts.rawPpr ?? a.rawPpr,
+    headingLevel: opts.headingLevel,
+    styles: opts.styles,
   });
   const runs = inlineChildrenToXml(node.content ?? [], opts.link);
   return `<w:p>${pPr}${runs}</w:p>`;
@@ -1121,11 +1134,19 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
  *   attrs 建模了具名样式、或源文档自己带 pStyle 时都不用它。
  * @param opts.numPr 列表段落重新分组后由我们给出的 numPr。
  * @param opts.rawPpr 源文档的 pPr 内部 XML。
+ * @param opts.headingLevel 标题节点现在的级别（1–6），非标题段落为 undefined。
+ * @param opts.styles 这份文档的样式表，用来复核 styleId 还配不配这段落。
  * @returns 完整 pPr 字符串；段落没有任何格式属性时返回空串。
  */
 function paragraphPprXml(
   a: PPrAttrs,
-  opts: { pStyle?: string; numPr?: string; rawPpr?: string } = {},
+  opts: {
+    pStyle?: string;
+    numPr?: string;
+    rawPpr?: string;
+    headingLevel?: number;
+    styles?: StyleMap;
+  } = {},
 ): string {
   const modeled = modeledPprParts(a, opts.rawPpr);
   const covered = new Set(modeled.map((part) => part.name));
@@ -1137,12 +1158,37 @@ function paragraphPprXml(
     .map((el) => ({ name: el.name, xml: serialize(el) }))
     .filter((part) => !covered.has(part.name) && part.name !== "w:pStyle");
   const parts: PprPart[] = [];
-  const style = pStylePart(a.styleId, rawStyle, opts.pStyle);
+  const style = pStylePart(styleIdFitsNode(a.styleId, opts), rawStyle, opts.pStyle);
   if (style) parts.push(style);
   parts.push(...rawParts);
   if (opts.numPr) parts.push({ name: "w:numPr", xml: opts.numPr });
   parts.push(...modeled);
   return pprFromParts(parts);
+}
+
+/**
+ * 按样式表复核 attrs.styleId 与这段落"现在是什么"还配不配。
+ *
+ * 编辑器里改标题级别、把标题转成正文时只动节点的 type / level，styleId 留在 attrs
+ * 里没人负责跟着改——照原样写回的话 Word 仍按旧的那一级排版，用户的操作等于没生效。
+ *
+ * @param styleId attrs 里的具名样式 id。
+ * @param opts.headingLevel 标题节点现在的级别；非标题段落是 undefined。
+ * @param opts.styles 文档样式表。没有它就判断不了这个 id 是不是标题样式，只能放行。
+ * @returns 仍然成立的 id；级别换了时返回这一级真正的样式 id（样式表没有这一级就返回
+ *   undefined，让调用方按节点类型推断）；标题被改成正文返回 null（引用必须删掉）；
+ *   不是标题样式或无从判断时原样返回。
+ */
+function styleIdFitsNode(
+  styleId: string | null | undefined,
+  opts: { headingLevel?: number; styles?: StyleMap },
+): string | null | undefined {
+  if (typeof styleId !== "string" || !opts.styles) return styleId;
+  const declaredLevel = opts.styles.headingLevel(styleId);
+  if (declaredLevel === undefined) return styleId;
+  if (opts.headingLevel === declaredLevel) return styleId;
+  if (opts.headingLevel === undefined) return null;
+  return opts.styles.styleIdForHeadingLevel(opts.headingLevel);
 }
 
 /**
@@ -1318,7 +1364,9 @@ function headingXml(
 ): string {
   return paragraphXml(node, {
     pStyle: `Heading${node.attrs.level}`,
+    headingLevel: Number(node.attrs.level),
     link: ctx.link,
+    styles: ctx.styles,
   });
 }
 
@@ -1329,7 +1377,7 @@ function blockquoteXml(
   return (node.content ?? [])
     .map((child) => {
       if (child.type === "paragraph") {
-        return paragraphXml(child, { pStyle: "Quote", link: ctx.link });
+        return paragraphXml(child, { pStyle: "Quote", link: ctx.link, styles: ctx.styles });
       }
       return blockToXml(child, ctx);
     })
@@ -1484,9 +1532,9 @@ function tableCellXml(
                 : inline,
             ),
           };
-          return paragraphXml(withBold, { link: ctx.link });
+          return paragraphXml(withBold, { link: ctx.link, styles: ctx.styles });
         }
-        return paragraphXml(c, { link: ctx.link });
+        return paragraphXml(c, { link: ctx.link, styles: ctx.styles });
       }
       return blockToXml(c, ctx);
     })
