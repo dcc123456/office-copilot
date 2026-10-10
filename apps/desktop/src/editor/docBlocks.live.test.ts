@@ -6,6 +6,7 @@ import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
+import { CommentCommands, commentAnchorRanges } from "./extensions/Comment.js";
 import { footnoteRefKey, indexFootnoteRefs } from "./extensions/FootnoteRef.js";
 import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
 import { Revision, selectionTouchesRevision } from "./extensions/Revision.js";
@@ -934,6 +935,132 @@ describe("批注锚点（真实 schema）", () => {
     ]).state.doc;
     expect(doc.firstChild!.childCount).toBe(5);
     expect(doc.textContent).toBe("正文");
+  });
+
+  /**
+   * 排名 4 ⑤：侧栏要的两条命令加一份位置索引。
+   *
+   * 断言都盯着位置：这批命令全靠 PM 位置动手，位置算错就是"批注框住别的字"这种
+   * 用户看得见、单测最容易放过的缺陷。
+   *
+   * @param editor harness 出来的编辑器。
+   * @param name 要跑的命令名。
+   * @param id 传给命令的 `w:id`。
+   * @param words 选区要盖住的文字；传 null 表示"用文档当前选区"，用例自己先派事务。
+   * @returns 命令有没有真的动手（返回 false 时不该产生事务）。
+   */
+  function runComment(
+    editor: Editor,
+    name: "insertCommentRange" | "deleteComment",
+    id: string,
+    words: string[] | null,
+  ): boolean {
+    if (words) selectWords(editor, words);
+    const commands = (
+      CommentCommands as unknown as {
+        config: {
+          addCommands: () => Record<string, (...args: unknown[]) => (props: CommandProps) => boolean>;
+        };
+      }
+    ).config.addCommands.call({ options: {}, name: "commentCommands" });
+    const command = commands[name];
+    if (!command) throw new Error(`批注扩展里没有命令 ${name}`);
+    return command(id)({
+      editor,
+      state: editor.state,
+      dispatch: editor.view.dispatch,
+      view: editor.view,
+    } as unknown as CommandProps);
+  }
+
+  it("选区插入：区间起点在字前，终点与引用记号按 Word 的顺序跟在字后", () => {
+    const editor = harness([para([text("正文甲")])]);
+    expect(runComment(editor, "insertCommentRange", "7", ["正文甲"])).toBe(true);
+    const doc = editor.state.doc;
+    // 锚点不占正文：被批的字一个字都不能少。
+    expect(doc.textContent).toBe("正文甲");
+    expect(commentAnchorRanges(doc)).toEqual([{ id: "7", start: 1, end: 5, reference: 6 }]);
+    expect(pmToOoxml(doc.toJSON() as PMDoc)).toContain(
+      `<w:commentRangeStart w:id="7"/><w:r><w:t xml:space="preserve">正文甲</w:t></w:r><w:commentRangeEnd w:id="7"/><w:r><w:commentReference w:id="7"/></w:r>`,
+    );
+  });
+
+  it("选区只盖住一部分字：锚点贴在被选的那个 run 两侧，前后的字在区间外", () => {
+    // 同格式的相邻 run 会被 ProseMirror 并成一个，中间那段得带个标记才站得住。
+    const editor = harness([
+      para([text("正文甲"), text("被批注的字", [bold()]), text("正文乙")]),
+    ]);
+    expect(runComment(editor, "insertCommentRange", "7", ["被批注的字"])).toBe(true);
+    const doc = editor.state.doc;
+    expect(doc.textContent).toBe("正文甲被批注的字正文乙");
+    expect(commentAnchorRanges(doc)).toEqual([{ id: "7", start: 4, end: 10, reference: 11 }]);
+    expect(doc.nodeAt(4)!.type.name).toBe("commentRangeStart");
+    expect(doc.nodeAt(5)!.text).toBe("被批注的字");
+    expect(doc.nodeAt(11)!.type.name).toBe("commentReference");
+  });
+
+  it("光标没拉选区时不插入——批注总得有个被批的对象", () => {
+    const editor = harness([para([text("正文甲")])]);
+    selectWords(editor, ["正文甲"], "cursor");
+    const before = editor.state.doc;
+    expect(runComment(editor, "insertCommentRange", "0", null)).toBe(false);
+    expect(editor.state.doc).toBe(before);
+  });
+
+  it("跨段选区：两端各落进自己的段落，段落数与文字都不动", () => {
+    const editor = harness([para([text("上段字")]), para([text("下段字")])]);
+    expect(runComment(editor, "insertCommentRange", "3", ["上段字", "下段字"])).toBe(true);
+    const doc = editor.state.doc;
+    expect(doc.childCount).toBe(2);
+    expect(doc.textContent).toBe("上段字下段字");
+    // 起点落在第一段的内容头上，终点与引用记号落在最后一段的内容尾上。
+    expect(commentAnchorRanges(doc)).toEqual([{ id: "3", start: 1, end: 10, reference: 11 }]);
+  });
+
+  it("全选（选区起点在文档开头）时锚点仍然在段内，不会把树插坏", () => {
+    const editor = harness([para([text("整篇的字")])]);
+    editor.view.dispatch(
+      editor.state.tr.setSelection(
+        TextSelection.create(editor.state.doc, 0, editor.state.doc.content.size),
+      ),
+    );
+    expect(runComment(editor, "insertCommentRange", "5", null)).toBe(true);
+    const doc = editor.state.doc;
+    expect(doc.childCount).toBe(1);
+    expect(doc.firstChild!.firstChild!.type.name).toBe("commentRangeStart");
+    expect(commentAnchorRanges(doc)).toEqual([
+      { id: "5", start: 1, end: 6, reference: 7 },
+    ]);
+  });
+
+  it("删除批注：三个锚点一起走，另一条批注不受牵连", () => {
+    const editor = harness([
+      para([text("甲"), start("0"), text("被批的字"), end("0"), ref("0")]),
+      para([start("1"), text("乙"), end("1"), ref("1")]),
+    ]);
+    expect(runComment(editor, "deleteComment", "0", ["甲"])).toBe(true);
+    const doc = editor.state.doc;
+    expect(doc.textContent).toBe("甲被批的字乙");
+    expect(commentAnchorRanges(doc)).toEqual([{ id: "1", start: 8, end: 10, reference: 11 }]);
+  });
+
+  it("删没有的 id 返回 false，不产生空事务", () => {
+    const editor = harness([para([start("0"), text("甲"), end("0"), ref("0")])]);
+    const before = editor.state.doc;
+    expect(runComment(editor, "deleteComment", "9", ["甲"])).toBe(false);
+    expect(editor.state.doc).toBe(before);
+  });
+
+  it("索引按正文顺序排，空 id 的锚点不进表", () => {
+    const doc = harness([
+      para([start("2"), text("甲"), end("2")]),
+      para([start(""), text("乙"), end("")]),
+      para([start("1"), text("丙"), end("1"), ref("1")]),
+    ]).state.doc;
+    expect(commentAnchorRanges(doc)).toEqual([
+      { id: "2", start: 1, end: 3 },
+      { id: "1", start: 11, end: 13, reference: 14 },
+    ]);
   });
 });
 

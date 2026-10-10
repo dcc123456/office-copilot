@@ -21,7 +21,7 @@ import { FieldBegin, FieldEnd } from "./FieldBoundary.js";
 import { CaptionNumbering } from "./CaptionNumbering.js";
 import { BookmarkEnd, BookmarkStart } from "./Bookmark.js";
 import { FootnoteRefs } from "./FootnoteRef.js";
-import { CommentAnchors } from "./Comment.js";
+import { CommentAnchors, CommentCommands } from "./Comment.js";
 import { ParagraphFormatting } from "./ParagraphFormatting.js";
 import { TableColumnResize } from "./TableColumnResize.js";
 import { FormatPainter } from "./FormatPainter.js";
@@ -53,6 +53,7 @@ export const EDITOR_EXTENSIONS: Extensions = [
   BookmarkEnd,
   ...FootnoteRefs,
   ...CommentAnchors,
+  CommentCommands,
   ParagraphFormatting,
   TableColumnResize,
   FormatPainter,

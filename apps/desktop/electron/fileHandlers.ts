@@ -2,6 +2,8 @@ import { dialog, type IpcMain, type BrowserWindow } from "electron";
 import fs from "node:fs/promises";
 import {
   DocxFile,
+  type CommentBody,
+  type CommentStore,
   type FootnoteBodies,
   type FootnoteKind,
   type FootnoteStore,
@@ -46,6 +48,11 @@ export interface HeaderFooterPayload {
    * 与未建模属性都不跨界，渲染层改得动正文，也不该看见其余那些。
    */
   footnotes?: FootnoteBodies;
+  /**
+   * 批注侧栏里的正文与署名。跨界的是 `id`/`doc`/`author`/`date`/`initials` 这五样，
+   * 部件的原始 XML 与 `w15:commentEx` 那类扩展不跨界——我们从生成也不重写它们。
+   */
+  comments?: CommentBody[];
 }
 
 /** 渲染层经 preload 送进来的保存请求：正文 + 需要落地的各项文档级设置。 */
@@ -89,6 +96,12 @@ export type OpenResult =
        * 空对象 = 这份文档没有脚注；正文里没有引用点的条目（版式件）不会出现在这里。
        */
       footnotes: FootnoteBodies;
+      /**
+       * 批注侧栏的数据源：部件里的正文与署名信息，按部件里的条目顺序排。
+       * 空数组 = 这份文档没有批注部件；正文有锚点但部件缺条目时不会出现在这里，
+       * 保存时由 `syncCommentIds` 补一条占位条目。
+       */
+      comments: CommentBody[];
     }
   | { ok: false; canceled: true }
   | { ok: false; message: string };
@@ -121,6 +134,8 @@ export function registerFileHandlers(
       styleFormats: [],
       // 空白模板也没有脚注部件。
       footnotes: {},
+      // 也没有批注部件。
+      comments: [],
     };
   });
 
@@ -231,7 +246,7 @@ async function openDocx(filePath: string): Promise<OpenResult> {
   try {
     const bytes = await fs.readFile(filePath);
     const docx = await DocxFile.fromBytes(bytes);
-    const { doc, warnings, headers, section, styles, styleFormats, footnotes } =
+    const { doc, warnings, headers, section, styles, styleFormats, footnotes, comments } =
       await docx.toProseMirror();
     return {
       ok: true,
@@ -244,6 +259,7 @@ async function openDocx(filePath: string): Promise<OpenResult> {
       styles,
       styleFormats,
       footnotes: footnoteBodiesOf(footnotes),
+      comments: commentBodiesOf(comments),
     };
   } catch (err) {
     return {
@@ -273,6 +289,25 @@ function footnoteBodiesOf(store: FootnoteStore): FootnoteBodies {
   return out;
 }
 
+/**
+ * 把批注 store 收成跨界用的形状：正文加署名信息。
+ *
+ * 部件的原始 XML 与 `w15:commentEx` 那类扩展不跨界；`isUnmodeled` 的部件由写侧整段透传，
+ * 所以这里的条目就算侧栏改过也不会覆盖部件，与脚注那侧同一个口径。
+ *
+ * @param store `toProseMirror()` 带回来的批注条目。
+ * @returns 按部件里条目顺序排的正文与元信息；没有批注部件时是空数组。
+ */
+function commentBodiesOf(store: CommentStore): CommentBody[] {
+  return store.entries.map((entry) => ({
+    id: entry.id,
+    doc: entry.pm,
+    author: entry.author,
+    initials: entry.initials,
+    date: entry.date,
+  }));
+}
+
 async function saveDocx(
   filePath: string,
   pmDoc: PMDoc,
@@ -286,9 +321,11 @@ async function saveDocx(
     if (hf.link) docx.setDocStyle({ link: hf.link });
     for (const kind of FOOTNOTE_KINDS) {
       const bodies = hf.footnotes?.[kind];
-      if (bodies)
-        docx.setFootnoteBodies(kind, bodies);
+      if (bodies) docx.setFootnoteBodies(kind, bodies);
     }
+    // 批注正文必须在 replaceProseMirror 之前收下：写部件时按正文里的锚点对齐条目，
+    // 先换正文就会把这次保存当成"锚点都没了"，把侧栏刚写好的条目一起删掉。
+    if (hf.comments?.length) docx.setCommentBodies(hf.comments);
     // 样式表要先落地：正文里的 w:pStyle 引用的是 styles.xml 声明的 id，
     // 换了新 id 却还没写进样式表，Word 会当成未声明样式退回默认格式。
     if (hf.styles?.length) await docx.applyStyleEdits(hf.styles);

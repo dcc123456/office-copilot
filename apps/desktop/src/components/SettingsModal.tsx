@@ -137,6 +137,18 @@ export function SettingsModal({
             ))}
           </div>
 
+          <div className="settings-section-title">批注与修订 · 署名</div>
+          <div className="settings-hint">
+            新写的批注与修订会带上这个名字（OOXML 的 `w:author`）。留空则用"Office Copilot"。
+          </div>
+          <input
+            className="field-input"
+            type="text"
+            value={settings.authorName ?? ""}
+            placeholder="张三"
+            onChange={(e) => setSettings({ ...settings, authorName: e.target.value })}
+          />
+
           <div className="settings-section-title">模型</div>
           <div style={{ marginBottom: 16 }}>
             <div className="settings-hint">

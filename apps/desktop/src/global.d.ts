@@ -15,6 +15,8 @@ export interface AppSettings {
   providers: ProviderConfig[];
   defaultProviderId: string | null;
   proxy?: string;
+  /** 批注与修订的署名，写进 `w:author`；空着时 docx-io 用它的占位作者名。 */
+  authorName?: string;
 }
 
 interface OfficeCopilotAPI {
@@ -34,6 +36,8 @@ interface OfficeCopilotAPI {
     styleFormats?: unknown;
     /** 脚注与尾注的正文，按部件分组，结构见 docx-io 的 FootnoteBodies。 */
     footnotes?: unknown;
+    /** 批注部件里的正文与署名，结构见 docx-io 的 CommentBody[]。 */
+    comments?: unknown;
     warnings?: string[];
   }>;
   saveFile: (payload: {
@@ -47,6 +51,8 @@ interface OfficeCopilotAPI {
     styles?: unknown;
     /** 脚注窗格里改过的正文，结构见 docx-io 的 FootnoteBodies。 */
     footnotes?: unknown;
+    /** 批注侧栏里改过的正文与署名，结构见 docx-io 的 CommentBody[]。 */
+    comments?: unknown;
   }) => Promise<any>;
   saveFileAs: (payload: {
     doc: unknown;
@@ -57,6 +63,7 @@ interface OfficeCopilotAPI {
     link?: unknown;
     styles?: unknown;
     footnotes?: unknown;
+    comments?: unknown;
   }) => Promise<any>;
   readDocx: (filePath: string) => Promise<any>;
   pathForFile: (file: File) => string;

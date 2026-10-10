@@ -24,6 +24,11 @@ export interface AppSettings {
   defaultProviderId: string | null;
   /** Optional proxy URL for fetch. */
   proxy?: string;
+  /**
+   * 批注与修订的署名（写进 `w:author`）。没填时 docx-io 用它的占位作者名，
+   * 与 Word 在用户没设置用户名时留下的名字同一个角色。
+   */
+  authorName?: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {

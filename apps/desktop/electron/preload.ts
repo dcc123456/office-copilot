@@ -27,6 +27,8 @@ interface OpenResult {
   styleFormats?: unknown;
   /** 脚注与尾注的正文，按部件分组，见 @office-copilot/docx-io 的 FootnoteBodies。 */
   footnotes?: unknown;
+  /** 批注部件里的正文与署名，见 @office-copilot/docx-io 的 CommentBody[]。 */
+  comments?: unknown;
   warnings?: string[];
   message?: string;
 }
@@ -49,6 +51,8 @@ interface SavePayload {
   styles?: unknown;
   /** 脚注窗格里改过的正文，见 @office-copilot/docx-io 的 FootnoteBodies。 */
   footnotes?: unknown;
+  /** 批注侧栏里改过的正文与署名，见 @office-copilot/docx-io 的 CommentBody[]。 */
+  comments?: unknown;
 }
 
 interface StylePreview {
