@@ -257,6 +257,54 @@ describe("段落对话框补齐的字段（真实 schema）", () => {
     ]) {
       expect(p.attrs[key]).toBeNull();
     }
+    // styleId 反过来必须是"缺失"：null 在 docx-io 里是"用户清了样式"，
+    // 新建段落若默认成 null，导出就会连源文档带着的引用一起删。
+    expect(p.attrs.styleId).toBeUndefined();
+  });
+});
+
+describe("具名样式引用 styleId（真实 schema）", () => {
+  it("套用 / 清除 / 没建模过三种状态都能活过 doc JSON 往返", () => {
+    const applied = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: { styleId: "af0" },
+      content: [text("标题段")],
+    })!;
+    expect(applied.attrs.styleId).toBe("af0");
+    expect(JSON.parse(JSON.stringify(applied.toJSON())).attrs.styleId).toBe("af0");
+
+    const cleared = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: { styleId: null },
+      content: [text("原为标题段")],
+    })!;
+    // null 必须真的留在 JSON 里：丢了它，"清掉样式"会被读成"没建模过"而把引用又写回去。
+    expect(JSON.stringify(cleared.toJSON())).toContain('"styleId":null');
+
+    const untouched = schema.nodeFromJSON({ type: "paragraph", content: [text("普通段落")] })!;
+    expect(untouched.attrs.styleId).toBeUndefined();
+  });
+
+  it("套样式只补 styleId，段里已有的缩进、分页开关与红字都不受牵连", () => {
+    const editor = harness([
+      {
+        type: "paragraph",
+        attrs: { indentRight: 21, keepWithNext: true },
+        content: [text("正文 "), text("红字", style({ color: "#ff0000" }))],
+      },
+    ]);
+    const p = editor.state.doc.firstChild!;
+    editor.view.dispatch(
+      editor.state.tr.setNodeMarkup(0, undefined, { ...p.attrs, styleId: "af0" }),
+    );
+    const after = editor.state.doc.firstChild!;
+    expect(after.attrs.styleId).toBe("af0");
+    expect(after.attrs.indentRight).toBe(21);
+    expect(after.attrs.keepWithNext).toBe(true);
+    expect(charRuns(editor.state.doc).map((r) => [r.text, r.attrs.color])).toEqual([
+      ["正文 ", undefined],
+      ["红字", "#ff0000"],
+    ]);
   });
 });
 

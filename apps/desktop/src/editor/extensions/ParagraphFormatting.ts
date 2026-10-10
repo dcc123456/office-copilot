@@ -8,6 +8,7 @@ import { Extension, type CommandProps } from "@tiptap/core";
  *   - indentFirst (first-line indent in points; negative = hanging)
  *   - keepWithNext / keepLines / widowControl / snapToGrid (Word 的分页开关)
  *   - outlineLevel (raw `w:outlineLvl`，0–8 = 一级～八级，9 = 正文文本)
+ *   - styleId (段落套的具名样式 id，即 `<w:pStyle>` 的原值)
  *
  * These are surfaced to the user via ParagraphPopover and round-tripped
  * by docx-io: the OOXML converter emits <w:spacing w:before/after=...
@@ -30,6 +31,8 @@ interface ParagraphFormatAttrs {
   widowControl?: boolean;
   snapToGrid?: boolean;
   outlineLevel?: number;
+  /** null = 用户显式清掉了样式；缺失 = 没套用也没清除，导出沿用源文档写法。 */
+  styleId?: string | null;
 }
 
 declare module "@tiptap/core" {
@@ -179,6 +182,23 @@ export const ParagraphFormatting = Extension.create({
               typeof attrs.outlineLevel === "number"
                 ? { "data-outline-level": String(attrs.outlineLevel) }
                 : {},
+          },
+          styleId: {
+            // 默认只能是 undefined，不能像上面几项那样写 null：docx-io 里 null 表示
+            // "用户清掉了样式"，拿它当默认值会把导入文档每个段落的 w:pStyle 都删掉。
+            default: undefined,
+            parseHTML: (el) => {
+              const raw = (el as HTMLElement).getAttribute("data-style-id");
+              // 属性不在 = 没建模过；空串 = 用户显式清除。
+              if (raw === null) return undefined;
+              return raw === "" ? null : raw;
+            },
+            // 只留 data-* 供 docx-io 读回，不产生任何视觉效果：样式定义的字体、字号、
+            // 缩进要等样式窗格按 styles.xml 解析后才落到段落属性上。
+            renderHTML: (attrs) =>
+              attrs.styleId === undefined
+                ? {}
+                : { "data-style-id": String(attrs.styleId ?? "") },
           },
         },
       },
