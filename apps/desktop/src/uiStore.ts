@@ -35,7 +35,7 @@ interface UiState extends UiPrefs {
   setAiWidth: (w: number) => void;
   setZoom: (z: number) => void;
   bumpCommand: (id: string) => void;
-  setLastTemplate: (id: string) => void;
+  setLastTemplate: (id?: string) => void;
 }
 
 export function applyTheme(t: ThemeId) {

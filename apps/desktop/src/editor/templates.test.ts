@@ -5,7 +5,12 @@ import {
   ptToCssLetterSpacing,
 } from "@office-copilot/docx-io";
 import { planEdit, revert, type Block } from "../ai/docEdit.js";
-import { templateProposal } from "./formatDocument.js";
+import type { ModificationRecord } from "../ai/agent.js";
+import {
+  templateProposal,
+  templateRunPlan,
+  type DocLevelState,
+} from "./formatDocument.js";
 import {
   TEMPLATES,
   completeRoles,
@@ -329,5 +334,84 @@ describe("模板色的 DOM 往返", () => {
       );
       expect(templateProposal(t, asDomRead).ops, `${t.id}: 往返后二次应用应为空`).toEqual([]);
     }
+  });
+});
+
+describe("templateRunPlan", () => {
+  /** 一条修改历史，只填一键还原关心的字段。 */
+  function logRecord(
+    id: string,
+    ts: number,
+    extra: Partial<ModificationRecord> = {},
+  ): ModificationRecord {
+    return {
+      id,
+      ts,
+      label: `美化排版 · ${id}`,
+      summary: id,
+      ops: [],
+      inverses: [],
+      before: [],
+      after: [],
+      undone: false,
+      ...extra,
+    };
+  }
+
+  const snapshotOf = (pageWidth: number): DocLevelState => ({
+    page: {
+      pageWidth,
+      pageHeight: 1123,
+      marginTop: 96,
+      marginRight: 96,
+      marginBottom: 96,
+      marginLeft: 96,
+      header: 48,
+      footer: 48,
+      contentWidth: pageWidth - 192,
+      contentHeight: 931,
+    },
+    header: null,
+    footer: null,
+    link: null,
+  });
+
+  it("只有 AI 记录时没有可还原的美化排版", () => {
+    const plan = templateRunPlan([logRecord("ai", 1), logRecord("ai2", 2, { undone: true })]);
+    expect(plan.runs).toEqual([]);
+    expect(plan.docLevel).toBeNull();
+  });
+
+  it("已撤销的美化排版不再还原", () => {
+    const kept = logRecord("gongwen", 2, { kind: "template" });
+    const plan = templateRunPlan([
+      kept,
+      logRecord("lunwen", 1, { kind: "template", undone: true }),
+    ]);
+    expect(plan.runs.map((record) => record.id)).toEqual(["gongwen"]);
+  });
+
+  it("按新→旧排队撤销，页面留底取最早那次套版", () => {
+    const early = logRecord("a", 100, { kind: "template", docLevel: snapshotOf(794) });
+    const late = logRecord("b", 200, { kind: "template", docLevel: snapshotOf(612) });
+    const plan = templateRunPlan([late, early]);
+    expect(plan.runs.map((record) => record.id)).toEqual(["b", "a"]);
+    expect(plan.docLevel?.page?.pageWidth).toBe(794);
+  });
+
+  it("最早那次没留底时退到次早的留底", () => {
+    const legacy = logRecord("a", 100, { kind: "template" });
+    const withSnap = logRecord("b", 200, { kind: "template", docLevel: snapshotOf(612) });
+    const plan = templateRunPlan([withSnap, legacy]);
+    expect(plan.docLevel?.page?.pageWidth).toBe(612);
+  });
+
+  it("全无留底时只还原正文样式", () => {
+    const plan = templateRunPlan([
+      logRecord("a", 100, { kind: "template" }),
+      logRecord("b", 200, { kind: "template" }),
+    ]);
+    expect(plan.runs).toHaveLength(2);
+    expect(plan.docLevel).toBeNull();
   });
 });

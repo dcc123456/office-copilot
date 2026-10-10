@@ -3,7 +3,7 @@ import { EDITOR_EXTENSIONS } from "./editor/extensions/editorExtensions.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileDown } from "lucide-react";
 import { EditorContent } from "@tiptap/react";
-import { Toolbar } from "./components/Toolbar.js";
+import { Toolbar, type ToolbarAction } from "./components/Toolbar.js";
 import { Outline } from "./components/Outline.js";
 import { PageSetupDialog, geometryFor } from "./components/PageSetupDialog.js";
 import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
@@ -30,8 +30,11 @@ import type { CommandContext } from "./commands/registry.js";
 import { useUiStore } from "./uiStore.js";
 import {
   documentTitle,
+  listTemplateRuns,
+  revertTemplateRuns,
   runTemplate,
   runTypography,
+  type DocLevelState,
 } from "./editor/formatDocument.js";
 import { buildFooterDoc, buildHeaderDoc } from "./editor/templateChrome.js";
 import { mmToPx, type DocTemplate } from "./editor/templates.js";
@@ -95,6 +98,19 @@ export function App() {
   // The 美化排版 template's hyperlink colours, in the same document-level slot
   // as 页面设置: renderer through these two variables, saved into run rPr.
   const [linkStyle, setLinkStyle] = useState<LinkStyle | null>(null);
+  // 「还原排版」按钮的可用态：本文档是否还留有未撤销的美化排版记录。
+  const [canRevert, setCanRevert] = useState(false);
+
+  /** 重读修改历史，刷新「还原排版」可用态。docKey 为文件路径或未命名文档名。 */
+  const refreshCanRevert = useCallback(async (docKey: string) => {
+    const plan = await listTemplateRuns(docKey);
+    setCanRevert(plan.runs.length > 0);
+  }, []);
+
+  // 打开/另存/新建都会换 docKey，历史记录跟着文档走，所以按 docKey 重查一次。
+  useEffect(() => {
+    void refreshCanRevert(filePath ?? "未命名文档");
+  }, [filePath, refreshCanRevert]);
 
   useEffect(() => {
     const open = () => setSettingsOpen(true);
@@ -314,16 +330,50 @@ export function App() {
     else if (!r.canceled && r.message) toast(r.message, "error");
   }, [editor, section, headerDoc, footerDoc, filePath, linkStyle]);
 
+  const lastTemplateId = useUiStore((s) => s.lastTemplateId);
+  const setLastTemplate = useUiStore((s) => s.setLastTemplate);
+
+  /** 一键还原：撤销本文档全部未撤销的美化排版，并把页面级设置写回套模板前的留底。 */
+  const revertBeautify = useCallback(() => {
+    if (!editor) return;
+    void (async () => {
+      const docKey = filePath ?? "未命名文档";
+      const plan = await listTemplateRuns(docKey);
+      if (!plan.runs.length) {
+        setCanRevert(false);
+        toast("没有可还原的美化排版记录。");
+        return;
+      }
+      const ok = await confirmDialog({
+        title: "还原排版",
+        message: `将撤销 ${plan.runs.length} 次美化排版对正文的改动${
+          plan.docLevel ? "，并恢复套模板前的页边距、页眉页脚与超链接配色" : ""
+        }。`,
+        okLabel: "还原",
+        cancelLabel: "取消",
+      });
+      if (!ok) return;
+      const result = await revertTemplateRuns(editor, docKey);
+      const restored = result.docLevel;
+      if (restored) {
+        setSection(restored.page as never);
+        setHeaderDoc(restored.header as never);
+        setFooterDoc(restored.footer as never);
+        setLinkStyle(restored.link);
+      }
+      setLastTemplate(undefined);
+      setDirty(true);
+      const parts: string[] = [`已撤销 ${result.reverted} 次美化排版`];
+      parts.push(restored ? "页面设置已复原" : "页边距/页眉页脚未留底，保持现状");
+      if (result.failed.length)
+        parts.push(`${result.failed.length} 处保留现状（${result.failed[0]}）`);
+      toast(parts.join("；") + "。", result.reverted ? "success" : "error");
+      void refreshCanRevert(docKey);
+    })();
+  }, [editor, filePath, setLastTemplate, refreshCanRevert]);
+
   const handleToolbarAction = useCallback(
-    (action:
-      | "new"
-      | "open"
-      | "save"
-      | "save-as"
-      | "print"
-      | "find-replace"
-      | "page-setup"
-      | "beautify") => {
+    (action: ToolbarAction) => {
       switch (action) {
         case "new":
           handleNew();
@@ -349,9 +399,12 @@ export function App() {
         case "beautify":
           setTemplateOpen(true);
           break;
+        case "revert-beautify":
+          revertBeautify();
+          break;
       }
     },
-    [handleNew, handleOpen, handleSave, handleSaveAs, handlePrint],
+    [handleNew, handleOpen, handleSave, handleSaveAs, handlePrint, revertBeautify],
   );
 
   const runFormatDocument = useCallback(() => {
@@ -367,15 +420,20 @@ export function App() {
     });
   }, [editor, filePath]);
 
-  const lastTemplateId = useUiStore((s) => s.lastTemplateId);
-  const setLastTemplate = useUiStore((s) => s.setLastTemplate);
-
   const applyTemplate = useCallback(
     (t: DocTemplate) => {
       if (!editor) return;
       setTemplateOpen(false);
       void (async () => {
-        const r = await runTemplate(t, editor, filePath ?? "未命名文档");
+        const docKey = filePath ?? "未命名文档";
+        // 页面级设置随后会被模板覆盖，先把当前值留底进这条历史记录。
+        const docLevel: DocLevelState = {
+          page: section,
+          header: headerDoc,
+          footer: footerDoc,
+          link: linkStyle,
+        };
+        const r = await runTemplate(t, editor, docKey, docLevel);
         const alreadyTyped = !r.ok && Boolean(r.message?.includes("无需"));
         if (!r.ok && !alreadyTyped) {
           toast(r.message ?? "美化排版失败。", "error");
@@ -447,9 +505,19 @@ export function App() {
           `${parts.join("；")}。正文改动可在修改历史里逐条撤销。`,
           "success",
         );
+        void refreshCanRevert(docKey);
       })();
     },
-    [editor, filePath, section, headerDoc, footerDoc, linkStyle, setLastTemplate],
+    [
+      editor,
+      filePath,
+      section,
+      headerDoc,
+      footerDoc,
+      linkStyle,
+      setLastTemplate,
+      refreshCanRevert,
+    ],
   );
 
   useEffect(() => {
@@ -655,6 +723,7 @@ export function App() {
               onInsertImage={insertImage}
               onInsertTable={insertTable}
               onAction={handleToolbarAction}
+              canRevert={canRevert}
               dirty={dirty}
             />
           ) : null}
@@ -729,7 +798,11 @@ export function App() {
         onClose={() => setHistoryOpen(false)}
         editor={editor}
         docKey={filePath ?? "未命名文档"}
-        onChanged={() => setDirty(true)}
+        onChanged={() => {
+          setDirty(true);
+          // 历史面板里逐条撤销后，可还原的美化排版可能已经清零。
+          void refreshCanRevert(filePath ?? "未命名文档");
+        }}
       />
       {dropActive && (
         <div className="drop-overlay">

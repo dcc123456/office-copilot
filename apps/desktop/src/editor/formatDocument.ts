@@ -1,8 +1,15 @@
 import type { Editor } from "@tiptap/react";
+import type { LinkStyle, SectionGeometry } from "@office-copilot/docx-io";
 import { blocksOf } from "../editor/docBlocks.js";
 import type { Block, Proposal, StylePatch } from "../ai/docEdit.js";
 import { styleUnchanged } from "../ai/docEdit.js";
-import { commitOps, simulateProposal, type CommitResult } from "../ai/agent.js";
+import {
+  commitOps,
+  simulateProposal,
+  undoModification,
+  type CommitResult,
+  type ModificationRecord,
+} from "../ai/agent.js";
 import { completeRoles, ROLE_LABELS, type DocTemplate, type TemplateRole } from "./templates.js";
 
 /**
@@ -198,10 +205,16 @@ export function templateProposal(t: DocTemplate, blocks: readonly Block[]): Prop
   return { summary: summary ? `统一格式：${summary}` : "格式已符合规范", ops };
 }
 
+/**
+ * 套用一套模板：正文样式作为一次可撤销的改动落进修改历史。
+ * 入参 docLevel 是 App 此刻的页边距/页眉页脚/链接配色，随记录留底供一键还原写回。
+ * 返回 touched（改动的段数）与 skipped（被规则挡下的段）；已合规时 ok=false 且带原因。
+ */
 export async function runTemplate(
   t: DocTemplate,
   editor: Editor,
   docKey: string,
+  docLevel?: DocLevelState,
 ): Promise<CommitResult & { touched: number; skipped: string[] }> {
   const label = `美化排版 · ${t.label}`;
   const proposal = templateProposal(t, blocksOf(editor.state.doc));
@@ -220,6 +233,92 @@ export async function runTemplate(
     label,
     summary: `${label}（${proposal.summary}）`,
     docKey,
+    kind: "template",
+    ...(docLevel ? { docLevel } : null),
   });
   return { ...r, touched: plan.ops!.length, skipped: plan.skipped };
+}
+
+/**
+ * 套模板前的文档级设置留底：页边距（mm 几何）、页眉页脚（PM JSON）、超链接配色。
+ * 它们不是段落 op，撤销 op 撤不掉，只能靠这份快照写回 App state。
+ */
+export type DocLevelState = {
+  page: SectionGeometry | null;
+  header: Record<string, unknown> | null;
+  footer: Record<string, unknown> | null;
+  link: LinkStyle | null;
+};
+
+/** templateRunPlan 的结果：撤销队列 + 需要写回的页面留底。 */
+export interface TemplateRunPlan {
+  /** 可还原的美化排版记录，按时间新→旧，即必须的撤销顺序。 */
+  runs: ModificationRecord[];
+  /** 其中最旧一条带留底的记录；全无留底时为 null，此时只能还原正文样式。 */
+  docLevel: DocLevelState | null;
+}
+
+const NO_RUNS: TemplateRunPlan = { runs: [], docLevel: null };
+
+/**
+ * 从修改历史全量里挑出可还原的美化排版记录。
+ * 入参 records 不保证顺序（modlog 自己排）；返回 runs 按 ts 新→旧，
+ * docLevel 取最旧那次套用前的页面设置，于是一次点击回到最初而不是上一个模板。
+ */
+export function templateRunPlan(
+  records: readonly ModificationRecord[],
+): TemplateRunPlan {
+  const revertible = records.filter(
+    (record) => record.kind === "template" && !record.undone,
+  );
+  if (!revertible.length) return NO_RUNS;
+  const runs = [...revertible].sort((a, b) => b.ts - a.ts);
+  // 留底从最早那次套版里取（新→旧列表的末端），一次点击才回到最初的页面。
+  const oldest = [...runs].reverse().find((record) => record.docLevel);
+  const snapshot = oldest?.docLevel as DocLevelState | undefined;
+  return { runs, docLevel: snapshot ?? null };
+}
+
+export interface RevertResult {
+  /** 成功撤销的美化次数 */
+  reverted: number;
+  /** 用户后来手工改过、因此回不到套版前的段落说明 */
+  failed: string[];
+  docLevel: DocLevelState | null;
+}
+
+/**
+ * 读本文档的修改历史，挑出可还原的美化排版记录。
+ * 入参 docKey 为文件路径（未命名文档用 "未命名文档"）；返回见 templateRunPlan。
+ */
+export async function listTemplateRuns(docKey: string): Promise<TemplateRunPlan> {
+  if (!window.officeCopilot) return NO_RUNS;
+  const records = (await window.officeCopilot.listModifications(
+    docKey,
+  )) as ModificationRecord[];
+  return templateRunPlan(Array.isArray(records) ? records : []);
+}
+
+/**
+ * 一键还原：按新→旧撤销本文档全部美化排版记录，用户后来的手工编辑不受牵连。
+ * 入参为编辑器与 docKey；返回撤销了几次、哪些段落回不去、以及套模板前的页面级
+ * 设置（页边距/页眉页脚/链接配色由调用方写回 App state，它们不是文档 op）。
+ */
+export async function revertTemplateRuns(
+  editor: Editor,
+  docKey: string,
+): Promise<RevertResult> {
+  const plan = await listTemplateRuns(docKey);
+  const failed: string[] = [];
+  let reverted = 0;
+  for (const record of plan.runs) {
+    const single = await undoModification(editor, record, docKey);
+    if (!single.ok) {
+      failed.push(single.message ?? record.summary);
+      continue;
+    }
+    reverted += 1;
+    failed.push(...single.failed);
+  }
+  return { reverted, failed, docLevel: plan.docLevel };
 }

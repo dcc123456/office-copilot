@@ -31,6 +31,7 @@ import {
   Settings2,
   Pilcrow,
   Wand2,
+  RotateCcw,
 } from "lucide-react";
 
 import { ParagraphPopover } from "./ParagraphPopover.js";
@@ -78,6 +79,8 @@ interface ToolbarProps {
   onInsertTable: () => void;
   onAction: (action: ToolbarAction) => void;
   dirty?: boolean;
+  /** 本文档还有可还原的美化排版记录时，「还原排版」才可点。 */
+  canRevert?: boolean;
 }
 
 export type ToolbarAction =
@@ -88,7 +91,8 @@ export type ToolbarAction =
   | "print"
   | "find-replace"
   | "page-setup"
-  | "beautify";
+  | "beautify"
+  | "revert-beautify";
 
 function Group({ children }: { children: React.ReactNode }) {
   return <div className="tb-set">{children}</div>;
@@ -129,6 +133,7 @@ export function Toolbar({
   onInsertTable,
   onAction,
   dirty,
+  canRevert,
 }: ToolbarProps) {
   const setLink = async () => {
     const previousUrl = editor.getAttributes("link").href as string | undefined;
@@ -196,6 +201,13 @@ export function Toolbar({
         <Group>
           <Btn title="美化排版（模板）" onClick={() => onAction("beautify")}>
             <Wand2 size={16} />
+          </Btn>
+          <Btn
+            title={canRevert ? "还原排版（撤销全部美化排版，含页边距/页眉页脚）" : "没有可还原的美化排版记录"}
+            disabled={!canRevert}
+            onClick={() => onAction("revert-beautify")}
+          >
+            <RotateCcw size={16} />
           </Btn>
           <Btn title="页面设置" onClick={() => onAction("page-setup")}>
             <Settings2 size={16} />

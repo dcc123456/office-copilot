@@ -32,6 +32,10 @@ export interface ModificationRecord {
   after: Block[];
   undone: boolean;
   undoneAt?: number;
+  /** 美化排版记录打标，一键还原据此一次找齐。 */
+  kind?: "template";
+  /** 套模板前的页边距/页眉页脚/超链接配色；它们不走段落 op，只能靠这份留底复原。 */
+  docLevel?: Record<string, unknown>;
 }
 
 export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用户的文档。你会看到文档大纲，每行格式为：
@@ -153,6 +157,8 @@ export async function commitOps(
     label: string;
     summary: string;
     docKey: string;
+    kind?: "template";
+    docLevel?: Record<string, unknown>;
   },
 ): Promise<CommitResult> {
   if (!opts.ops.length) return { ok: false, message: "没有需要写入的修改。" };
@@ -169,6 +175,8 @@ export async function commitOps(
     before: opts.before,
     after: exec.after,
     undone: false,
+    ...(opts.kind ? { kind: opts.kind } : null),
+    ...(opts.docLevel ? { docLevel: opts.docLevel } : null),
   };
   const saved = await window.officeCopilot.appendModification({ docKey: opts.docKey, record });
   if (!saved.ok) {
