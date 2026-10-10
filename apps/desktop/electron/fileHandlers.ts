@@ -5,6 +5,7 @@ import {
   DocxFile,
   type LinkStyle,
   type PaneStyle,
+  type ResolvedStyle,
   type SectionGeometry,
 } from "@office-copilot/docx-io";
 import type { PMDoc } from "@office-copilot/docx-io/src/pm-schema.js";
@@ -45,6 +46,11 @@ export type OpenResult =
        * 空数组 = 这份文档没有具名样式（新建文档就是这种），不是读取失败。
        */
       styles: PaneStyle[];
+      /**
+       * 样式链按 Word 的优先级合并后的可见格式，渲染层据此注入文档作用域的样式表。
+       * 空数组 = 这份文档没有 styles.xml（新建文档就是这种），渲染层因此什么都不加。
+       */
+      styleFormats: ResolvedStyle[];
     }
   | { ok: false; canceled: true }
   | { ok: false; message: string };
@@ -74,6 +80,7 @@ export function registerFileHandlers(
       warnings: [],
       // 新建文档的空白模板里没有 styles.xml，样式窗格因此是空的。
       styles: [],
+      styleFormats: [],
     };
   });
 
@@ -211,7 +218,8 @@ async function openDocx(filePath: string): Promise<OpenResult> {
   try {
     const bytes = await fs.readFile(filePath);
     const docx = await DocxFile.fromBytes(bytes);
-    const { doc, warnings, headers, section, styles } = await docx.toProseMirror();
+    const { doc, warnings, headers, section, styles, styleFormats } =
+      await docx.toProseMirror();
     return {
       ok: true,
       path: filePath,
@@ -221,6 +229,7 @@ async function openDocx(filePath: string): Promise<OpenResult> {
       footer: headers?.entries.footer?.pm ?? null,
       section,
       styles,
+      styleFormats,
     };
   } catch (err) {
     return {

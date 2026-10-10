@@ -10,8 +10,10 @@ import { TemplatePickerDialog } from "./components/TemplatePickerDialog.js";
 import type {
   LinkStyle,
   PaneStyle,
+  ResolvedStyle,
   SectionGeometry,
 } from "@office-copilot/docx-io";
+import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { AIPanel } from "./ai/AIPanel.js";
 import { StatusBar } from "./components/StatusBar.js";
@@ -91,6 +93,12 @@ export function App() {
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
   // 样式窗格的数据随文档走：打开 / 新建时从主进程带回来的 styles.xml 清单换一次。
   const [docStyles, setDocStyles] = useState<PaneStyle[]>([]);
+  // 同一份 styles.xml 的另一面：每条样式合并出来的可见格式，拼成文档作用域的样式表。
+  const [docStyleFormats, setDocStyleFormats] = useState<ResolvedStyle[]>([]);
+  const docStyleCss = useMemo(
+    () => docStyleSheet(docStyleFormats),
+    [docStyleFormats],
+  );
   const [pageSetupOpen, setPageSetupOpen] = useState(false);
   const [templateOpen, setTemplateOpen] = useState(false);
   const [aiCollapsed, setAiCollapsed] = useState(false);
@@ -172,6 +180,7 @@ export function App() {
     setSection(null);
     setLinkStyle(null);
     setDocStyles([]);
+    setDocStyleFormats([]);
     setFilePath(null);
     setDirty(false);
     setStarted(true);
@@ -190,6 +199,7 @@ export function App() {
     setSection((r.section as never) ?? null);
     setLinkStyle(null);
     setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
+    setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
     setFilePath(r.path ?? null);
     setDirty(false);
     setStarted(true);
@@ -220,6 +230,7 @@ export function App() {
       setSection((r.section as never) ?? null);
       setLinkStyle(null);
       setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
+      setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
       setFilePath(r.path ?? p);
       setDirty(false);
       setStarted(true);
@@ -736,6 +747,8 @@ export function App() {
           />
         )}
         <div className="editor-area">
+          {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
+          {docStyleCss ? <style>{docStyleCss}</style> : null}
           {started ? (
             <Toolbar
               editor={editor}

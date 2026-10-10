@@ -30,6 +30,8 @@ interface OfficeCopilotAPI {
     section?: unknown;
     /** styles.xml 声明的段落样式清单，结构见 docx-io 的 PaneStyle。 */
     styles?: unknown;
+    /** 样式链合并后的可见格式，结构见 docx-io 的 ResolvedStyle。 */
+    styleFormats?: unknown;
     warnings?: string[];
   }>;
   saveFile: (payload: {

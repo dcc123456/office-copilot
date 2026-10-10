@@ -10,6 +10,27 @@ interface TextStyleAttrs {
   backgroundColor?: string | null;
 }
 
+/**
+ * 字符格式 → CSS 声明。
+ *
+ * @param attrs 编辑器存的字符格式：字号与字距是 CSS px 字符串，颜色是 #rrggbb，
+ *   null / undefined 都表示"没设过"。
+ * @returns 按 OOXML 语义排好的声明（不含分号）；标记渲染与文档作用域样式表共用这一份映射，
+ *   于是"西文字体在前"这类约定不会在两处各写一边（AGENTS §3.2）。
+ */
+export function runStyleDeclarations(attrs: TextStyleAttrs): string[] {
+  // 西文字体排在前：CSS 的字体栈是按字符回退的，拉丁字母取前者、汉字取后者，
+  // 正是 OOXML 的 ascii/eastAsia 分工。
+  const stack = [attrs.fontFamilyWest, attrs.fontFamily].filter(Boolean).join(", ");
+  return [
+    stack ? `font-family: ${stack}` : null,
+    attrs.fontSize ? `font-size: ${attrs.fontSize}` : null,
+    attrs.letterSpacing ? `letter-spacing: ${attrs.letterSpacing}` : null,
+    attrs.color ? `color: ${attrs.color}` : null,
+    attrs.backgroundColor ? `background-color: ${attrs.backgroundColor}` : null,
+  ].filter((declaration): declaration is string => declaration !== null);
+}
+
 const TEXT_STYLE_DATA_ATTRS = [
   "data-font-family",
   "data-font-family-west",
@@ -118,18 +139,7 @@ export const TextStyle = Mark.create({
     // stored attrs, which printing reads through getHTML().
     const attrs = ((mark as { attrs?: TextStyleAttrs } | undefined)?.attrs ??
       (HTMLAttributes as TextStyleAttrs)) as TextStyleAttrs;
-    // 西文字体排在前：CSS 的字体栈是按字符回退的，拉丁字母取前者、汉字取后者，
-    // 正是 OOXML 的 ascii/eastAsia 分工。
-    const stack = [attrs.fontFamilyWest, attrs.fontFamily].filter(Boolean).join(", ");
-    const style = [
-      stack ? `font-family: ${stack}` : null,
-      attrs.fontSize ? `font-size: ${attrs.fontSize}` : null,
-      attrs.letterSpacing ? `letter-spacing: ${attrs.letterSpacing}` : null,
-      attrs.color ? `color: ${attrs.color}` : null,
-      attrs.backgroundColor ? `background-color: ${attrs.backgroundColor}` : null,
-    ]
-      .filter(Boolean)
-      .join("; ");
+    const style = runStyleDeclarations(attrs).join("; ");
     return [
       "span",
       mergeAttributes(

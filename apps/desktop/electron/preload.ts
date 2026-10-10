@@ -23,6 +23,8 @@ interface OpenResult {
   section?: unknown;
   /** styles.xml 里声明的段落样式清单，见 @office-copilot/docx-io 的 PaneStyle。 */
   styles?: unknown;
+  /** 样式链合并后的可见格式，见 @office-copilot/docx-io 的 ResolvedStyle。 */
+  styleFormats?: unknown;
   warnings?: string[];
   message?: string;
 }

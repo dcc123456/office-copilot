@@ -227,8 +227,8 @@ export const ParagraphFormatting = Extension.create({
               if (raw === null) return undefined;
               return raw === "" ? null : raw;
             },
-            // 只留 data-* 供 docx-io 读回，不产生任何视觉效果：样式定义的字体、字号、
-            // 缩进要等样式窗格按 styles.xml 解析后才落到段落属性上。
+            // 只留 data-* 供 docx-io 读回：样式定义本身由 `docStyleSheet` 注入成
+            // 文档作用域的样式表，行内 style（直接格式）因此继续在 Word 的优先级位置上赢。
             renderHTML: (attrs) =>
               attrs.styleId === undefined
                 ? {}
@@ -272,7 +272,8 @@ export const ParagraphFormatting = Extension.create({
   },
 });
 
-function ptToPx(pt: number): number {
+/** pt → CSS px（96 DPI）。编辑器里 pt 与倍数是段落属性的单位，只有显示成 CSS 时换算。 */
+export function ptToPx(pt: number): number {
   // 1pt = 1/72 inch; at 96 DPI that's 96/72 = 1.3333 px.
   return Math.round(pt * (96 / 72) * 10) / 10;
 }
@@ -317,7 +318,7 @@ function switchHtml(
  * number is already a valid CSS multiplier. The attr keeps its original form
  * through data-line-height so re-applying a style stays a no-op.
  */
-function lineHeightCss(value: string): string {
+export function lineHeightCss(value: string): string {
   const atLeast = /^atLeast:(\d+(?:\.\d+)?)$/.exec(value);
   if (atLeast?.[1]) return `max(${ptToPx(Number(atLeast[1]))}px, 1.2em)`;
   const m = /^pt:(\d+(?:\.\d+)?)$/.exec(value);
