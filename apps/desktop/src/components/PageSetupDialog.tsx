@@ -1,5 +1,19 @@
-import { useEffect, useState } from "react";
-import type { SectionColumns, SectionGeometry } from "@office-copilot/docx-io";
+import { Fragment, useEffect, useState } from "react";
+import type {
+  PageBorderSide,
+  SectionColumns,
+  SectionGeometry,
+  SectionLineNumbers,
+  SectionPageBorders,
+} from "@office-copilot/docx-io";
+import {
+  BORDER_STYLE_OPTIONS,
+  defaultBorderSide,
+  emptyPageBorders,
+  hasAnyBorderSide,
+  type BorderSideKey,
+} from "../editor/pageBorders.js";
+import "../styles/pageBorders.css";
 
 /**
  * Page Setup dialog (Word: 文件 → 页面设置). Lets the user change:
@@ -7,6 +21,7 @@ import type { SectionColumns, SectionGeometry } from "@office-copilot/docx-io";
  *   - orientation (portrait / landscape) — auto-swaps W/H
  *   - margins (top/right/bottom/left) and header/footer distances
  *   - columns (栏数 + 栏间距)
+ *   - page borders (四条边的线型 / 线宽 / 间距 / 颜色) and line numbering
  *
  * On save we produce a complete SectionGeometry object in CSS px at
  * 96 DPI. The app applies it immediately by replacing the section
@@ -14,18 +29,31 @@ import type { SectionColumns, SectionGeometry } from "@office-copilot/docx-io";
  *
  * Values are shown in centimetres (Word on Chinese-locale systems uses
  * cm) for familiarity; the conversion is cm -> px via (cm * 96 / 2.54).
+ * 边框的线宽与间距保持 pt —— 那是 `w:sz`/`w:space` 自己的单位（§17.3.4），
+ * 不再换算成 cm。
  */
 
 /** Word 的栏数上限（页面设置对话框里「栏数」输入框能填到的最大数）。 */
 const MAX_COLUMNS = 13;
 /** 文档没设过分栏时对话框显示的栏间距，Word 的新建多栏默认值 1.27 cm。 */
 const DEFAULT_COL_GAP_CM = 1.27;
+/** 行号没设过时对话框显示的"距正文"，Word 的 0.25 英寸。 */
+const DEFAULT_LN_DISTANCE_CM = 0.635;
+/** 四条边的中文名，顺序与 `w:pgBorders` 写子元素的顺序一致。 */
+const BORDER_SIDES: readonly { key: BorderSideKey; label: string }[] = [
+  { key: "top", label: "上" },
+  { key: "left", label: "左" },
+  { key: "bottom", label: "下" },
+  { key: "right", label: "右" },
+];
 
 /**
  * Page geometry in CSS px at 96 DPI. Shared with 美化排版 so a template's
  * margins produce exactly the object the 页面设置 dialog would have.
  *
- * @param columns 分栏设置；不传就是"这份文档没设过分栏"，保存时不会写出 `w:cols`。
+ * @param extras 文档级设置里"这一层管不着"的那几项（分栏 / 页面边框 / 行号）。
+ *   传 undefined 的字段表示这次保存不碰它——docx-io 会原样保留文件里的元素
+ *   （AGENTS §2.7：模板只改页边距，不许顺手动用户的边框与行号）。
  */
 export function geometryFor(
   pageWidth: number,
@@ -33,7 +61,7 @@ export function geometryFor(
   margins: { top: number; right: number; bottom: number; left: number },
   header: number,
   footer: number,
-  columns?: SectionColumns,
+  extras?: Pick<SectionGeometry, "columns" | "pageBorders" | "lineNumbers">,
 ): SectionGeometry {
   return {
     pageWidth,
@@ -46,7 +74,9 @@ export function geometryFor(
     footer,
     contentWidth: pageWidth - margins.left - margins.right,
     contentHeight: pageHeight - margins.top - margins.bottom,
-    columns,
+    columns: extras?.columns,
+    pageBorders: extras?.pageBorders,
+    lineNumbers: extras?.lineNumbers,
   };
 }
 
@@ -70,6 +100,42 @@ export function columnsFor(
     gap: gapPx,
     equalWidth: !keepWidths,
     widths: keepWidths ? source!.widths : [],
+  };
+}
+
+/**
+ * 页面边框要写进节属性的值。
+ *
+ * @param edited 用户在对话框里动过边框没有。没动过就返回 `undefined`，
+ *   让 docx-io 保持文件里原样（包括我们没建模的 `w:display`、`w:shadow`）。
+ * @param draft 对话框当前的四条边。
+ * @returns `undefined` 不碰，`null` 删掉 `w:pgBorders`，否则这条边框的设置。
+ */
+export function pageBordersFor(
+  edited: boolean,
+  draft: SectionPageBorders,
+): SectionPageBorders | null | undefined {
+  if (!edited) return undefined;
+  return hasAnyBorderSide(draft) ? draft : null;
+}
+
+/**
+ * 行号要写进节属性的值。
+ *
+ * @param edited 用户在对话框里动过行号没有；语义同 `pageBordersFor`。
+ * @param form 对话框里的行号四个字段，`distancePx` 是 CSS px。
+ * @returns `undefined` 不碰，`null` 关掉行号（删 `w:lnNumType`），否则写这条元素。
+ */
+export function lineNumbersFor(
+  edited: boolean,
+  form: { enabled: boolean; countBy: number; start: number; distancePx: number },
+): SectionLineNumbers | null | undefined {
+  if (!edited) return undefined;
+  if (!form.enabled || form.countBy < 1) return null;
+  return {
+    countBy: Math.round(form.countBy),
+    distance: form.distancePx,
+    start: Math.max(1, Math.round(form.start)),
   };
 }
 
@@ -119,6 +185,13 @@ export function PageSetupDialog({
   const [colGapCm, setColGapCm] = useState(DEFAULT_COL_GAP_CM);
   // 文档原本的分栏，用来在"用户没碰栏数"时把不等宽的逐栏宽度原样带回。
   const [sourceColumns, setSourceColumns] = useState<SectionColumns | null>(null);
+  const [borders, setBorders] = useState<SectionPageBorders>(emptyPageBorders());
+  const [bordersEdited, setBordersEdited] = useState(false);
+  const [lnEnabled, setLnEnabled] = useState(false);
+  const [lnCountBy, setLnCountBy] = useState(1);
+  const [lnStart, setLnStart] = useState(1);
+  const [lnDistanceCm, setLnDistanceCm] = useState(DEFAULT_LN_DISTANCE_CM);
+  const [lnEdited, setLnEdited] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -154,6 +227,15 @@ export function PageSetupDialog({
     setColNum(g.columns?.count ?? 1);
     setColGapCm(g.columns ? pxToCm(g.columns.gap) : DEFAULT_COL_GAP_CM);
     setSourceColumns(g.columns ?? null);
+    // 边框与行号的"没碰过"状态用 edited 标记表示：只有用户真的改过才把值送进节属性，
+    // 否则交给 docx-io 原样保留文件里的元素（含我们没建模的 w:display / w:restart）。
+    setBordersEdited(false);
+    setLnEdited(false);
+    setBorders(g.pageBorders ? { ...g.pageBorders } : emptyPageBorders());
+    setLnEnabled((g.lineNumbers?.countBy ?? 0) > 0);
+    setLnCountBy(g.lineNumbers?.countBy ?? 1);
+    setLnStart(g.lineNumbers?.start ?? 1);
+    setLnDistanceCm(pxToCm(g.lineNumbers?.distance ?? cmToPx(DEFAULT_LN_DISTANCE_CM)));
   }, [open, section]);
 
   if (!open) return null;
@@ -186,6 +268,25 @@ export function PageSetupDialog({
     }
   };
 
+  /**
+   * 改一条边的一个字段。
+   *
+   * @param key 上/左/下/右之一。
+   * @param patch 要覆盖的字段（线型、线宽 pt、间距 pt 或颜色）。
+   */
+  const patchBorderSide = (
+    key: BorderSideKey,
+    patch: Partial<PageBorderSide>,
+  ) => {
+    setBordersEdited(true);
+    setBorders((prev) => {
+      // 文档原本没有这条边时，用户第一次动它就是"新建一条边框"，取 Word 的缺省值起步。
+      const base = prev[key] ?? defaultBorderSide();
+      const style = patch.style ?? base.style;
+      return { ...prev, [key]: style === "none" ? null : { ...base, ...patch } };
+    });
+  };
+
   const apply = () => {
     onApply(
       geometryFor(
@@ -199,7 +300,16 @@ export function PageSetupDialog({
         },
         cmToPx(hd),
         cmToPx(ft),
-        columnsFor(colNum, cmToPx(colGapCm), sourceColumns),
+        {
+          columns: columnsFor(colNum, cmToPx(colGapCm), sourceColumns),
+          pageBorders: pageBordersFor(bordersEdited, borders),
+          lineNumbers: lineNumbersFor(lnEdited, {
+            enabled: lnEnabled,
+            countBy: lnCountBy,
+            start: lnStart,
+            distancePx: cmToPx(lnDistanceCm),
+          }),
+        },
       ),
     );
     onClose();
@@ -367,6 +477,114 @@ export function PageSetupDialog({
                 value={colGapCm}
                 disabled={colNum < 2}
                 onChange={(e) => setColGapCm(Math.max(0, Number(e.target.value) || 0))}
+              />
+            </label>
+          </div>
+          <div className="ps-section-title">页面边框</div>
+          <div className="ps-border-grid">
+            <span />
+            <span>线型</span>
+            <span>线宽 (pt)</span>
+            <span>间距 (pt)</span>
+            <span>颜色</span>
+            {BORDER_SIDES.map(({ key, label }) => {
+              const side = borders[key];
+              return (
+                <Fragment key={key}>
+                  <span className="ps-border-name">{label}</span>
+                  <select
+                    value={side?.style ?? "none"}
+                    onChange={(e) => patchBorderSide(key, { style: e.target.value })}
+                  >
+                    {BORDER_STYLE_OPTIONS.map((o) => (
+                      <option key={o.val} value={o.val}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="0.25"
+                    step="0.25"
+                    value={side?.sizePt ?? 0.5}
+                    disabled={!side}
+                    onChange={(e) =>
+                      patchBorderSide(key, { sizePt: Math.max(0.25, Number(e.target.value) || 0.25) })
+                    }
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={side?.spacePt ?? 1}
+                    disabled={!side}
+                    onChange={(e) =>
+                      patchBorderSide(key, { spacePt: Math.max(0, Number(e.target.value) || 0) })
+                    }
+                  />
+                  <input
+                    type="color"
+                    value={side?.color ?? "#000000"}
+                    disabled={!side}
+                    onChange={(e) => patchBorderSide(key, { color: e.target.value })}
+                  />
+                </Fragment>
+              );
+            })}
+          </div>
+          <div className="ps-section-title">行号</div>
+          <div className="ps-grid">
+            <label>
+              启用行号
+              <input
+                type="checkbox"
+                checked={lnEnabled}
+                onChange={(e) => {
+                  setLnEdited(true);
+                  setLnEnabled(e.target.checked);
+                }}
+              />
+            </label>
+            <label>
+              每几行一个号
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={lnCountBy}
+                disabled={!lnEnabled}
+                onChange={(e) => {
+                  setLnEdited(true);
+                  setLnCountBy(Math.max(1, Math.round(Number(e.target.value) || 1)));
+                }}
+              />
+            </label>
+            <label>
+              起始编号
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={lnStart}
+                disabled={!lnEnabled}
+                onChange={(e) => {
+                  setLnEdited(true);
+                  setLnStart(Math.max(1, Math.round(Number(e.target.value) || 1)));
+                }}
+              />
+            </label>
+            <label>
+              距正文 (cm)
+              <input
+                type="number"
+                min="0"
+                step="0.05"
+                value={lnDistanceCm}
+                disabled={!lnEnabled}
+                onChange={(e) => {
+                  setLnEdited(true);
+                  setLnDistanceCm(Math.max(0, Number(e.target.value) || 0));
+                }}
               />
             </label>
           </div>

@@ -9,7 +9,8 @@
  * crisp PDFs without relying on our measurement.
  */
 
-import type { LinkStyle } from "@office-copilot/docx-io";
+import type { LinkStyle, SectionPageBorders } from "@office-copilot/docx-io";
+import { borderLinesFor, borderSideToCss } from "./pageBorders.js";
 
 export function buildPrintHtml(opts: {
   bodyHtml: string;
@@ -28,6 +29,11 @@ export function buildPrintHtml(opts: {
    * 和 Word 的单栏文档一致。
    */
   columns?: { count: number; gapPx: number } | null;
+  /**
+   * 页面边框（`w:pgBorders`）：四条边的线型/线宽/间距/颜色。null 或四条边都关时
+   * 纸上什么都不画，和 Word 一致。
+   */
+  pageBorders?: SectionPageBorders | null;
   link?: LinkStyle | null;
 }): string {
   const {
@@ -43,6 +49,7 @@ export function buildPrintHtml(opts: {
     headerPx,
     footerPx,
     columns,
+    pageBorders,
     link,
   } = opts;
 
@@ -57,6 +64,29 @@ export function buildPrintHtml(opts: {
       ? `column-count: ${columns.count}; column-gap: ${columns.gapPx}px; ` +
         `column-fill: auto; height: ${pageHeightPx - marginTopPx - marginBottomPx}px;`
       : "";
+
+  // 页面边框：每条边一个绝对定位的空盒子，靠 border-top / border-left 画出线来。
+  // 几何与线型换算都取自 pageBorders 那份共享实现，画布预览与纸上才会一模一样。
+  const px = (v: number) => Math.round(v * 100) / 100;
+  const borderHtml = pageBorders
+    ? borderLinesFor(pageBorders, {
+        pageWidth: pageWidthPx,
+        pageHeight: pageHeightPx,
+        marginTop: marginTopPx,
+        marginRight: marginRightPx,
+        marginBottom: marginBottomPx,
+        marginLeft: marginLeftPx,
+      })
+        .map((line) => {
+          const css = borderSideToCss(line.side);
+          const border = `${css.widthPx}px ${css.style} ${css.color}`;
+          const box = line.horizontal
+            ? `width: ${px(line.length)}px; border-top: ${border};`
+            : `height: ${px(line.length)}px; border-left: ${border};`;
+          return `<div class="pgb" style="left: ${px(line.x)}px; top: ${px(line.y)}px; ${box}"></div>`;
+        })
+        .join("")
+    : "";
 
   // Reuse the editor's stylesheet? We inline a minimal stylesheet that
   // makes the output look close to what the user sees.
@@ -77,6 +107,7 @@ export function buildPrintHtml(opts: {
       overflow: hidden;
     }
     .page:last-child { page-break-after: auto; }
+    .pgb { position: absolute; margin: 0; padding: 0; background: none; }
     .ph { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
            top: ${headerPx}px; font-size: 10px; color: #666; }
     .pf { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
@@ -113,6 +144,7 @@ export function buildPrintHtml(opts: {
     ${headerHtml ? `<div class="ph">${headerHtml}</div>` : ""}
     <div class="ProseMirror">${bodyHtml}</div>
     ${footerHtml ? `<div class="pf">${footerHtml}</div>` : ""}
+    ${borderHtml}
   </section>
 </body></html>`;
 }

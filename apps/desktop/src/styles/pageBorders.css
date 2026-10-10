@@ -1,0 +1,41 @@
+/* 页面边框（`w:pgBorders`）的画布预览：每条边一个零尺寸盒子，
+   线宽/线型/颜色由组件用 CSS 变量交进来（那是文档里的数据，不是本 app 的样式）。 */
+.oc-page-border {
+  position: absolute;
+  margin: 0;
+  pointer-events: none;
+  z-index: 3;
+  border-top: var(--oc-border-width) var(--oc-border-style) var(--oc-border-color);
+  border-left: var(--oc-border-width) var(--oc-border-style) var(--oc-border-color);
+}
+
+/* 「页面设置」对话框里的边框表格：四条边 × 线型 / 线宽 / 间距 / 颜色。 */
+.ps-border-grid {
+  display: grid;
+  grid-template-columns: 2.5em 1fr 6.5em 6.5em 3.5em;
+  gap: 6px 8px;
+  align-items: center;
+  margin: 6px 0;
+}
+.ps-border-grid > span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ps-border-grid select,
+.ps-border-grid input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--text);
+}
+.ps-border-grid input[type="color"] {
+  padding: 2px;
+  height: 26px;
+}
+/* 复选框不该跟数值框一样被拉满整格。 */
+.ps-grid input[type="checkbox"] {
+  width: auto;
+}

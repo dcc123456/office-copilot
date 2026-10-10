@@ -409,6 +409,7 @@ export function App() {
       columns: section?.columns
         ? { count: section.columns.count, gapPx: section.columns.gap }
         : null,
+      pageBorders: section?.pageBorders ?? null,
       link: linkStyle,
     });
     const defaultName = filePath
@@ -625,8 +626,12 @@ export function App() {
               },
               base.header,
               base.footer,
-              // 模板只改页边距，分栏属于用户自己的版式，原样带过去（AGENTS §2.7）。
-              section?.columns,
+              // 模板只改页边距，分栏、页面边框与行号属于用户自己的版式，原样带过去（AGENTS §2.7）。
+              {
+                columns: section?.columns,
+                pageBorders: section?.pageBorders,
+                lineNumbers: section?.lineNumbers,
+              },
             ),
           );
           setDirty(true);

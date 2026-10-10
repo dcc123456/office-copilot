@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { EditorContent, type Editor } from "@tiptap/react";
 import { Pencil } from "lucide-react";
 import type { SectionGeometry } from "@office-copilot/docx-io";
 import { HeaderFooterEditor } from "../editor/extensions/HeaderFooterEditor.js";
 import { renderHeaderFooterHtml } from "../editor/renderHeaderFooter.js";
+import { borderLinesFor, borderSideToCss } from "../editor/pageBorders.js";
 import { useUiStore } from "../uiStore.js";
 import "../styles/pageColumns.css";
+import "../styles/pageBorders.css";
 
 /**
  * Paginated editing stage that visually mirrors Microsoft Word:
@@ -99,6 +101,16 @@ export function PageChrome({
     for (let i = 1; i < cols.count; i++) bounds.push(i * (colWidth + cols.gap));
     return bounds;
   }, [g.columns, g.contentWidth]);
+
+  /**
+   * 页面边框（`w:pgBorders`）在画布上的四条线：每条带着自己在页面坐标里的位置与
+   * CSS 线型。偏移基准（距页面 / 距正文）由 docx-io 读进来的 `offsetFrom` 决定，
+   * 与 Word 画的位置一致；文档没有边框时数组为空。
+   */
+  const borderLines = useMemo(
+    () => (g.pageBorders ? borderLinesFor(g.pageBorders, g) : []),
+    [g],
+  );
 
   // Push page geometry into CSS variables for the PagedLayout plugin
   // and the editor styles to consume.
@@ -354,6 +366,29 @@ export function PageChrome({
                   }}
                 />
               )),
+            )}
+            {/* 页面边框：每条边一个零尺寸盒子，线型/线宽/颜色经 CSS 变量交给 pageBorders.css 画。 */}
+            {borderLines.map((line) =>
+              pages.map((p) => {
+                const css = borderSideToCss(line.side);
+                return (
+                  <div
+                    key={`border-${line.key}-${p.i}`}
+                    className="oc-page-border"
+                    style={
+                      {
+                        left: line.x,
+                        top: p.y + line.y,
+                        width: line.horizontal ? line.length : undefined,
+                        height: line.horizontal ? undefined : line.length,
+                        "--oc-border-width": `${css.widthPx}px`,
+                        "--oc-border-style": css.style,
+                        "--oc-border-color": css.color,
+                      } as CSSProperties
+                    }
+                  />
+                );
+              }),
             )}
             <div
               className="prosemirror-host"
