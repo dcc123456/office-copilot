@@ -154,6 +154,31 @@ export interface SectionGeometry {
    * read from the default paragraph style. Zero is Word's own default.
    */
   paraSpacingAfter?: number;
+  /**
+   * 分栏（`w:cols`）。缺省就是单栏：Word 自己也常整个省略这个元素，所以不拿
+   * `count: 1` 去冒充"有分栏设置"。`gap` 与 `widths` 是 CSS px @96DPI，
+   * twips 换算只发生在本包的进出口（AGENTS §2.1）。
+   */
+  columns?: SectionColumns;
+}
+
+/**
+ * `w:cols` 的建模：栏数、栏间距、是否等宽，以及每栏宽度。
+ *
+ * `widths` 对应 `w:col` 子元素：等宽时 Word 常常一条都不写，靠 `w:num` + `w:space`
+ * 自己算，所以我们用空数组表示"没有显式宽度"，写回时也不写 `w:col`。
+ * 读到的 `w:cols` 里若有我们没建模的属性（`w:sep` 栏间分隔线），
+ * `buildSectPr` 会因为它跟读进来的值完全一致而原样留着整段，不重建。
+ */
+export interface SectionColumns {
+  /** 栏数，`w:num`。 */
+  count: number;
+  /** 栏与栏之间的空隙，`w:space`，CSS px。 */
+  gap: number;
+  /** `w:equalWidth`，Word 缺省按等宽处理，所以缺省值是 true。 */
+  equalWidth: boolean;
+  /** 每栏宽度，`w:col w:w`，CSS px；等宽且 Word 没写子元素时为空数组。 */
+  widths: number[];
 }
 
 /** Document-wide decorations a template owns, applied at save time. */
@@ -1035,7 +1060,105 @@ function readSectionGeometry(body: Element): SectionGeometry {
     contentWidth: pageWidth - ml - mr,
     contentHeight: pageHeight - mt - mb,
     linePitch: linePitch || undefined,
+    columns: readColumns(sectPr && firstChild(sectPr, "w:cols"), num),
   };
+}
+
+/**
+ * 读 `w:cols`：栏数、栏间距、等宽标记与每栏宽度。
+ *
+ * @param el body 末尾（或分节符里）那个 `w:cols`；没有就是单栏，返回 undefined。
+ * @param num 把属性值收成数字，非数字用兜底值（和节属性的其它字段同一套判据）。
+ * @returns 建模后的分栏；`w:cols` 缺席时 undefined，绝不拿 `count: 1` 冒充"设过分栏"。
+ */
+function readColumns(
+  el: Element | undefined | null,
+  num: (v: string | undefined, fallback: number) => number,
+): SectionColumns | undefined {
+  if (!el) return undefined;
+  const attrs = el.attributes ?? {};
+  const widths = children(el)
+    .filter((c) => c.name === "w:col")
+    .map((c) => num(c.attributes?.["w:w"] as string | undefined, 0) * TWIP_TO_PX);
+  // Word 写 `w:equalWidth="0"` 表示不等宽；缺省（没这个属性）按等宽。
+  const equalFlag = attrs["w:equalWidth"] as string | undefined;
+  return {
+    count: num(attrs["w:num"] as string | undefined, widths.length || 1),
+    gap: num(attrs["w:space"] as string | undefined, 0) * TWIP_TO_PX,
+    equalWidth: equalFlag !== "0" && equalFlag !== "false",
+    widths,
+  };
+}
+
+/**
+ * 两份分栏设置是否等价——用来决定 `w:cols` 要不要重建。
+ *
+ * 数值经过 px↔twips 来回，`Math.round` 的误差用 0.5px 容差吸收，
+ * 否则"用户什么都没动"也会被判成改动，把 `w:sep` 这类没建模的属性洗掉。
+ *
+ * @param a 从文件里读出来的那份。
+ * @param b 保存载荷里的那份（多半就是 a 走了一趟 IPC 回来的）。
+ * @returns 等价则为 true。
+ */
+function sameColumns(a: SectionColumns, b: SectionColumns): boolean {
+  const near = (x: number, y: number) => Math.abs(x - y) < 0.5;
+  return (
+    a.count === b.count &&
+    a.equalWidth === b.equalWidth &&
+    a.widths.length === b.widths.length &&
+    near(a.gap, b.gap) &&
+    a.widths.every((w, i) => near(w, b.widths[i]!))
+  );
+}
+
+/**
+ * `CT_SectPr` 允许的子孙顺序（ECMA-376 §17.6.1）。重建节属性时按它插入，
+ * 排错了 Word 会判文档结构不合法。
+ */
+const SECT_PR_ORDER = [
+  "w:headerReference",
+  "w:footerReference",
+  "w:footnotePr",
+  "w:endnotePr",
+  "w:type",
+  "w:pgSz",
+  "w:pgMar",
+  "w:paperSrc",
+  "w:pgBorders",
+  "w:lnNumType",
+  "w:pgNumType",
+  "w:cols",
+  "w:formProt",
+  "w:vAlign",
+  "w:noEndnote",
+  "w:titlePg",
+  "w:textDirection",
+  "w:bidi",
+  "w:rtlGutter",
+  "w:docGrid",
+  "w:printerSettings",
+];
+
+/**
+ * 按 `CT_SectPr` 的顺序把子元素放进 `arr`：已有同名元素就原位替换，
+ * 没有就插到第一个"排在它后面"的子元素之前。认不出名字的子元素不参与排序。
+ *
+ * @param arr 节属性的子元素数组，原地修改。
+ * @param name 要放的元素名，如 `w:cols`。
+ * @param el 要放的元素。
+ */
+function placeInSection(arr: Element[], name: string, el: Element): void {
+  const rank = SECT_PR_ORDER.indexOf(name);
+  const at = arr.findIndex((c) => c.name === name);
+  if (at >= 0) {
+    arr[at] = el;
+    return;
+  }
+  const after = arr.findIndex(
+    (c) => SECT_PR_ORDER.indexOf(c.name) > rank && SECT_PR_ORDER.indexOf(c.name) >= 0,
+  );
+  if (after >= 0) arr.splice(after, 0, el);
+  else arr.push(el);
 }
 
 // ---------- XML element factories ----------
@@ -1089,25 +1212,33 @@ function buildSectPr(
   } as unknown as Element;
 
   if (!existing) {
+    const fromScratch: Element[] = [];
+    placeInSection(fromScratch, "w:pgSz", newPgSz);
+    placeInSection(fromScratch, "w:pgMar", newPgMar);
+    if (g.columns) placeInSection(fromScratch, "w:cols", colsXml(g.columns));
     return {
       type: "element",
       name: "w:sectPr",
       attributes: {},
-      children: [newPgSz, newPgMar],
+      children: fromScratch,
     } as unknown as Element;
   }
 
   const childrenArr = [...(existing.children as unknown as Element[])];
-  const indexOf = (name: string): number =>
-    childrenArr.findIndex((c) => c.name === name);
-  const pgSzAt = indexOf("w:pgSz");
-  if (pgSzAt >= 0) childrenArr[pgSzAt] = newPgSz;
-  else childrenArr.unshift(newPgSz);
-  // pgMar 必须紧跟 pgSz（ECMA-376 的 CT_SectPr 顺序），往后追加会排到
-  // w:cols / w:pgBorders / w:docGrid 之后，Word 判定顺序不合法。
-  const pgMarAt = indexOf("w:pgMar");
-  if (pgMarAt >= 0) childrenArr[pgMarAt] = newPgMar;
-  else childrenArr.splice(indexOf("w:pgSz") + 1, 0, newPgMar);
+  placeInSection(childrenArr, "w:pgSz", newPgSz);
+  placeInSection(childrenArr, "w:pgMar", newPgMar);
+  // 分栏：只有值真的变了才重建。读进来的 `w:cols` 里可能有 `w:sep`（栏间分隔线）这类
+  // 我们没建模的属性，值等价就整段原样留着；值变了才按建模结果重写，分隔线随之消失
+  // ——和 Word 一致，改栏数会重排整条 cols。
+  if (g.columns) {
+    const existingCols = childrenArr.find((c) => c.name === "w:cols");
+    const parsedCols = readColumns(existingCols, (v, fallback) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    });
+    if (!existingCols || !parsedCols || !sameColumns(parsedCols, g.columns))
+      placeInSection(childrenArr, "w:cols", colsXml(g.columns));
+  }
   // 必须显式写 `type`/`name`：`parseDocument` 出来的节点只有原型上带 `type`，
   // 展开运算符拿不到，`serialize` 认它不是元素就返回空串——整块 sectPr 静默消失。
   return {
@@ -1115,6 +1246,38 @@ function buildSectPr(
     name: "w:sectPr",
     attributes: existing.attributes ?? {},
     children: childrenArr,
+  } as unknown as Element;
+}
+
+/**
+ * 把建模后的分栏写成 `w:cols`。
+ *
+ * `w:num` 给栏数、`w:space` 给栏间距（twips，换算只在本包发生）；`widths` 非空才写
+ * `w:col` 子元素，等宽时留空让 Word 自己算，免得写出一份和 `w:num` 打架的宽度表。
+ *
+ * @param c 分栏设置。
+ * @returns 可以直接放进 `w:sectPr` 的元素。
+ */
+function colsXml(c: SectionColumns): Element {
+  const attrs: Record<string, string> = {
+    "w:space": String(PX_TO_TWIP(c.gap)),
+  };
+  if (c.count > 0) attrs["w:num"] = String(c.count);
+  if (!c.equalWidth) attrs["w:equalWidth"] = "0";
+  const kids = c.widths.map(
+    (w) =>
+      ({
+        type: "element",
+        name: "w:col",
+        attributes: { "w:w": String(PX_TO_TWIP(w)) },
+        children: [],
+      }) as unknown as Element,
+  );
+  return {
+    type: "element",
+    name: "w:cols",
+    attributes: attrs,
+    children: kids,
   } as unknown as Element;
 }
 

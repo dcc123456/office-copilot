@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import JSZip from "jszip";
-import { DocxFile } from "./docx.js";
+import { DocxFile, type SectionGeometry } from "./docx.js";
 import { nextFootnoteId, type FootnoteBody, type FootnoteEntry } from "./footnotes.js";
 import { nextCommentId } from "./comments.js";
 import type { PMDoc } from "./pm-schema.js";
@@ -193,6 +193,46 @@ describe("DocxFile", () => {
     expect(section?.paraSpacingAfter).toBe(0);
   });
 
+  it("reads w:cols into the section geometry as CSS px", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr: `<w:pgSz w:w="11906" w:h="16838"/><w:cols w:num="3" w:space="425"/>`,
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    // 425 twips = 28.33px @96DPI；twips 换算只发生在本包进出口（AGENTS §2.1）。
+    expect(section?.columns?.count).toBe(3);
+    expect(section?.columns?.gap).toBeCloseTo(425 / 15, 4);
+    expect(section?.columns?.equalWidth).toBe(true);
+    expect(section?.columns?.widths).toEqual([]);
+  });
+
+  it("leaves columns unset when the source section has no w:cols", async () => {
+    // Word 省略 `w:cols` 的单栏文档很常见。拿 `count: 1` 冒充"设过分栏"会让每次保存
+    // 无谓地插进一个元素，UI 也没法区分"用户没选过栏"和"用户选了单栏"。
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], { sectPr: `<w:pgSz w:w="11906" w:h="16838"/>` }),
+    );
+    const { section } = await docx.toProseMirror();
+    expect(section?.columns).toBeUndefined();
+  });
+
+  it("reads the per-column widths of an unequal split", async () => {
+    // 不等宽栏靠 `w:equalWidth="0"` + 每条 `w:col w:w` 表达（试卷、红头文件的
+    // "窄左栏 + 宽正文"就是这一种）。
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:cols w:space="450" w:num="2" w:equalWidth="0"><w:col w:w="3000"/><w:col w:w="6000"/></w:cols>`,
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    expect(section?.columns?.equalWidth).toBe(false);
+    expect(section?.columns?.widths[0]).toBeCloseTo(200, 4);
+    expect(section?.columns?.widths[1]).toBeCloseTo(400, 4);
+  });
+
   /**
    * 真实文件层面的保真验收：打开带缩进的 docx → 走一遍编辑器保存路径
    * （toProseMirror / replaceProseMirror / toBytes）→ 重开读 document.xml。
@@ -202,11 +242,17 @@ describe("DocxFile", () => {
    * @param opts.applyPageSetup 是否复刻桌面 app 的保存：把打开时读到的页面设置再
    *   `setSectionGeometry` 回去。app 每次保存都会带上它，所以这条路径和纯 `replaceProseMirror`
    *   是两回事——节属性重建就在这一步。
+   * @param opts.editSection 用户在页面设置里改过的字段：先读回节属性，套上这个变换
+   *   再写回去（只在 `applyPageSetup` 下生效），用来测"改栏数"这类真有编辑的保存。
    * @returns 保存一次与保存两次后的 document.xml 文本。
    */
   async function saveTwice(
     paragraphs: string[],
-    opts: { sectPr?: string; applyPageSetup?: boolean } = {},
+    opts: {
+      sectPr?: string;
+      applyPageSetup?: boolean;
+      editSection?: (s: SectionGeometry) => SectionGeometry;
+    } = {},
   ): Promise<{ once: string; twice: string }> {
     const readBody = async (bytes: Uint8Array) => {
       const zip = await JSZip.loadAsync(bytes);
@@ -215,7 +261,9 @@ describe("DocxFile", () => {
     const reopen = async (bytes: Uint8Array): Promise<Uint8Array> => {
       const docx = await DocxFile.fromBytes(bytes);
       const loaded = await docx.toProseMirror();
-      if (opts.applyPageSetup && loaded.section) docx.setSectionGeometry(loaded.section);
+      if (opts.applyPageSetup && loaded.section) {
+        docx.setSectionGeometry(opts.editSection?.(loaded.section) ?? loaded.section);
+      }
       await docx.replaceProseMirror(loaded.doc);
       return docx.toBytes();
     };
@@ -304,6 +352,71 @@ describe("DocxFile", () => {
     expect(once.indexOf("<w:pgSz")).toBeLessThan(once.indexOf("<w:pgMar"));
     expect(once.indexOf("<w:pgMar")).toBeLessThan(once.indexOf("<w:cols"));
     expect(once).toContain('<w:cols w:space="425" w:num="2"/>');
+  });
+
+  it("keeps an untouched w:cols verbatim including the unmodelled w:sep", async () => {
+    // 栏间分隔线 `w:sep` 是没建模的布尔属性。用户没改分栏时整段原样留着——
+    // 不能因为"我们只认得 num/space"就把分隔线洗掉（AGENTS §2.7）。
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/>` +
+          `<w:cols w:num="2" w:space="425" w:sep="1"/>`,
+      },
+    );
+    expect(once).toContain('<w:cols w:num="2" w:space="425" w:sep="1"/>');
+    expect(twice).toBe(once);
+  });
+
+  it("rewrites w:cols when the user changes the column count", async () => {
+    // 30px = 450 twips。改栏数会重建整条 `w:cols`，没建模的 `w:sep` 随之消失——
+    // 和 Word 自己的行为一致（改动分栏设置会重写这条元素）。
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr: `<w:pgSz w:w="11906" w:h="16838"/><w:cols w:num="2" w:space="425" w:sep="1"/>`,
+        editSection: (s) => ({
+          ...s,
+          columns: { count: 3, gap: 30, equalWidth: true, widths: [] },
+        }),
+      },
+    );
+    expect(once).toContain('<w:cols w:space="450" w:num="3"/>');
+    expect(once).not.toContain('w:sep="1"');
+    // 第二次保存读回的就是自己写的值，必须判定为"没改"，不再重写。
+    expect(twice).toBe(once);
+  });
+
+  it("writes per-column widths and w:equalWidth for an unequal split", async () => {
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr: `<w:pgSz w:w="11906" w:h="16838"/>`,
+        editSection: (s) => ({
+          ...s,
+          columns: { count: 2, gap: 30, equalWidth: false, widths: [200, 400] },
+        }),
+      },
+    );
+    expect(once).toContain(
+      '<w:cols w:space="450" w:num="2" w:equalWidth="0"><w:col w:w="3000"/><w:col w:w="6000"/></w:cols>',
+    );
+    expect(twice).toBe(once);
+  });
+
+  it("does not invent w:cols for a single-column document", async () => {
+    // 节里没有 `w:cols` 就是单栏；保存时凭空插一条会让"用户从未分栏"的文档
+    // 在 Word 里显示成分栏设置已启用。
+    const { once } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: `<w:pgSz w:w="11906" w:h="16838"/>`,
+    });
+    expect(once).not.toContain("<w:cols");
   });
 
   it("keeps a right tab stop with a dot leader through a real save", async () => {

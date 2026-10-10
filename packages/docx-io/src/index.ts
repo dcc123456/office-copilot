@@ -4,6 +4,7 @@ export type {
   ReplaceResult,
   Snapshot,
   SectionGeometry,
+  SectionColumns,
   DocStyle,
   PmLoadResult,
 } from "./docx.js";
