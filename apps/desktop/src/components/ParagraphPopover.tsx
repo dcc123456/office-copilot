@@ -8,7 +8,7 @@ import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
  *   - 对齐方式
  *   - 行距 (single / 1.15 / 1.5 / double / fixed)
  *   - 段前 / 段后 (pt)
- *   - 首行缩进 / 左右缩进 (pt)
+ *   - 左缩进 (pt) 与「特殊格式 + 磅值」（首行缩进 / 悬挂缩进）
  *
  * 数值经自定义命令 `setParagraphFormat` 写进当前选中的段落/标题，落在
  * editor/extensions/ParagraphFormatting.ts，再由 docx-io 往返成 OOXML 的
@@ -22,6 +22,39 @@ interface Attrs {
   spacingAfter?: number;
   indent?: number;
   indentFirst?: number;
+}
+
+/** Word 段落对话框「特殊格式」的三个取值。 */
+type SpecialFormat = "none" | "firstLine" | "hanging";
+
+/** 特殊格式刚打开时给磅值一个初值：中文 2 字符（五号 10.5pt × 2）。 */
+const DEFAULT_SPECIAL_PT = 21;
+
+/**
+ * 把 indentFirst 属性读成 Word 的「特殊格式」。
+ *
+ * @param indentFirst 首行缩进磅值；负数就是悬挂缩进（OOXML 的 w:hanging）。
+ * @returns 无 / 首行缩进 / 悬挂缩进。
+ */
+export function specialFormatOf(indentFirst: number | undefined): SpecialFormat {
+  if (!indentFirst) return "none";
+  return indentFirst < 0 ? "hanging" : "firstLine";
+}
+
+/**
+ * 把「特殊格式 + 磅值」这对外部字段写回单个 indentFirst 属性。
+ *
+ * @param kind 下拉选中的特殊格式。
+ * @param magnitude 磅值输入框的正数（pt）；空值按 0 处理。
+ * @returns 存进段落属性的值：无 = undefined，首行为正，悬挂为负。
+ */
+export function indentFirstFor(
+  kind: SpecialFormat,
+  magnitude: number | undefined,
+): number | undefined {
+  if (kind === "none") return undefined;
+  const pt = magnitude && magnitude > 0 ? magnitude : DEFAULT_SPECIAL_PT;
+  return kind === "hanging" ? -pt : pt;
 }
 
 const LINE_OPTIONS = new Set([
@@ -134,6 +167,9 @@ export function ParagraphFields({
 
   const align = (a: string) => editor.chain().focus().setTextAlign(a).run();
 
+  const special = specialFormatOf(attrs.indentFirst);
+  const magnitude = attrs.indentFirst == null ? undefined : Math.abs(attrs.indentFirst);
+
   return (
     <div>
       <div className="pp-header">
@@ -227,16 +263,35 @@ export function ParagraphFields({
             onChange={(v) => apply({ indent: v })}
           />
         </Row>
-        <Row label="首行缩进 (pt)">
+        <Row label="特殊格式">
+          <select
+            value={special}
+            onChange={(e) =>
+              apply({
+                indentFirst: indentFirstFor(
+                  e.target.value as SpecialFormat,
+                  magnitude,
+                ),
+              })
+            }
+          >
+            <option value="none">无</option>
+            <option value="firstLine">首行缩进</option>
+            <option value="hanging">悬挂缩进</option>
+          </select>
+        </Row>
+        <Row label="磅值 (pt)">
           <Num
-            value={attrs.indentFirst}
+            value={magnitude}
             placeholder="0"
-            onChange={(v) => apply({ indentFirst: v })}
+            onChange={(v) => apply({ indentFirst: indentFirstFor(special, v) })}
           />
         </Row>
       </div>
 
-      <div className="pp-hint">提示：首行缩进 21pt 约等于中文 2 字符。</div>
+      <div className="pp-hint">
+        提示：磅值 21pt 约等于中文 2 字符；悬挂缩进会让首行向左凸出。
+      </div>
     </div>
   );
 }
