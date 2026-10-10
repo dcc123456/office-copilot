@@ -7,7 +7,7 @@ import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
 import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
 import { blocksOf, executeOps } from "./docBlocks.js";
-import { planEdit, revert, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
+import { planEdit, revert, addressOf, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
 import { templateProposal, typographyProposal } from "./formatDocument.js";
 import { templateById } from "./templates.js";
 
@@ -737,5 +737,80 @@ describe("字符样式维度", () => {
     expect(blocks[0]!.style.italic).toBe(true);
     applyStyles(editor, [{ index: 0, style: bodyOps(blocks)[0]! }]);
     expect(marksOfRun(editor, "斜体的正文")).not.toContain("italic");
+  });
+});
+
+describe("书签 op 与整段 JSON 插入（真实 schema）", () => {
+  const addrOf = (editor: Editor, index: number) => addressOf(blocksOf(editor.state.doc), index)!;
+
+  it("给整段打书签：起点在文字前、终点在文字后，段落文字一个字节都不动", () => {
+    const editor = harness([heading(1, [text("第一章")])]);
+    const original = editor.state.doc.toJSON();
+    const add: CoreOp[] = [{ kind: "addBookmark", addr: addrOf(editor, 0), id: "5", name: "_Toc5" }];
+    expect(executeOps(editor, add).ok).toBe(true);
+    const para = editor.state.doc.firstChild!;
+    expect(para.childCount).toBe(3);
+    // 断言只比 `type.name` 与 `attrs` 这些纯数据：PM 节点实例上的 `type` 是 NodeType，
+    // 直接 toMatchObject 会让断言器顺着 schema 图递归，把测试进程吃到 OOM。
+    expect(para.child(0).type.name).toBe("bookmarkStart");
+    expect(para.child(0).attrs).toMatchObject({ id: "5", name: "_Toc5" });
+    expect(para.child(2).type.name).toBe("bookmarkEnd");
+    // 书签是原子行内节点，不占文字：AI 的改动块仍按"第一章"寻址。
+    expect(editor.state.doc.textContent).toBe("第一章");
+
+    const remove: CoreOp[] = [{ kind: "removeBookmark", addr: addrOf(editor, 0), id: "5", name: "_Toc5" }];
+    expect(executeOps(editor, remove).ok).toBe(true);
+    expect(editor.state.doc.toJSON()).toEqual(original);
+  });
+
+  it("撤一个不存在的书签就拒绝，且一个字节都不写", () => {
+    const editor = harness([para([text("正文")])]);
+    const before = editor.state.doc.toJSON();
+    const r = executeOps(editor, [
+      { kind: "removeBookmark", addr: addrOf(editor, 0), id: "9", name: "_Toc9" },
+    ]);
+    expect(r.ok).toBe(false);
+    expect(editor.state.doc.toJSON()).toEqual(before);
+  });
+
+  it("带 json 的 insertBlock 建出真实结构：制表位、域芯片与文字各就各位", () => {
+    const editor = harness([para([text("正文")])]);
+    const entry = {
+      type: "paragraph",
+      attrs: { tabStops: [{ positionPt: 415.3, alignment: "right", leader: "dot" }] },
+      content: [
+        { type: "text", text: "第一章\t" },
+        { type: "field", attrs: { kind: "PAGEREF", instr: "PAGEREF _Toc1 \\h", display: "3" } },
+      ],
+    };
+    const r = executeOps(editor, [
+      { kind: "insertBlock", anchor: { at: "start" }, block: { type: "paragraph", text: "第一章\t", json: entry } },
+    ]);
+    expect(r.ok).toBe(true);
+    const inserted = editor.state.doc.firstChild!;
+    expect(inserted.attrs.tabStops).toEqual([{ positionPt: 415.3, alignment: "right", leader: "dot" }]);
+    expect(inserted.child(1).type.name).toBe("field");
+    expect(editor.state.doc.childCount).toBe(2);
+  });
+
+  it("json 建不出段落或文字对不上时整块不写——宁可不写也不写假结构", () => {
+    const editor = harness([para([text("正文")])]);
+    const wrongText = {
+      kind: "insertBlock",
+      anchor: { at: "start" as const },
+      block: {
+        type: "paragraph",
+        text: "对不上",
+        json: { type: "paragraph", content: [{ type: "text", text: "第一章" }] },
+      },
+    } satisfies CoreOp;
+    expect(executeOps(editor, [wrongText]).ok).toBe(false);
+    const notABlock = {
+      kind: "insertBlock",
+      anchor: { at: "start" as const },
+      block: { type: "paragraph", text: "", json: { type: "bookmarkStart", attrs: { id: "1" } } },
+    } satisfies CoreOp;
+    expect(executeOps(editor, [notABlock]).ok).toBe(false);
+    expect(editor.state.doc.childCount).toBe(1);
   });
 });

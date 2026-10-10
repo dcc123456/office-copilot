@@ -6,16 +6,41 @@ import {
   ptToCssFontSize,
   cssFontSizeToPt,
   ptToCssLetterSpacing,
+  cssPxToPt,
   cssColorToOoxmlHex,
   canonColor,
 } from "./ooxml-pm.js";
 import { StyleMap } from "./styles.js";
-import type { PPrAttrs, PMDoc } from "./pm-schema.js";
+import type { PPrAttrs, PMDoc, TabStop } from "./pm-schema.js";
 import { DocxFile } from "./docx.js";
 
 function bodyXml(...inner: string[]): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>${inner.join("")}<w:sectPr/></w:body></w:document>`;
+}
+
+/**
+ * 打出一个能被 `DocxFile` 读回来的最小 .docx 字节。
+ *
+ * @param documentXml `word/document.xml` 的完整内容（含 XML 声明）。
+ * @returns zip 字节，交给 `DocxFile.fromBytes`。
+ */
+async function minimalDocx(documentXml: string): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file(
+    "[Content_Types].xml",
+    `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+  );
+  zip.file(
+    "_rels/.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x" Target="word/document.xml"/></Relationships>`,
+  );
+  zip.file(
+    "word/_rels/document.xml.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>`,
+  );
+  zip.file("word/document.xml", documentXml);
+  return zip.generateAsync({ type: "uint8array" });
 }
 
 describe("ooxmlToPm", () => {
@@ -1280,26 +1305,119 @@ describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {
   });
 });
 
+describe("本 app 生成的目录写进 docx", () => {
+  /**
+   * `apps/desktop/src/editor/toc.ts` 的 `tocEntryJson` 产出的那份 PM 文档，原样搬来：
+   * 制表位位置 595.5 磅是 794 CSS px 正文区宽度经 `cssPxToPt` 换来的（= 11910 twips），
+   * 二级条目缩进 20 磅（= 400 twips）。
+   * 条目不写 `w:pStyle`——本文档的样式表里没有 TOC1/TOC2，写了就是悬空引用。
+   */
+  const rightDotStop: TabStop = { positionPt: 595.5, alignment: "right", leader: "dot" };
+  const GENERATED: PMDoc = {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        attrs: { tabStops: [rightDotStop] },
+        content: [
+          {
+            type: "fieldBegin",
+            attrs: { kind: "TOC", instr: 'TOC \\o "1-2" \\h \\z \\u', isSeparated: true },
+          },
+          { type: "text", text: "第一章\t" },
+          { type: "field", attrs: { kind: "PAGEREF", instr: "PAGEREF _Toc1 \\h", display: "1" } },
+        ],
+      },
+      {
+        type: "paragraph",
+        attrs: { indent: 20, tabStops: [rightDotStop] },
+        content: [
+          { type: "text", text: "小节\t" },
+          { type: "field", attrs: { kind: "PAGEREF", instr: "PAGEREF _Toc2 \\h", display: "2" } },
+          { type: "fieldEnd" },
+        ],
+      },
+      {
+        type: "heading",
+        attrs: { level: 1 },
+        content: [
+          { type: "bookmarkStart", attrs: { id: "1", name: "_Toc1" } },
+          { type: "text", text: "第一章" },
+          { type: "bookmarkEnd", attrs: { id: "1" } },
+        ],
+      },
+    ],
+  };
+
+  it("写出 Word 认的形状：条目各自一条 w:tabs，页码前的制表符是 w:tab", () => {
+    const xml = pmToOoxml(GENERATED);
+    expect(xml.match(/<w:tabs>/g)).toHaveLength(2);
+    expect(xml.match(/w:pos="11910"/g)).toHaveLength(2);
+    // CT_PPr 的顺序：w:tabs 在 w:ind 之前。
+    expect(xml).toContain(
+      '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="11910"/></w:tabs><w:ind w:left="400"/>',
+    );
+    expect(xml).toContain('<w:r><w:t xml:space="preserve">第一章</w:t><w:tab/></w:r>');
+    // 外层只有一条 TOC 指令；两条 PAGEREF 子域各自成对，结束记号共 3 个（两条页码 + 目录本身）。
+    expect(xml.match(/TOC \\o &quot;1-2&quot; \\h \\z \\u/g)).toHaveLength(1);
+    expect(xml.match(/PAGEREF _Toc/g)).toHaveLength(2);
+    expect(xml.match(/fldCharType="begin"/g)).toHaveLength(3);
+    expect(xml.match(/fldCharType="end"/g)).toHaveLength(3);
+    // 书签仍是 w:p 的直接子元素，名字与 PAGEREF 指向的一致。
+    expect(xml).toContain(
+      '<w:bookmarkStart w:id="1" w:name="_Toc1"/><w:r><w:t xml:space="preserve">第一章</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>',
+    );
+  });
+
+  it("读回来还是同一份结构，二次保存字节一致", () => {
+    const once = pmToOoxml(GENERATED);
+    const back = ooxmlToPm(once);
+    expect(back.content?.[0]?.content).toEqual([
+      {
+        type: "fieldBegin",
+        attrs: { kind: "TOC", instr: 'TOC \\o "1-2" \\h \\z \\u', isSeparated: true },
+      },
+      { type: "text", text: "第一章\t" },
+      { type: "field", attrs: { kind: "PAGEREF", instr: "PAGEREF _Toc1 \\h", display: "1" } },
+    ]);
+    expect(back.content?.[1]?.content?.at(-1)).toEqual({ type: "fieldEnd" });
+    expect(back.content?.[1]?.attrs).toMatchObject({
+      indent: 20,
+      tabStops: [{ positionPt: 595.5, alignment: "right", leader: "dot" }],
+    });
+    expect(back.content?.[2]?.content).toEqual([
+      { type: "bookmarkStart", attrs: { id: "1", name: "_Toc1" } },
+      { type: "text", text: "第一章" },
+      { type: "bookmarkEnd", attrs: { id: "1" } },
+    ]);
+    expect(pmToOoxml(back)).toBe(once);
+  });
+
+  it("版心宽度从 CSS px 换成磅只在这一处发生，且落在整数 twips 上", () => {
+    // 编辑器/SectionGeometry 用 96DPI 的 px，OOXML 用 twips：595.5 磅 = 11910 twips。
+    expect(cssPxToPt(794)).toBe(595.5);
+    // Word 真实目录条目的制表位位置 8306 twips 对应 A4 减边距后的正文宽度。
+    expect(cssPxToPt(553.7)).toBe(415.3);
+  });
+
+  it("写进真实 .docx 再重开，读回的还是同一份目录", async () => {
+    // 走一遍包（[Content_Types].xml + rels + document.xml），证明这份 XML 不只是
+    // 字符串能对上，而是 DocxFile 认得的部件；书签与域都不需要额外关系。
+    const docx = await DocxFile.fromBytes(await minimalDocx(pmToOoxml(GENERATED)));
+    const { doc } = await docx.toProseMirror();
+    expect(doc.content?.[0]?.content?.map((n) => n.type)).toEqual(["fieldBegin", "text", "field"]);
+    expect(doc.content?.[0]?.attrs?.tabStops).toEqual([rightDotStop]);
+    await docx.replaceProseMirror(doc);
+    const reopened = await DocxFile.fromBytes(await docx.toBytes());
+    expect((await reopened.toProseMirror()).doc).toEqual(doc);
+  });
+});
+
 describe("DocxFile toProseMirror / replaceProseMirror", () => {
   it("round-trips a minimal docx via zip", async () => {
-    const zip = new JSZip();
-    zip.file(
-      "[Content_Types].xml",
-      `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+    const bytes = await minimalDocx(
+      bodyXml(`<w:p><w:r><w:t>alpha</w:t></w:r></w:p>`, `<w:p><w:r><w:t>beta</w:t></w:r></w:p>`),
     );
-    zip.file(
-      "_rels/.rels",
-      `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="x" Target="word/document.xml"/></Relationships>`,
-    );
-    zip.file("word/_rels/document.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>`);
-    zip.file(
-      "word/document.xml",
-      bodyXml(
-        `<w:p><w:r><w:t>alpha</w:t></w:r></w:p>`,
-        `<w:p><w:r><w:t>beta</w:t></w:r></w:p>`,
-      ),
-    );
-    const bytes = await zip.generateAsync({ type: "uint8array" });
     const docx = await DocxFile.fromBytes(bytes);
     const { doc } = await docx.toProseMirror();
     expect(doc.content.length).toBeGreaterThanOrEqual(2);

@@ -50,6 +50,24 @@ export function floatPagesOf(state: EditorState): number {
   return KEY.getState(state)?.floatPages ?? 1;
 }
 
+/**
+ * 某个文档位置落在第几页（从 1 起，与状态栏的页码同口径）。
+ *
+ * 分页计划里的每个断点就是一个分页符所在的位置，位置在它之后（含同位置）的
+ * 内容都被推到了下一页，所以页码 = 1 + 不晚于该位置的断点数。
+ *
+ * @param state 编辑器状态。
+ * @param pos   文档位置，通常是段落的起始位置。
+ * @returns 页码；还没测出分页计划时返回 0，调用方据此知道"页码不可用"。
+ */
+export function pageNumberOf(state: EditorState, pos: number): number {
+  const breaks = KEY.getState(state)?.breaks;
+  if (!breaks) return 0;
+  let page = 1;
+  for (const planned of breaks) if (planned.pos <= pos) page += 1;
+  return page;
+}
+
 const DEFAULTS = {
   pageHeight: 1123,
   contentHeight: 931,

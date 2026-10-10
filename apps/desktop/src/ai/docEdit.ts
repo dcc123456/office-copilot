@@ -132,15 +132,43 @@ export type Anchor =
   | { at: "after"; after: Address };
 
 export type NewBlock =
-  | { type: "paragraph"; text: string; style?: StylePatch }
+  | {
+      type: "paragraph";
+      /**
+       * 这一段的纯文本，块模型按它寻址。走 `json` 时它必须等于建出来节点的
+       * `textContent`（域芯片自身的文字不计入），否则按内容寻址的逆操作找不到回来。
+       */
+      text: string;
+      style?: StylePatch;
+      /**
+       * 整段的 ProseMirror JSON（attrs + 行内 content）。目录条目要带 `TOC`/`PAGEREF`
+       * 域、书签和制表位，`StylePatch` 表达不了这些，所以由引擎直接给一份节点 JSON；
+       * 只有本 app 自己构造的块用它，模型提案走不到这里（`parseStylePatch` 不认这个键）。
+       */
+      json?: JsonNode;
+    }
   | { type: "table"; rows: string[][]; headerRow?: boolean }
   | { type: "image"; src: string; alt: string; width: number; height: number };
+
+/** ProseMirror 节点的 JSON 形态；这里只用到 type/attrs/content 三项。 */
+export type JsonNode = {
+  type: string;
+  attrs?: Record<string, unknown>;
+  content?: readonly unknown[];
+};
 
 export type CoreOp =
   | { kind: "setText"; addr: Address; text: string }
   | { kind: "setStyle"; addr: Address; style: StylePatch }
   | { kind: "insertBlock"; anchor: Anchor; block: NewBlock }
-  | { kind: "deleteBlock"; addr: Address };
+  | { kind: "deleteBlock"; addr: Address }
+  /**
+   * 给一整段套上书签锚点（`w:bookmarkStart` 在段首、`w:bookmarkEnd` 在段尾）。
+   * 目录条目的 `PAGEREF` 与交叉引用都按名字定位，所以名字必须稳定；它只由引擎生成，
+   * 不在模型可提案的词汇里。
+   */
+  | { kind: "addBookmark"; addr: Address; id: string; name: string }
+  | { kind: "removeBookmark"; addr: Address; id: string; name: string };
 
 /** What the model is allowed to ask for. Indexes refer to the outline it was shown. */
 export type AiOp =
@@ -693,6 +721,19 @@ export function applyCore(blocks: Block[], op: CoreOp): ApplyResult {
         blocks.length === 0 || i === 0 ? { at: "start" } : { at: "after", after: addressOf(blocks, i - 1)! };
       return { ok: true, inverse: { kind: "insertBlock", anchor, block: newFromBlock(removed) } };
     }
+    case "addBookmark":
+    case "removeBookmark": {
+      if (findAddress(blocks, op.addr) < 0) return { ok: false, reason: "找不到目标段落" };
+      // 书签是行内原子，既不占文字也不改样式，块模型里没有它可记的字段：
+      // 模拟阶段原样返回，逆操作就是把同一对锚点撤掉/补回来。
+      return {
+        ok: true,
+        inverse:
+          op.kind === "addBookmark"
+            ? { kind: "removeBookmark", addr: op.addr, id: op.id, name: op.name }
+            : { kind: "addBookmark", addr: op.addr, id: op.id, name: op.name },
+      };
+    }
   }
 }
 
@@ -952,6 +993,10 @@ export function describeCoreOp(op: CoreOp): string {
       return `插入${op.block.type === "table" ? "表格" : op.block.type === "image" ? "图片" : "段落"}`;
     case "deleteBlock":
       return `删除「${addrLabel(op.addr)}」`;
+    case "addBookmark":
+      return `给「${addrLabel(op.addr)}」加书签 ${op.name}`;
+    case "removeBookmark":
+      return `撤掉「${addrLabel(op.addr)}」的书签 ${op.name}`;
   }
 }
 

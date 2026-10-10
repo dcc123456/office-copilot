@@ -113,6 +113,18 @@ export function cssFontSizeToPt(value: string): number | null {
 }
 
 /**
+ * 页面尺寸在本 app 一路是 CSS px（`SectionGeometry`），段落属性（缩进、制表位
+ * 位置）在编辑器里是磅。换算同样只允许发生在 docx-io，所以"版心宽度换成磅"
+ * 这种一处需求也得从这里走，别在调用方再写一次 72/96。
+ *
+ * @param px 96 DPI 的 CSS px。
+ * @returns 磅值，保留一位小数——与 `readTabStops` 的读侧口径一致，二次换算不会漂移。
+ */
+export function cssPxToPt(px: number): number {
+  return Math.round(((px * 72) / 96) * 10) / 10;
+}
+
+/**
  * OOXML colours are bare hex. Mark attrs are hex for anything this app or a
  * .docx produced, but pasted HTML lands as `rgb(...)` — and a value Word cannot
  * read invalidates the whole run properties, so an unreadable colour is dropped

@@ -12,6 +12,7 @@ import {
   type Block,
   type CharStyleKey,
   type CoreOp,
+  type JsonNode,
   type NewBlock,
   type StylePatch,
 } from "../ai/docEdit.js";
@@ -24,6 +25,9 @@ import {
  */
 
 const TEXTUAL = new Set(["paragraph", "heading"]);
+
+/** 书签的两个行内原子节点名（`extensions/Bookmark.ts`）。撤书签要成对删，靠 id 认。 */
+const BOOKMARK_TYPES = new Set(["bookmarkStart", "bookmarkEnd"]);
 
 /** textStyle attrs whose value is a CSS colour. */
 const COLOR_ATTR_KEYS = new Set<string>(["color", "backgroundColor"]);
@@ -330,7 +334,12 @@ function marksOf(node: PMNode | null) {
 /* ------------------------------------------------------------------ */
 
 function buildBlock(schema: Schema, nb: NewBlock): PMNode | null {
-  if (nb.type === "paragraph") return buildTextBlock(schema, nb.text, nb.style ?? {});
+  if (nb.type === "paragraph") {
+    // 引擎直接给的整段 JSON（目录条目带域、书签与制表位）优先于 text/style：
+    // 建不出来就放弃整块，宁可不写也不要写出一个"文字对得上、结构是假的"段落。
+    if (nb.json) return buildJsonBlock(schema, nb.json, nb.text);
+    return buildTextBlock(schema, nb.text, nb.style ?? {});
+  }
 
   if (nb.type === "image") {
     const image = schema.nodes.image;
@@ -367,6 +376,28 @@ function buildBlock(schema: Schema, nb: NewBlock): PMNode | null {
     return rowType.create(null, cellNodes);
   });
   return table.create(null, rows);
+}
+
+/**
+ * 引擎给的整段 PM JSON → 节点。
+ *
+ * @param schema 当前文档的 schema。
+ * @param json   段落（或标题）节点 JSON。
+ * @param expectText 期望的 `textContent`；给定时必须完全一致，否则返回 null——
+ *        按内容寻址的逆操作全靠这段文字，写了结构却对不上文字就等于埋一颗雷。
+ */
+function buildJsonBlock(schema: Schema, json: JsonNode, expectText?: string): PMNode | null {
+  const nodeType = schema.nodes[json.type];
+  if (!nodeType || !nodeType.isBlock) return null;
+  let node: PMNode;
+  try {
+    node = schema.nodeFromJSON(json as Record<string, unknown>);
+    node.check();
+  } catch {
+    return null;
+  }
+  if (expectText !== undefined && node.textContent !== expectText) return null;
+  return node;
 }
 
 function buildTextBlock(schema: Schema, text: string, style: StylePatch): PMNode | null {
@@ -510,6 +541,36 @@ function runOp(tr: Transaction, op: CoreOp): RunResult {
       if (!target) return { ok: false, tr, reason: "找不到要删除的段落" };
       // A list item is removed as its whole <li> span.
       tr.delete(target.from, target.to);
+      return { ok: true, tr };
+    }
+
+    case "addBookmark": {
+      const target = locateAddress(tr.doc, op.addr);
+      const inner = target?.inner;
+      if (!target || !inner) return { ok: false, tr, reason: "这一段不能挂书签" };
+      const startType = schema.nodes.bookmarkStart;
+      const endType = schema.nodes.bookmarkEnd;
+      if (!startType || !endType) return { ok: false, tr, reason: "文档没有书签节点类型" };
+      // 先插终点再插起点：起点坐标更小，后一次插入不会影响已经落好的那一个。
+      tr.insert(inner.to, endType.create({ id: op.id }));
+      tr.insert(inner.from, startType.create({ id: op.id, name: op.name }));
+      return { ok: true, tr };
+    }
+
+    case "removeBookmark": {
+      const target = locateAddress(tr.doc, op.addr);
+      const inner = target?.inner;
+      const node = target?.textNode;
+      if (!target || !inner || !node) return { ok: false, tr, reason: "找不到要撤书签的段落" };
+      const found: number[] = [];
+      node.forEach((child, offset) => {
+        if (!BOOKMARK_TYPES.has(child.type.name)) return;
+        if (String(child.attrs.id ?? "") !== op.id) return;
+        found.push(inner.from + offset);
+      });
+      if (!found.length) return { ok: false, tr, reason: `这一段没有书签 ${op.name}` };
+      // 从后往前删：删掉一个不会挪走前面那些还没删的坐标。
+      for (const pos of found.sort((a, b) => b - a)) tr.delete(pos, pos + 1);
       return { ok: true, tr };
     }
   }
