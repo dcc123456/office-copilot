@@ -673,13 +673,19 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   段内分节符（`w:pPr/w:sectPr`）目前只靠 `rawPpr` 透传，经编辑器会丢（见下面"①的实测"）。
 - 分栏（**②已落地**）：`w:cols w:num="2" w:space="twips"` + 每栏 `w:col`，承载在 `SectionGeometry.columns`
   上（`{count, gap, equalWidth, widths}`，gap/widths 是 CSS px @96DPI），入口就是「页面设置」面板。
-- 页面边框：`w:pgBorders`；水印：`w:headerReference` 里的 `v:shape` 文字（Word 用 WordArt VML，
-  本仓可以退化成 `w:pict` 文本框，需在规格里明确"Word 打开效果待验"）。
+- 页面边框（**③已落地**）：`w:pgBorders`（`CT_PageBorders`，父元素 `sectPr`，§17.6.10）承载在
+  `SectionGeometry.pageBorders` 上：`{offsetFrom, top, left, bottom, right}`，每条边
+  `{style, sizePt, spacePt, color}`。线宽 `w:sz` 是**八分之一 pt**、间距 `w:space` 是 **pt**（§17.3.4），
+  两者就按 pt 存在模型里，不再换算成 cm。水印：`w:headerReference` 里的 `v:shape` 文字（Word 用
+  WordArt VML，本仓可以退化成 `w:pict` 文本框，需在规格里明确"Word 打开效果待验"）。
 - 首字下沉：`w:pPr/w:framePr w:dropRows="3" w:line="…" w:hAnchor="text" w:vAnchor="text"`。
-- 行号：`w:lnNumType w:countBy="1" w:restart="newPage"`（节属性）。
+- 行号（**③已落地**）：`w:lnNumType w:countBy w:distance w:start`（`CT_LineNumber`，父元素 `sectPr`，
+  在 §17.6.1 的子元素序列里排在 `pgBorders` 之后、`cols` 之前），
+  承载在 `SectionGeometry.lineNumbers` = `{countBy, distance(CSS px), start}`；`w:restart` 本片**不建模**，
+  靠"值等价就整段不重建"原样留着。
 
-提交切分：① 节属性读写保真（`bba064e`）；② 分栏（`b93c1ef` `a806d69`）；③ 页面边框 + 行号；
-④ 首字下沉；⑤ 水印。
+提交切分：① 节属性读写保真（`bba064e`）；② 分栏（`b93c1ef` `a806d69`）；
+③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉；⑤ 水印。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -732,6 +738,43 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 > 另一个观测：页面设置重应用一次后 `w:pgMar` 的 1800 变成 1803 twips，是 cm↔px 往返的
 > 半 twips 误差，属预期，不影响 Word 打开。
 > 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**。
+
+> ③的判据与实测（`587a9c9` `96afc34`）：先补外部取证（Microsoft Learn 的 OpenXML XML-Schema 参考，
+> 你已明示许可）确认三件事才动手——`CT_PageBorders` 的父元素与 `w:offsetFrom` 取值、
+> `CT_Border` 里 `w:sz` 是**八分之一 pt**而 `w:space` 是**pt**（不是 twips）、`ST_Border` 的字面量清单
+> （`single/thick/double/dotted/dashed/dotDash/dotDotDash/triple/thinThickSmallGap/thickThinSmallGap/wave…`），
+> 以及 `CT_LineNumber` 只有 `countBy/distance/restart/start` 四个属性、ISO 示例
+> `<w:lnNumType w:countBy="1"/>` 说明 `restart`/`start` 都有缺省。
+> 模型：`SectionGeometry.pageBorders`（四条边各 `{style, sizePt, spacePt, color}`，`w:val` 为
+> `none`/`nil` 的边读成 `null`）与 `lineNumbers`（`distance` 是 CSS px，`w:distance` 的 twips 换算
+> 只在 docx-io 进出口发生，§2.1）。三态语义沿用 ②：**`undefined` = 这次保存不涉及，元素一动不动；
+> `null` = 用户关掉，删掉这条元素；有值 = 值等价就不重建**。这条规则这次被抽成通用的一处
+> `placeOrClear(arr, name, wanted, parse, same, build)`——它是 ② 那条 cols 分支的第三次出现（§3.2），
+> 顺带删掉 `buildSectPr` 里"从头造一节"的重复分支，`existing` 有无只影响初始数组。
+> 没建模的属性（`w:pgBorders` 上的 `w:display`/`w:zOrder`、每条边的 `w:shadow`/`w:frame`/主题色、
+> `w:lnNumType` 的 `w:restart`）靠这条规则原样穿过保存；一旦用户真改了边框就整条重建，`w:display`
+> 会随之消失——和 Word 改边框时重写该元素的行为一致，与 ② 的 `w:sep` 同一取舍。
+> 颜色复用 `ooxml-pm` 的 `colorVal`（改成导出，不再写第二份 OOXML hex→CSS 转换，§3.1）；
+> `samePageBorders` 比色时忽略大小写，因为 `<input type=color>` 交回 `#ff0000` 而文件里常写 `FF0000`，
+> 这不算用户改动。容差：线宽 1/16 pt、间距 0.5pt、行号距离 0.5px，都是单位往返的误差量级。
+> 桌面侧把线型→CSS、pt→px、偏移基准（距页面 / 距正文）三份换算收进
+> `apps/desktop/src/editor/pageBorders.ts` 一处，对话框、画布与 `printHtml` 共用（§3.3），
+> `geometryFor` 的第 6 个参数由 `columns` 改成 `extras` 对象（`{columns, pageBorders, lineNumbers}`），
+> 套版路径把三项一起带走——模板只改页边距（§2.7）。行号**不在画布上逐行编号**：分页是
+> `PagedLayout` 按块高度算的，逐行编号要把每个文本行映射到屏幕行，成本远超本片收益；
+> 数据仍完整写进 `.docx`，由 Word/WPS 渲染。
+> 实测（`tmp/border-app-probe.mjs`，独立 `--user-data-dir` + CDP 起真实 app）：一份既无
+> `w:pgBorders` 也无 `w:lnNumType` 的文档，打开时画布 0 条边框、对话框四条边都是"无"、
+> 行号未勾选且"每几行一个号"禁用；给上边选"虚线"（线宽/间距留缺省 0.5pt/1pt）+ 勾行号 +
+> 每 2 行 + 距正文 0.5cm → 确定后画布出现 1 条 `.oc-page-border`
+> （`top 1.33333px`、`width 793.733px`、计算样式 `dashed 1px rgb(0,0,0)`），保存读回
+> `<w:pgBorders w:offsetFrom="page"><w:top w:val="dashed" w:sz="4" w:space="1" w:color="auto"/></w:pgBorders>`
+> `<w:lnNumType w:countBy="2" w:distance="284"/>`（½pt→`sz=4`、0.5cm→18.9px→284twips 都对得上），
+> 正文两段一字不缺；**再点一次保存整份文件字节一致**且两条元素各只有一条，说明读回的值被判为
+> "没改"、没有重复重建。探针里同样观测到 ② 已记录的副作用：点确定会写 `<w:cols w:num="1"/>`、
+> `w:pgMar` 的 1800 变 1803。
+> 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**（线宽/间距的单位与 `ST_Border` 字面量
+> 取自微软 XML-Schema 参考页，不是本机实测）。
 
 ## 八、总验收表（每个功能提交都要填满）
 
@@ -900,6 +943,46 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   `widths`，改栏数会拉平成等宽；② 编辑视图只有导引线，没有栏内回流；③ 段内 `w:pPr/w:cols`
   仍受 `rawPpr` 注册缺口影响（与 §8.5 同一条）。
 - 提交：`b93c1ef` + `a806d69` 已推送，`git ls-remote origin main` = `a806d69`。
+
+### 8.7 排名 7 ③（页面边框 + 行号）验收记录（`587a9c9` `96afc34`）
+
+- 往返用例：`docx.test.ts` 新增 7 条——读侧 3 条（`reads w:pgBorders into the section geometry in
+  points`：八分之一 pt 的 `w:sz` 与 pt 的 `w:space` 落成 `sizePt`/`spacePt`，不做第二次换算；
+  `leaves page borders and line numbers unset when the section has neither`：源节没有这两项时
+  `pageBorders`/`lineNumbers` 必须是 `undefined` 而不是 `null`，否则保存会凭空删掉用户的东西；
+  `reads w:lnNumType as CSS px and ignores the unmodelled w:restart`：`w:distance` twips→px，
+  `w:restart` 不进模型）、写侧/保真 4 条（`keeps an untouched w:pgBorders verbatim including
+  w:display and w:shadow`：值等价就整段不重建，没建模的属性逐字留下且二次保存字节一致；
+  `rewrites w:pgBorders in top-left-bottom-right order when the user changes it`；
+  `writes w:lnNumType between pgMar and cols and drops it when line numbers are off`：位置按
+  `SECT_PR_ORDER`（`docx.ts:1296-1310`）；`removes w:pgBorders when every side is switched off`：
+  四条边全关 = `null` = 删元素）。公共夹具仍是 `saveTwice({ sectPr, applyPageSetup, editSection })`。
+- live 用例：不涉及——页面边框与行号都走 `section` 载荷不进 PM 文档，§5.3 的注册要求不适用。
+- 局部格式：不涉及（不碰 `w:rPr`；`w:pgBorders` 是节属性）。
+- 撤销：不涉及——没有新增 op，页面设置是文档级；保存仍走 `.tmp` → `rename`（§2.4）。
+- 类型 + 测试：`pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包 docx-io **265**（6 个文件，+7）/
+  desktop **282**（27 个文件，+13：`pageBorders.test.ts` 新增 6 条 + `PageSetupDialog.test.ts` +5 +
+  `printHtml.test.ts` +2）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、
+  `apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针（`tmp/border-app-probe.mjs`，独立 `--user-data-dir` + CDP）实跑读回的数字——
+  画布初始 `.oc-page-border` 0 条，对话框初始四条边都是"无"、行号未启用且"每几行一个号"禁用；
+  把上边改成虚线 0.5pt 间距 1pt + 启用行号每 2 行后，画布出现 1 条
+  `left 0px / top 1.33333px / width 793.733px`、计算样式 `dashed 1px rgb(0, 0, 0)`；保存后的
+  `document.xml` 里
+  `<w:pgBorders w:offsetFrom="page"><w:top w:val="dashed" w:sz="4" w:space="1" w:color="auto"/></w:pgBorders>`
+  与 `<w:lnNumType w:countBy="2" w:distance="284"/>`，两条各 1 次、正文两段一字不缺、二次保存字节一致。
+  编辑视图**故意不做逐行行号**：`PagedLayout` 按顶层块量高度，给每行插行号会让分页测量失效；
+  数据照样往返，真实行号由 Word 与打印/PDF 链路渲染。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。`w:pgBorders`/`w:lnNumType` 的形态、单位
+  （`w:sz` 八分之一 pt、`w:space` pt、`w:distance` twips）与子元素顺序按 ECMA-376 §17.6.10 / §17.3.4
+  推断，加上观测到的现存文档属性顺序，不是实测。
+- 遗留（写清楚，不算本片做完）：① 编辑视图无逐行行号（只有数据与打印链路有）；② 改任一条边会
+  整段重建 `w:pgBorders`，没建模的 `w:display`/`w:shadow`/`w:zOrder` 在那一次会掉（与 ② 的 `w:sep`
+  同一个取舍）；③ 对话框的颜色只能选 hex，没法把已改过的颜色重置回 `auto`；④ `w:restart` 不建模，
+  只在整段未动时保住；⑤ 段内分节符仍受 `rawPpr` 注册缺口影响（与 §8.5、§8.6 同一条）；
+  ⑥ 桌面原地保存没有产出 `.bak`（只有 `apps/cli/src/fsutil.ts:38` 有），与 §8 安全红线第 4 条对不上，
+  等你决定是补桌面侧还是改文档。
+- 提交：`587a9c9` + `96afc34` 已推送，`git ls-remote origin main` = `96afc34`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
