@@ -671,14 +671,15 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   末尾写一个默认 `w:sectPr`，读侧遇到 body 级 `w:sectPr` 直接 `continue` 丢弃（`:264`）——
   节属性走的是 `section` 载荷而不是 PM 文档，所以单节文档靠 `replaceProseMirror` 把原节点换回来。
   段内分节符（`w:pPr/w:sectPr`）目前只靠 `rawPpr` 透传，经编辑器会丢（见下面"①的实测"）。
-- 分栏：`w:cols w:num="2" w:space="twips"` + 每栏 `w:col`；编辑器需要 `section` 级属性承载，
-  决定用「页面设置」面板（已有页面尺寸/边距的地方）。
+- 分栏（**②已落地**）：`w:cols w:num="2" w:space="twips"` + 每栏 `w:col`，承载在 `SectionGeometry.columns`
+  上（`{count, gap, equalWidth, widths}`，gap/widths 是 CSS px @96DPI），入口就是「页面设置」面板。
 - 页面边框：`w:pgBorders`；水印：`w:headerReference` 里的 `v:shape` 文字（Word 用 WordArt VML，
   本仓可以退化成 `w:pict` 文本框，需在规格里明确"Word 打开效果待验"）。
 - 首字下沉：`w:pPr/w:framePr w:dropRows="3" w:line="…" w:hAnchor="text" w:vAnchor="text"`。
 - 行号：`w:lnNumType w:countBy="1" w:restart="newPage"`（节属性）。
 
-提交切分：① 节属性读写保真（`bba064e`）；② 分栏；③ 页面边框 + 行号；④ 首字下沉；⑤ 水印。
+提交切分：① 节属性读写保真（`bba064e`）；② 分栏（`b93c1ef` `a806d69`）；③ 页面边框 + 行号；
+④ 首字下沉；⑤ 水印。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -702,6 +703,34 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 > 仍然没解决的：段内分节符（分节符那一段的 `w:pPr/w:sectPr`）靠 `rawPpr` 透传，而
 > `rawPpr` 在 Tiptap 的段落 schema 里没有注册，所以**经编辑器**的多节文档仍会被拍成单节——
 > 这条与排名 4 记下的 `rawPpr` 缺口是同一个，属独立一片，不夹进本节。
+> 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**。
+
+> ②的判据与实测（`b93c1ef` `a806d69`）：分栏建模成 `SectionGeometry.columns`
+> （`{count, gap, equalWidth, widths}`，`gap`/`widths` 是 CSS px @96DPI，进出口才换算 twips），
+> 沿节属性走 `section` 载荷，不进 PM 文档。读侧只在真的存在 `w:cols` 时才赋值，**不拿
+> `count: 1` 冒充单栏**——否则一份没有 `w:cols` 的文档保存后会被凭空加一节属性。写侧
+> `w:num` / `w:space` 必写，`w:equalWidth="0"` 与每栏 `w:col w:w` 只在真的是不等宽时才写。
+> 节属性插入位置从 ① 的"pgMar 紧跟 pgSz"特例统一成 `placeInSection` + `SECT_PR_ORDER`
+> （ECMA-376 §17.6.1 的 `CT_SectPr` 子元素序列），③ 要加 `w:pgBorders` / `w:lnNumType` 时不必再改这段。
+> `w:cols` 上还有个没建模的属性 `w:sep`（栏间分隔线），处理规则是**值等价就整段不重建**
+> （`sameColumns`，0.5px 容差吃掉 px↔twips 的往返误差），只有用户真的改了分栏才重写，
+> 与 Word 自己的行为一致（AGENTS §2.7：不擅自改动用户已有的版式意图）。
+> 桌面入口就在「页面设置」面板：栏数 1–13、栏间距按 cm 显示，1 栏时间距控件禁用；
+> `geometryFor()` 多接一个 `columns` 参数，顺手删掉 `PageSetupDialog` 与 `PageChrome` 里各自
+> 复制的 `SectionGeometryLike`（同一段结构第三份复制，AGENTS §3.2）和 `App.tsx` 里两处
+> `as never`。套模板/美化时把现有 `columns` 原样带过去——模板只改页边距。
+> 编辑视图**只画栏边界导引线**（虚线，`pointer-events: none`），不做文字重排：分页是
+> `PagedLayout` 逐个量顶层块高度算出来的，给可编辑层加 CSS 多栏会让测量全部失效。
+> 真正的分栏落在打印/PDF 链路（`printHtml` 的 `column-count` + `column-fill: auto` + 固定栏高），
+> 那才是交付物。
+> 实测（`tmp/cols-app-probe.mjs`，独立 `--user-data-dir` + CDP 起真实 app）：打开单栏文档时面板
+> 初始值 `栏数=1 / 间距=1.27cm / 间距禁用`；改成 3 栏、间距 0.8cm 后提示"每栏 ≈ 4.35 cm"，
+> 画布上两条导引线 `left 314.711px / 509.222px`（= marginLeft 120 + 194.7 / 389.2），保存读回
+> `<w:cols w:space="453" w:num="3"/>`（0.8cm→30.2px→453twips 对得上）。
+> 顺带发现（**没有改，交给你决定**）：桌面原地保存不产生 `.bak`，只有 CLI 会备份
+> （`apps/cli/src/fsutil.ts:38`），和 AGENTS §8 安全项 4"原地写回默认先出 `.bak`"不一致。
+> 另一个观测：页面设置重应用一次后 `w:pgMar` 的 1800 变成 1803 twips，是 cm↔px 往返的
+> 半 twips 误差，属预期，不影响 Word 打开。
 > 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**。
 
 ## 八、总验收表（每个功能提交都要填满）
@@ -846,6 +875,31 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 遗留（写清楚，不算本片做完）：段内分节符仍靠 `rawPpr` 透传，经编辑器会丢，多节文档在桌面上
   仍被拍成单节；与排名 4 记下的 `rawPpr` 注册缺口同属一片独立改动。
 - 提交：`bba064e` 已推送，`git ls-remote origin main` = `bba064e`。
+
+### 8.6 排名 7 ②（分栏）验收记录（`b93c1ef` `a806d69`）
+
+- 往返用例：`docx.test.ts` 新增 7 条——读侧 3 条（`w:cols` 解析成 CSS px 的 count/gap/widths、
+  源节没有 `w:cols` 时 `columns` 保持 `undefined`、不等宽分栏读出每栏 `w:col w:w`）、写侧/保真 4 条
+  （未改动的 `w:cols` 连没建模的 `w:sep` 一起逐字留下且二次保存字节一致、改了栏数才重写并生成
+  `w:space`/`w:num`、不等宽写出 `w:equalWidth="0"` + 每栏 `w:col`、单栏文档不凭空造 `w:cols`）。
+  公共夹具仍是 ① 扩出来的 `saveTwice({ sectPr, applyPageSetup, editSection })`（AGENTS §3.2）。
+- live 用例：本片**不涉及**——分栏走 `section` 载荷不进 PM 文档，§5.3 的注册要求不适用，
+  `docBlocks.live.test.ts` 没有新条目。
+- 局部格式：不涉及（不碰 `w:rPr`）。
+- 撤销：不涉及——没有新增 op，页面设置是文档级；保存仍走 `.tmp` → `rename`（§2.4）。
+- 类型 + 测试：`pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包 docx-io **258**（+7）/
+  desktop **269**（26 个文件，+5：`PageSetupDialog.test.ts` 3 条 + `printHtml.test.ts` 2 条）/
+  word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针（`tmp/cols-app-probe.mjs`，独立 `--user-data-dir` + CDP）实跑读回的数字——面板
+  初始 `栏数=1 / 间距=1.27cm / 间距控件禁用`，改 3 栏 + 0.8cm 后"每栏 ≈ 4.35 cm"，导引线
+  `left 314.711px / 509.222px`，保存后的 `document.xml` 里 `<w:cols w:space="453" w:num="3"/>`。
+  编辑视图故意不做文字重排（会让 `PagedLayout` 的高度测量失效），真实分栏在打印/PDF 链路。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。属性形态与顺序按 ECMA-376 §17.6.1 推断，
+  加上观测到的现存文档属性顺序，不是实测。
+- 遗留（写清楚，不算本片做完）：① 面板不提供逐栏宽度编辑，不等宽文档只在**栏数不变**时保住
+  `widths`，改栏数会拉平成等宽；② 编辑视图只有导引线，没有栏内回流；③ 段内 `w:pPr/w:cols`
+  仍受 `rawPpr` 注册缺口影响（与 §8.5 同一条）。
+- 提交：`b93c1ef` + `a806d69` 已推送，`git ls-remote origin main` = `a806d69`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
