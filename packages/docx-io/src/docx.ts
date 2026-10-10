@@ -5,6 +5,7 @@ import {
   escapeAttr,
   escapeText,
   firstChild,
+  isElement,
   parseDocument,
   parseFragment,
   serialize,
@@ -650,8 +651,8 @@ export class DocxFile {
   /**
    * 写 `word/comments.xml`：正文里的锚点决定条目增删，没编辑过的按原始 XML 透传。
    *
-   * 一条批注都没有时既不写文件也不登记关系——空的 `w:comments` 会让 Word 觉得文档
-   * 有批注区，比没有这个部件更糟。
+   * 一条批注都没有时把部件连同关系与 Override 一起删掉：文档里既没有批注区，
+   * 也不会留下一份带孤立条目的旧文件。
    *
    * @param doc 即将写进正文的 PM doc，锚点从它身上收集（只读 attrs.id）。
    * @returns 无返回值。
@@ -660,7 +661,13 @@ export class DocxFile {
     this.comments = syncCommentIds(this.comments, collectCommentRefs(doc));
     if (this.comments.isUnmodeled) return;
     const xml = serializeCommentsPart(this.comments.entries, this.numbering);
-    if (!xml) return;
+    // 批注全删光时不能只是"不写部件"：包里那份旧的 word/comments.xml 还带着孤立条目，
+    // Word 会把已删的批注重新显示出来。空的 <w:comments> 又会让 Word 以为文档有批注区，
+    // 所以按 Word 自己的做法把部件连同登记一起摘掉。
+    if (!xml) {
+      await this.dropCommentPart(this.comments.partPath ?? COMMENT_PART);
+      return;
+    }
     const path = this.comments.partPath ?? COMMENT_PART;
     this.zip.file(path, xml);
     await this.ensurePartReference(path, COMMENT_REL_TYPE, COMMENT_CONTENT_TYPE);
@@ -1041,6 +1048,43 @@ export class DocxFile {
       children: [],
     } as unknown as Element);
     this.zip.file(RELS_XML, serialize(rels));
+  }
+
+  /**
+   * 摘掉批注部件：文件本身、`[Content_Types].xml` 里那条 Override、文档关系各清一份。
+   *
+   * 与 {@link ensurePartReference} 相反，但只在包里真的有这个部件时才动手——
+   * 一份从来没有批注的文档不该因为保存一次就被改写 rels/Content_Types 的字节。
+   *
+   * @param partName 部件路径，如 `word/comments.xml`。
+   * @returns 无返回值。
+   */
+  private async dropCommentPart(partName: string): Promise<void> {
+    if (!this.zip.file(partName)) return;
+    this.zip.remove(partName);
+
+    const ctFile = this.zip.file(CONTENT_TYPES);
+    if (ctFile) {
+      const ct = parseDocument(await ctFile.async("string"));
+      ct.children = (ct.children ?? []).filter(
+        (node) =>
+          !(
+            isElement(node) &&
+            node.name === "Override" &&
+            node.attributes?.["PartName"] === `/${partName}`
+          ),
+      );
+      this.zip.file(CONTENT_TYPES, serialize(ct));
+    }
+
+    const relsFile = this.zip.file(RELS_XML);
+    if (relsFile) {
+      const rels = parseDocument(await relsFile.async("string"));
+      rels.children = (rels.children ?? []).filter(
+        (node) => !(isElement(node) && node.attributes?.["Type"] === COMMENT_REL_TYPE),
+      );
+      this.zip.file(RELS_XML, serialize(rels));
+    }
   }
 }
 

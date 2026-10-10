@@ -1286,6 +1286,25 @@ describe("批注部件往返", () => {
     expect(await part(out, "word/document.xml")).not.toContain('w:id="0"');
   });
 
+  it("最后一条批注也删掉时，部件连同 Override 与关系一起摘掉", async () => {
+    const out = await savedOnce(await commentedDocx(), (doc) => ({
+      ...doc,
+      content: doc.content.map((p) => ({
+        ...p,
+        content: (p.content ?? []).filter((i) => !i.type.startsWith("comment")),
+      })),
+    }));
+    const zip = await JSZip.loadAsync(out);
+    // 空的 <w:comments> 会让 Word 以为文档有批注区，留着旧字节更糟（已删的批注会复现），
+    // 所以 Word 自己的做法是三处一起清：部件文件、Content_Types 的 Override、文档关系。
+    expect(zip.file("word/comments.xml")).toBeNull();
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct).not.toContain("/word/comments.xml");
+    expect(ct).not.toContain("wordprocessingml.comments+xml");
+    const rels = await zip.file("word/_rels/document.xml.rels")!.async("string");
+    expect(rels).not.toContain("relationships/comments");
+  });
+
   it("正文新插入锚点，部件补一条占位作者的条目", async () => {
     const out = await savedOnce(await commentedDocx(), (doc) => ({
       ...doc,
