@@ -235,14 +235,15 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | --- | --- | --- |
 | ① | 书签：`w:bookmarkStart/End` 往返（段内直子元素，落单的一半在序列化前丢掉）+ 编辑器锚点节点 | `ba17b00` |
 | ② | 域读侧：同段 begin/end 配对成一条 `field` 节点，保留 `instr` 与**字面**缓存结果（`\t`⇄`<w:tab/>`、`\n`⇄`<w:br/>`），域内套域按 fieldDepth 折进外层结果；`Field.ts` 属性补 parse/render | `16a0e89` |
-| ③ | 目录生成与插入（含跨段目录的配对标记模型——②里记的"跨段降级"在这一步解决） | 待做 |
+| ③.1 | 跨段域的边界模型：段落内 begin 而本段无 end 时吐 `fieldBegin`/`fieldEnd` 一对节点（`fldCharTypes`/`closesInParagraph` 预扫判定），begin 后域深度归零让条目里的 `PAGEREF` 继续结构化；写侧 `fieldBoundaryXml` 还原 begin+instrText+separate 三件套；编辑器两个行内 atom | `bc06382` |
+| ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页 | 待做 |
 | ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
 
-②的已知差距（都写进了 `pm-schema.ts` 的节点注释）：一个 `field` 节点只表示**同一段内**的
-begin/end 配对，Word 生成的多段目录从第二段起读成纯文本；缓存结果里的嵌套域指令（如目录条目
-的 `PAGEREF`）只保留文本不重建结构。这两条都是③要处理的，因为"重新生成目录"必须先能把域跨段
-配对、再把结果写回多段。
+②的已知差距：一个 `field` 节点只表示**同一段内**的 begin/end 配对，Word 生成的多段目录从第二段起读成纯文本
+——已由 ③.1 解决。缓存结果里的嵌套域指令（如目录条目的 `PAGEREF`）②只保留文本，③.1 起改由边界节点之间的
+正文承载，重新生成目录（③.2）因此必须先有这一对边界。
+未闭合的域（有 begin 无 end）③.1 选择**原样透传**：不替用户编一个 end，Word 重算时会自己补齐。
 
 ## 四、排名 4：批注 / 修订跟踪
 
