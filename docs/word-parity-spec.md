@@ -456,11 +456,61 @@ UI 挂在「段落」面板下方（对齐 Word 的"制表位…"按钮），支
 
 ## 六、排名 6：上标 / 下标
 
-OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
-实现：新增 Tiptap mark（不装 `@tiptap/extension-superscript`，因为它渲染成 `<sup>` 且不带
-`data-*`，与 `TextStyle` 的属性白名单模式不一致；改为把 `vertAlign` 作为 `TextStyle` mark 的
-一个属性，与 `color`/`fontSize` 同构）→ 这样字体面板、右键「清除所有格式」、docx 往返都自动复用现有链路。
-入口：工具栏 + 右键「字体(F)…」面板。**注意 AGENTS §2.3**：部分文字带上下标时禁止整段拍平。
+OOXML：`w:rPr/w:vertAlign w:val="baseline|superscript|subscript"`，ECMA-376 Part 4 §17.3.2.27 的
+`ST_VerticalAlignRun`（本机经 c-rex.net 的 ECMA-376 镜像页取回原文；`learn.microsoft.com` 上按元素名猜的那条
+URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`baseline` 是缺省档位**但会被显式写出来**用来取消样式
+继承的上标——所以读侧是分三种情况的：写过 baseline / 没写过 / 写了另两档。
+
+做法（与本节最初设想的差别，说清免得下次又按旧文案实现）：
+- 原计划"把 `vertAlign` 当 `TextStyle` 的一个属性"，落地时改成**独立的 `vertAlign` mark 带一个 `val` 枚举**：
+  OOXML 那边就一个元素一个值，两个开关 mark 能同时挂成"又上标又下标"；`TextStyle` 的属性都是能并存的维度
+  （字体、字号、颜色），塞进去反而要额外写互斥。也不装 `@tiptap/extension-superscript`/`subscript`（§6.4 的问答：
+  现有依赖能渲染，但它是"mark 名即档位"的两个 mark，且不带 `data-*`，覆盖不了这个语义）。互斥由 `tr.addMark`
+  同类型顶掉白送。
+- 档位 `val` 是 `rendered: false` 的属性：DOM 里只有标准的 `<sup>`/`<sub>`，复制/打印出去不带非标准属性，
+  落盘走 `editor.getJSON()`，attrs 照样带得出。
+- 读侧只把 `superscript`/`subscript` 落成标记，`baseline` 等于"没有这个标记"；`raised` 之类不认识的值整个丢弃
+  （这份 rPr 还会进样式定义，塞一个 Word 不认的值比重丢更糟）。
+- 写入仍只有 `runPropertiesParts` 一个点，`RPR_ORDER` 把 `vertAlign` 排在 `shd` 之后（CT_RPr 的元素顺序），于是
+  直接格式、样式定义、页眉页脚预览三条链路共用同一份实现（§3.2/§3.3）；页眉页脚预览里原来那两条重复的
+  if 链顺手收成一张 `inlineTagOf` 表（净代码下降）。
+
+提交切分（实际落地顺序与提交号）：
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| ① | docx-io：`VerticalAlign` 类型 + `w:vertAlign` 读写往返（三档、未知档位丢弃、两档互不顶掉、元素顺序） | `0cd9254` |
+| ② | desktop：`vertAlign` mark + 工具栏「上标/下标」+ 注册进 `EDITOR_EXTENSIONS`，格式刷、样式抓取、页眉页脚预览都认它 | `1bf35a2` |
+
+取舍：
+- **不写 `w:sz`**。缩小是排版行为（实测：正文 14px 的段落里角标算得 11.6667px），文档里发明一个字号等于改用户
+  的字号，也违反 §2.1 的换算单点。代价是 Word 里缩多少由它的排字规则决定，不由我们写死。
+- `baseline` 不进编辑器，也不产出 `w:val="baseline"`：编辑器里没有"取消继承"这个概念。样式窗格那条链路将来要
+  显式取消时再补。
+- AI 提案与模板套版的字符样式词表（`CHAR_STYLE_KEYS`）**不加**角标：套版对它是"既不投票也不写"，所以整段套版
+  不会拍平用户手打的 H₂O（live 用例覆盖）。这是有意的最小范围（§3.6），不是遗漏。
+- **样式定义里的 `vertAlign` 预览不出来**：CSS 的 `vertical-align` 不继承，文档作用域样式表只能预览可继承的
+  字体/字号/颜色。这条差距记录在案，不在本节修。
+- 没做键盘加速器（Word 是 `Ctrl+=` 上标、`Ctrl+Shift+=` 下标），本节验收面是工具栏入口与文档保真。
+
+验收与差距：
+- 往返用例：`packages/docx-io/src/ooxml-pm.test.ts` 新增 3 条（三档读法 + 未知档位丢弃；往返字节一致且两档互不
+  顶掉；`vertAlign` 排在 rPr 末尾）。
+- live 用例：`apps/desktop/src/editor/docBlocks.live.test.ts` 新增 2 条（真实 schema 收下两个档位、档位不被
+  mark 缺省值抹平；整段套版只补字体颜色，下标原样留着）。
+- 标记单测：`apps/desktop/src/editor/extensions/VertAlign.test.ts` 7 条（缺省档位、`<sup>`/`<sub>` 各认一档、
+  渲染选标签且不挂 `val`、换档后只剩一条、同档再点是取消）。
+- 样式抓取：`styleCapture.test.ts` 新增 2 条（下标带档位进样式定义；上标与下标混排报 `mixed-run-format`，
+  detail 是 `vertAlign`，即 §2.3 的不拍平）。
+- 门禁（2026-10-11 实测）：`pnpm build` 退出 0，`pnpm test` 退出 0，逐包核对通过数——docx-io 214、desktop 231、
+  server 2、word-client 8、word-tools 6；`packages/shared`、`apps/cli`、`apps/task-pane` 仍无测试文件（`passWithNoTests`）。
+- 真实 app 实跑（独立 `--user-data-dir` + CDP 探针，2026-10-11 实测，探针产物只在 `tmp/` 且已删）：打开含
+  `subscript` 与 `superscript` 两段样例 → 屏幕上分别是 `sub(2)`/`sup(2)`，算得角标 11.6667px、正文 14px、
+  `vertical-align: sub`；选中下标点「上标」→ 按钮类名带 `active` 且变成 `sup(2)`，再点 → 类名回到 `icon`（取消），
+  第三点 → 又 `sup(2)`；另一段点「下标」→ `sub(2)`；存盘后 `word/document.xml` 里是
+  `<w:vertAlign w:val="superscript"/>` 与 `<w:vertAlign w:val="subscript"/>`，全文没有 `w:sz`，DOM 里也没有残留的 `val=`。
+- `[!]` 用 Word / WPS 实际打开一遍：本机没装，**BLOCKED**。上面是"读回字节一致 + 浏览器真实渲染"，不是 Word 实测。
+
 
 ## 七、排名 7：分栏 / 水印 / 页面边框 / 首字下沉 / 行号
 
