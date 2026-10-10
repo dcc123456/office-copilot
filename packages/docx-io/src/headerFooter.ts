@@ -1,5 +1,5 @@
 import type JSZip from "jszip";
-import { children, firstChild, parseDocument } from "./xml.js";
+import { children, firstChild, parseDocument, wordPartPath } from "./xml.js";
 import { ooxmlFragmentToPm, pmToOoxmlFragment } from "./ooxml-pm.js";
 import type { PMDoc } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
@@ -106,11 +106,7 @@ export async function loadHeaderFooters(
     const target = relMap.get(rId);
     if (!target) continue;
     // Targets in document.xml.rels are relative to word/.
-    const path = target.startsWith("word/")
-      ? target
-      : target.startsWith("/")
-        ? target.slice(1)
-        : `word/${target.replace(/^\.\//, "")}`;
+    const path = wordPartPath(target);
     const f = zip.file(path);
     if (!f) continue;
     const xml = await f.async("string");

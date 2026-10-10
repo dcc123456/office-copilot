@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import JSZip from "jszip";
 import { DocxFile } from "./docx.js";
 import { nextFootnoteId, type FootnoteBody, type FootnoteEntry } from "./footnotes.js";
+import { nextCommentId } from "./comments.js";
 import type { PMDoc } from "./pm-schema.js";
 
 async function makeDocx(
@@ -857,3 +858,293 @@ describe("脚注 id 分配", () => {
     expect(nextFootnoteId([{ id: "-1", role: "separator" }])).toBe("1");
   });
 });
+
+/**
+ * 排名 4 ①：批注部件。
+ *
+ * 分工与脚注同形：正文里只有三个锚点（区间两端 + 引用记号，都只带 `w:id`），批注的
+ * 内容住在 `word/comments.xml`。差别是 `CT_Comment` 要求 `w:author` 必填、`w:date`
+ * 与 `w:initials` 可选，正文可以是整个段落，而且没有分隔符那种版式件。
+ */
+const COMMENT_REL =
+  '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="comments.xml"/>';
+
+/** Word 写出来的批注部件：日期是 ISO 8601，第二条干脆没写日期。 */
+const COMMENTS_XML =
+  `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+  `<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+  `xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+  `<w:comment w:id="0" w:author="张三" w:initials="张" w:date="2026-01-02T10:30:00Z">` +
+  `<w:p><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:t>请把这条改成公文格式。</w:t></w:r></w:p></w:comment>` +
+  `<w:comment w:id="1" w:author="李四"><w:p><w:r><w:t>同意。</w:t></w:r><w:r><w:br/><w:t>补充一句。</w:t></w:r></w:p></w:comment>` +
+  `</w:comments>`;
+
+/** 正文：第一段一个完整区间，第二段区间跨进来（批注区间本来就常跨段）。 */
+const ANCHOR_PARAGRAPHS = [
+  `<w:p><w:r><w:t>正文甲</w:t></w:r><w:commentRangeStart w:id="0"/>` +
+    `<w:r><w:t>被批注的文字</w:t></w:r><w:commentRangeEnd w:id="0"/>` +
+    `<w:r><w:rPr><w:rStyle w:val="af"/></w:rPr><w:commentReference w:id="0"/></w:r></w:p>`,
+  `<w:p><w:commentRangeStart w:id="1"/><w:r><w:t>下段</w:t></w:r>` +
+    `<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r></w:p>`,
+];
+
+function commentedDocx(): Promise<Uint8Array> {
+  return makeDocx([], {
+    rawParagraphs: ANCHOR_PARAGRAPHS,
+    documentRels: COMMENT_REL,
+    parts: { "word/comments.xml": COMMENTS_XML },
+  });
+}
+
+describe("批注部件往返", () => {
+  /** 打开 → 走一遍编辑器保存路径 → 返回保存出来的包；`edit` 模拟编辑器里的改动。 */
+  async function savedOnce(
+    bytes: Uint8Array,
+    edit?: (doc: PMDoc) => PMDoc,
+  ): Promise<Uint8Array> {
+    const docx = await DocxFile.fromBytes(bytes);
+    const loaded = await docx.toProseMirror();
+    await docx.replaceProseMirror(edit ? edit(loaded.doc) : loaded.doc);
+    return docx.toBytes();
+  }
+
+  const part = async (bytes: Uint8Array, path: string): Promise<string> => {
+    const zip = await JSZip.loadAsync(bytes);
+    return (await zip.file(path)?.async("string")) ?? "";
+  };
+
+  it("三个锚点读成 inline 节点，条目带齐作者、缩写与日期", async () => {
+    const docx = await DocxFile.fromBytes(await commentedDocx());
+    const loaded = await docx.toProseMirror();
+    expect(loaded.doc.content[0]!.content?.map((n) => n.type)).toEqual([
+      "text",
+      "commentRangeStart",
+      "text",
+      "commentRangeEnd",
+      "commentReference",
+    ]);
+    expect(loaded.comments.entries.map((e) => e.id)).toEqual(["0", "1"]);
+    expect(loaded.comments.entries[0]).toMatchObject({
+      author: "张三",
+      initials: "张",
+      date: "2026-01-02T10:30:00Z",
+    });
+    // 条目没写 w:date / w:initials 时保持缺失，不替 Word 补它没写过的值。
+    expect(loaded.comments.entries[1]).toMatchObject({ author: "李四" });
+    expect(loaded.comments.entries[1]!.date).toBeUndefined();
+    expect(loaded.comments.entries[1]!.initials).toBeUndefined();
+    expect(loaded.comments.isUnmodeled).toBe(false);
+    expect(loaded.comments.partPath).toBe("word/comments.xml");
+  });
+
+  it("批注正文里的换行读回来，不折成一整段", async () => {
+    const docx = await DocxFile.fromBytes(await commentedDocx());
+    const loaded = await docx.toProseMirror();
+    const body = loaded.comments.entries[1]!.pm.content[0]!;
+    expect(body.content?.map((n) => n.type)).toEqual(["text", "hardBreak", "text"]);
+  });
+
+  it("保存一次登记 Content_Types 与关系，条目按原始 XML 逐字节带走", async () => {
+    const out = await savedOnce(await commentedDocx());
+    const cm = await part(out, "word/comments.xml");
+    // `CommentText` 样式与 `w:br` 都没建模成分立类型，透传才谈得上"逐字节"。
+    expect(cm).toContain(
+      `<w:comment w:id="0" w:author="张三" w:initials="张" w:date="2026-01-02T10:30:00Z"><w:p><w:pPr><w:pStyle w:val="CommentText"/></w:pPr><w:r><w:t>请把这条改成公文格式。</w:t></w:r></w:p></w:comment>`,
+    );
+    const zip = await JSZip.loadAsync(out);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct).toContain('PartName="/word/comments.xml"');
+    expect(ct).toContain("wordprocessingml.comments+xml");
+    const rels = await zip.file("word/_rels/document.xml.rels")!.async("string");
+    expect(rels.match(/relationships\/comments/g)).toHaveLength(1);
+    const body = await part(out, "word/document.xml");
+    expect(body).toContain(`<w:commentRangeStart w:id="0"/>`);
+    expect(body).toContain(`<w:commentReference w:id="1"/>`);
+  });
+
+  it("保存两次不再多登记，部件内容逐字节稳定", async () => {
+    const once = await savedOnce(await commentedDocx());
+    const twice = await savedOnce(once);
+    expect(await part(twice, "word/comments.xml")).toBe(await part(once, "word/comments.xml"));
+    const zip = await JSZip.loadAsync(twice);
+    const ct = await zip.file("[Content_Types].xml")!.async("string");
+    expect(ct.match(/\/word\/comments\.xml/g)).toHaveLength(1);
+  });
+
+  it("删掉正文里的锚点，部件里那条批注一起消失，另一条不受牵连", async () => {
+    const out = await savedOnce(await commentedDocx(), (doc) => ({
+      ...doc,
+      content: doc.content.map((p) => ({
+        ...p,
+        content: (p.content ?? []).filter(
+          (i) =>
+            !(
+              (i.type === "commentRangeStart" ||
+                i.type === "commentRangeEnd" ||
+                i.type === "commentReference") &&
+              i.attrs.id === "0"
+            ),
+        ),
+      })),
+    }));
+    const cm = await part(out, "word/comments.xml");
+    expect(cm).not.toContain("请把这条改成公文格式");
+    expect(cm).not.toContain('w:id="0"');
+    expect(cm).toContain("同意。");
+    expect(await part(out, "word/document.xml")).not.toContain('w:id="0"');
+  });
+
+  it("正文新插入锚点，部件补一条占位作者的条目", async () => {
+    const out = await savedOnce(await commentedDocx(), (doc) => ({
+      ...doc,
+      content: [
+        ...doc.content,
+        {
+          type: "paragraph",
+          content: [
+            { type: "commentRangeStart", attrs: { id: "7" } },
+            { type: "text", text: "新批注" },
+            { type: "commentRangeEnd", attrs: { id: "7" } },
+            { type: "commentReference", attrs: { id: "7" } },
+          ],
+        },
+      ],
+    }));
+    const cm = await part(out, "word/comments.xml");
+    // `w:author` 是必填属性，作者名要等排名 4 ⑤ 接进设置，这里先落占位名。
+    expect(cm).toContain('<w:comment w:id="7" w:author="Office Copilot">');
+    expect(await part(out, "word/document.xml")).toContain('<w:commentReference w:id="7"/>');
+  });
+
+  it("只有一条 id 读不进来时，整个部件原样透传不重写", async () => {
+    const out = await savedOnce(
+      await makeDocx([], {
+        rawParagraphs: ANCHOR_PARAGRAPHS,
+        documentRels: COMMENT_REL,
+        parts: {
+          "word/comments.xml": COMMENTS_XML.replace('w:id="1"', 'w:id="not-a-number"'),
+        },
+      }),
+    );
+    expect(await part(out, "word/comments.xml")).toContain('w:id="not-a-number"');
+    expect(await part(out, "word/comments.xml")).toContain("请把这条改成公文格式。");
+  });
+
+  it("本来没有批注的文档，保存后不会凭空多出部件", async () => {
+    const out = await savedOnce(await makeDocx(["只有一段"]));
+    expect(await part(out, "word/comments.xml")).toBe("");
+    const zip = await JSZip.loadAsync(out);
+    expect(await zip.file("[Content_Types].xml")!.async("string")).not.toContain("comments+xml");
+  });
+
+  it("窗格改过的条目重新序列化，没改的那条仍按原始 XML 带走", async () => {
+    const docx = await DocxFile.fromBytes(await commentedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setCommentBodies([
+      {
+        id: "0",
+        doc: {
+          type: "doc",
+          content: [
+            { type: "paragraph", content: [{ type: "text", text: "改过的批注正文。" }] },
+          ],
+        },
+        author: "王五",
+      },
+      { id: "1", doc: loaded.comments.entries[1]!.pm },
+    ]);
+    await docx.replaceProseMirror(loaded.doc);
+    const cm = await part(await docx.toBytes(), "word/comments.xml");
+    // 只换了正文与作者，原条目的日期与缩写仍跟着走（CommentBody 里没给就保留原值）。
+    expect(cm).toContain('<w:comment w:id="0" w:author="王五" w:date="2026-01-02T10:30:00Z" w:initials="张">');
+    expect(cm).toContain("改过的批注正文。");
+    expect(cm).not.toContain("请把这条改成公文格式");
+    expect(cm).not.toContain("CommentText");
+    // 第二条一个字节没动：连正文里那个 `w:br` 与原始属性顺序都在。
+    expect(cm).toContain(
+      `<w:comment w:id="1" w:author="李四"><w:p><w:r><w:t>同意。</w:t></w:r><w:r><w:br/><w:t>补充一句。</w:t></w:r></w:p></w:comment>`,
+    );
+  });
+
+  it("正文与元信息都没变时不标脏，窗格过一遍也不重写", async () => {
+    const baseline = await savedOnce(await commentedDocx());
+    const docx = await DocxFile.fromBytes(await commentedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setCommentBodies(
+      loaded.comments.entries.map((e) => ({ id: e.id, doc: e.pm })),
+    );
+    await docx.replaceProseMirror(loaded.doc);
+    expect(await part(await docx.toBytes(), "word/comments.xml")).toBe(
+      await part(baseline, "word/comments.xml"),
+    );
+  });
+
+  it("读不进 id 的部件无视窗格送来的正文", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx([], {
+        rawParagraphs: [ANCHOR_PARAGRAPHS[0]!],
+        documentRels: COMMENT_REL,
+        parts: {
+          "word/comments.xml": COMMENTS_XML.replace('w:id="1"', 'w:id="not-a-number"'),
+        },
+      }),
+    );
+    const loaded = await docx.toProseMirror();
+    expect(loaded.comments.isUnmodeled).toBe(true);
+    docx.setCommentBodies([
+      {
+        id: "0",
+        doc: {
+          type: "doc",
+          content: [{ type: "paragraph", content: [{ type: "text", text: "篡改" }] }],
+        },
+      },
+    ]);
+    await docx.replaceProseMirror(loaded.doc);
+    const cm = await part(await docx.toBytes(), "word/comments.xml");
+    expect(cm).not.toContain("篡改");
+    expect(cm).toContain("请把这条改成公文格式。");
+  });
+
+  it("部件在包里的名字不标准时，写回仍用它原来的路径", async () => {
+    const out = await savedOnce(
+      await makeDocx([], {
+        rawParagraphs: ANCHOR_PARAGRAPHS,
+        documentRels: COMMENT_REL.replace('Target="comments.xml"', 'Target="../word/cm1.xml"'),
+        parts: { "word/cm1.xml": COMMENTS_XML },
+      }),
+    );
+    expect(await part(out, "word/cm1.xml")).toContain("请把这条改成公文格式。");
+    expect(await part(out, "word/comments.xml")).toBe("");
+    const zip = await JSZip.loadAsync(out);
+    expect(await zip.file("[Content_Types].xml")!.async("string")).toContain(
+      'PartName="/word/cm1.xml"',
+    );
+  });
+
+  it("作者名里的引号与尖括号按 XML 转义写出", async () => {
+    const docx = await DocxFile.fromBytes(await commentedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setCommentBodies([
+      {
+        id: "0",
+        doc: loaded.comments.entries[0]!.pm,
+        author: `A&B<c"`,
+      },
+    ]);
+    await docx.replaceProseMirror(loaded.doc);
+    const cm = await part(await docx.toBytes(), "word/comments.xml");
+    expect(cm).toContain(`w:author="A&amp;B&lt;c&quot;"`);
+  });
+});
+
+describe("批注 id 分配", () => {
+  it("取现有条目里最大的数字 id 加一", () => {
+    expect(nextCommentId([{ id: "0" }, { id: "12" }, { id: "3" }])).toBe("13");
+  });
+
+  it("一条批注都没有时从 0 开始 — 与规范样例里第一条的 id 一致", () => {
+    expect(nextCommentId([])).toBe("0");
+  });
+});
+

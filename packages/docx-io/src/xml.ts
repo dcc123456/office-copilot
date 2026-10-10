@@ -21,6 +21,28 @@ export function children(el: Element): Element[] {
   return (el.children ?? []).filter(isElement);
 }
 
+/**
+ * 把 `word/_rels/document.xml.rels` 里的 `@Target` 换算成包内路径。
+ *
+ * rels 的 Target 按约定相对 `word/` 写（`header1.xml`、`./styles.xml`），也有绝对写法
+ * （`/word/foo.xml`），OPC 还允许 `..` 往上一层；JSZip 的键却是全包路径且**不做规范化**，
+ * 留着 `../` 去查就查不到。几种写法在这一处收敛，各部件读取处不再各算一遍。
+ *
+ * @param target `Relationship/@Target` 的原始字符串。
+ * @returns 相对包根的路径，例如 `word/comments.xml`；`..` 已按段消掉。
+ */
+export function wordPartPath(target: string): string {
+  const relativeToRoot = target.startsWith("/");
+  const segments = (relativeToRoot ? target.slice(1) : `word/${target}`).split("/");
+  const resolved: string[] = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") continue;
+    if (segment === "..") resolved.pop();
+    else resolved.push(segment);
+  }
+  return resolved.join("/");
+}
+
 export function isElement(n: XmlNode | undefined): n is Element {
   return !!n && n.type === "element";
 }

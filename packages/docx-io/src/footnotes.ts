@@ -1,6 +1,7 @@
 import type JSZip from "jszip";
-import { children, parseDocument, serialize } from "./xml.js";
-import { FOOTNOTE_ID, ooxmlFragmentToPm, pmToOoxmlFragment } from "./ooxml-pm.js";
+import { children, parseDocument, serialize, wordPartPath } from "./xml.js";
+import { FOOTNOTE_ID, ooxmlFragmentToPm, pmToOoxmlFragment, samePmFragment } from "./ooxml-pm.js";
+import { emptyPmDoc } from "./pm-schema.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
 import type { NumberingMap } from "./numbering.js";
 import type { StyleMap } from "./styles.js";
@@ -91,8 +92,6 @@ const REF_MARK: Record<FootnoteKind, string> = {
   endnote: "<w:r><w:rPr><w:vertAlign w:val=\"superscript\"/></w:rPr><w:endnoteRef/></w:r>",
 };
 
-const EMPTY_DOC: PMDoc = { type: "doc", content: [{ type: "paragraph", content: [] }] };
-
 /**
  * 读脚注与尾注部件。
  *
@@ -125,12 +124,7 @@ export async function loadFootnotes(
     const target = byType.get(FOOTNOTE_REL_TYPE[kind]);
     if (!target) continue;
     // rels 的 Target 相对 word/ 解析。
-    const path = target.startsWith("/")
-      ? target.slice(1)
-      : target.startsWith("word/")
-        ? target
-        : `word/${target.replace(/^\.\//, "")}`;
-    const xml = await zip.file(path)?.async("string");
+    const xml = await zip.file(wordPartPath(target))?.async("string");
     if (!xml) continue;
     const root = parseDocument(xml);
     let dropped = false;
@@ -241,7 +235,7 @@ export function applyFootnoteBodies(
     const body = entry.role ? undefined : byId.get(entry.id);
     if (!body) return entry;
     // 文字没变就不标 dirty：下次保存继续按原始 XML 字节透传，保住未建模的属性。
-    if (sameFragment(entry.pm, body.doc)) return entry;
+    if (samePmFragment(entry.pm, body.doc)) return entry;
     return { ...entry, pm: body.doc, dirty: true };
   });
   for (const body of bodies) {
@@ -255,17 +249,6 @@ export function applyFootnoteBodies(
   };
   out[kind] = merged;
   return out;
-}
-
-/**
- * 两份正文片段序列化结果是否一致，用来判断"用户真的改过这条脚注吗"。
- *
- * @param a 原正文。
- * @param b 编辑器交回的正文。
- * @returns 一致则 true，此时条目保持透传路径。
- */
-function sameFragment(a: PMDoc, b: PMDoc): boolean {
-  return pmToOoxmlFragment(a, {}) === pmToOoxmlFragment(b, {});
 }
 
 /**
@@ -298,7 +281,7 @@ export function syncFootnoteIds(
     }
     for (const id of keep) {
       if (entries.some((e) => e.id === id)) continue;
-      entries.push({ id, pm: EMPTY_DOC, rawXml: "", dirty: true });
+      entries.push({ id, pm: emptyPmDoc(), rawXml: "", dirty: true });
     }
     out[kind] = entries;
   }

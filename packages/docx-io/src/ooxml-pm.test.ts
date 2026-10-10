@@ -1501,6 +1501,117 @@ describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {
   });
 });
 
+/**
+ * 排名 4 ①：批注的三个锚点。
+ *
+ * 内容模型给出的位置不一样：`w:commentRangeStart`/`w:commentRangeEnd` 属于
+ * EG_RangeMarkupElements（`w:p` 的直接子元素，与 `w:r` 平级），而 `w:commentReference`
+ * 属于 EG_RunInnerContent（必须装在 `w:r` 里面）。写出时必须保持这个差别。
+ */
+describe("批注锚点（w:commentRangeStart / End / Reference）", () => {
+  /** 规范样例的形状：同段一个完整区间，引用记号紧跟在区间末尾。 */
+  const INLINE = bodyXml(
+    `<w:p><w:r><w:t>Some </w:t></w:r><w:commentRangeStart w:id="0"/>` +
+      `<w:r><w:t>text.</w:t></w:r><w:commentRangeEnd w:id="0"/>` +
+      `<w:r><w:rPr><w:rStyle w:val="af"/></w:rPr><w:commentReference w:id="0"/></w:r></w:p>`,
+  );
+
+  it("reads the three anchors as inline nodes in document order", () => {
+    const pm = ooxmlToPm(INLINE);
+    expect(pm.content[0]!.content?.map((n) => n.type)).toEqual([
+      "text",
+      "commentRangeStart",
+      "text",
+      "commentRangeEnd",
+      "commentReference",
+    ]);
+    expect(pm.content[0]!.content?.[1]).toEqual({
+      type: "commentRangeStart",
+      attrs: { id: "0" },
+    });
+    expect(pm.content[0]!.content?.[4]).toEqual({ type: "commentReference", attrs: { id: "0" } });
+  });
+
+  it("keeps a range that spans paragraphs, one anchor per paragraph", () => {
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:r><w:t>前半</w:t></w:r><w:commentRangeStart w:id="3"/></w:p>`,
+        `<w:p><w:commentRangeEnd w:id="3"/><w:r><w:t>后半</w:t></w:r></w:p>`,
+      ),
+    );
+    expect(pm.content[0]!.content?.at(-1)).toEqual({ type: "commentRangeStart", attrs: { id: "3" } });
+    expect(pm.content[1]!.content?.[0]).toEqual({ type: "commentRangeEnd", attrs: { id: "3" } });
+  });
+
+  it("writes range markers as direct children of w:p, never inside w:r", () => {
+    const xml = pmToOoxml(ooxmlToPm(INLINE));
+    expect(xml).toContain(
+      `<w:t xml:space="preserve">Some </w:t></w:r><w:commentRangeStart w:id="0"/><w:r>`,
+    );
+    expect(xml).toContain(`</w:r><w:commentRangeEnd w:id="0"/><w:r>`);
+    expect(xml).not.toMatch(/<w:r>[^<]*<w:commentRange/);
+  });
+
+  it("drops the source run's rPr on the reference — 记号形状由我们固定", () => {
+    // Word 给这个记号排版的是文档里那条批注引用字符样式，它的 styleId 是 `af` 这类
+    // 逐文档随机的值，抄不进另一份文档；宁可不写也不原样塞进去（§2.2 同一个道理）。
+    const xml = pmToOoxml(ooxmlToPm(INLINE));
+    expect(xml).toContain(`<w:r><w:commentReference w:id="0"/></w:r>`);
+    expect(xml).not.toContain(`<w:rPr><w:rStyle w:val="af"/></w:rPr><w:commentReference`);
+  });
+
+  it("is idempotent — 锚点不含文字，两次写出一致", () => {
+    const once = pmToOoxml(ooxmlToPm(INLINE));
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  it("writes an empty range as-is — start 紧跟 end 也是合法区间", () => {
+    const pm: PMDoc = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "整段被批注" },
+            { type: "commentRangeStart", attrs: { id: "1" } },
+            { type: "commentRangeEnd", attrs: { id: "1" } },
+            { type: "commentReference", attrs: { id: "1" } },
+          ],
+        },
+      ],
+    };
+    expect(pmToOoxml(pm)).toContain(
+      `<w:commentRangeStart w:id="1"/><w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r>`,
+    );
+  });
+
+  it("ignores anchors whose id is not a number — 读不懂就不建模", () => {
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:commentRangeStart w:id="0x"/><w:r><w:t>x</w:t></w:r><w:commentRangeEnd w:id="0x"/>` +
+          `<w:r><w:commentReference w:id="0x"/></w:r></w:p>`,
+      ),
+    );
+    expect(pm.content[0]!.content?.map((n) => n.type)).toEqual(["text"]);
+  });
+
+  it("shares the numbering space with bookmarks — 同 id 的书签与批注互不干扰", () => {
+    const pm = ooxmlToPm(
+      bodyXml(
+        `<w:p><w:bookmarkStart w:id="0" w:name="_Toc1"/><w:commentRangeStart w:id="0"/>` +
+          `<w:r><w:t>x</w:t></w:r><w:commentRangeEnd w:id="0"/><w:bookmarkEnd w:id="0"/></w:p>`,
+      ),
+    );
+    expect(pm.content[0]!.content?.map((n) => n.type)).toEqual([
+      "bookmarkStart",
+      "commentRangeStart",
+      "text",
+      "commentRangeEnd",
+      "bookmarkEnd",
+    ]);
+  });
+});
+
 describe("本 app 生成的目录写进 docx", () => {
   /**
    * `apps/desktop/src/editor/toc.ts` 的 `tocEntryJson` 产出的那份 PM 文档，原样搬来：

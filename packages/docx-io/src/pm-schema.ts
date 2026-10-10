@@ -274,6 +274,41 @@ export type PMNode =
       attrs: { id: string };
     }
   | {
+      /**
+       * 批注区间的起点：`<w:commentRangeStart w:id="N"/>`（属 `EG_RangeMarkupElements`，
+       * 位置见 spec 排名 4 的内容模型那条）。
+       *
+       * 它与 `<w:r>` 平级、是 `<w:p>` 的直接子元素（属 `EG_RangeMarkupElements` ⊂ `EG_PContent`），
+       * 所以必须建模成行内节点才能保住它在正文流里的位置；批注**内容**住在
+       * `word/comments.xml` 部件里，靠同一个 `w:id` 对应，因此节点本身是空 atom。
+       * 起点与终点可以落在不同段落里（区间跨段是合法的），两侧各记一次位置即可。
+       */
+      type: "commentRangeStart";
+      attrs: { id: string };
+    }
+  | {
+      /**
+       * 批注区间的终点：`<w:commentRangeEnd w:id="N"/>`，与起点靠 `id` 配对。
+       *
+       * Word 习惯紧跟着写一个带 `w:commentReference` 的运行；那一跑我们独立建模成
+       * `commentReference` 节点，不与此合并，因为读到的位置可能不在紧邻处（用户手改过）。
+       */
+      type: "commentRangeEnd";
+      attrs: { id: string };
+    }
+  | {
+      /**
+       * 批注引用记号：`<w:r><w:commentReference w:id="N"/></w:r>`（属 `EG_RunInnerContent`，
+       * 因此必须在 run 里）。
+       *
+       * 形状与 `footnoteReference` 一致：正文里只有引用点，编号由 Word 在版面上算，
+       * 文件里不存；外面那个运行的 `w:rPr`（上标 + `AnnotationReference` 样式）是呈现，
+       * 读侧忽略、写侧固定补，因此读→写→读稳定。
+       */
+      type: "commentReference";
+      attrs: { id: string };
+    }
+  | {
       type: "table";
       attrs?: Record<string, unknown>;
       content?: PMNode[];
@@ -349,4 +384,13 @@ export type PMNode =
 export interface PMDoc {
   type: "doc";
   content: PMNode[];
+}
+
+/**
+ * 一份只有一个空段落的 doc：透明部件（脚注、批注）里新建的条目还没有正文时用。
+ *
+ * @returns 每次调用都返回新对象——共享一个常量的话，一处编辑会把别的条目一起改掉。
+ */
+export function emptyPmDoc(): PMDoc {
+  return { type: "doc", content: [{ type: "paragraph", content: [] }] };
 }

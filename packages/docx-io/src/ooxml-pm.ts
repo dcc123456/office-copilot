@@ -300,8 +300,13 @@ export function pmToOoxml(doc: PMDoc, ctx: WriteCtx = {}): string {
 </w:document>`;
 }
 
-/** `w:id`（ST_DecimalNumber）的合法形状：Word 写的是非负整数。读写两侧共用这一份判据。 */
-const BOOKMARK_ID = /^\d{1,9}$/;
+/**
+ * 文档级注解 `w:id`（ST_DecimalNumber）的合法形状：Word 写的是非负整数。
+ *
+ * 书签与批注在 Word 里落在同一个编号空间（spec 排名 4 的取证），所以两侧用同一份判据；
+ * 脚注 id 另有一个正则，因为部件里的分隔符条目可以是负数。
+ */
+export const ANNOTATION_ID = /^\d{1,9}$/;
 
 /**
  * 非 `<w:document>` 部件的正文 → PM doc。
@@ -347,6 +352,20 @@ export function pmToOoxmlFragment(doc: PMDoc, ctx: WriteCtx = {}): string {
   return body ? body[1]! : xml;
 }
 
+/**
+ * 两份正文片段序列化出来是否一模一样，透明部件（脚注、批注）用它判断"用户真的改过这条吗"。
+ *
+ * 比序列化结果而不是比结构：属性顺序、没建模的标签只要有一个字节不同就该重新写回，
+ * 判成"没改过"会让改动静默消失。
+ *
+ * @param a 原正文。
+ * @param b 编辑器交回的正文。
+ * @returns 一致则 true，此时条目继续走原始 XML 透传路径。
+ */
+export function samePmFragment(a: PMDoc, b: PMDoc): boolean {
+  return pmToOoxmlFragment(a) === pmToOoxmlFragment(b);
+}
+
 /** 书签的两个行内节点类型，配对只认 id，与它落在哪一段无关。 */
 type BookmarkNode = Extract<PMNode, { type: "bookmarkStart" | "bookmarkEnd" }>;
 
@@ -358,6 +377,15 @@ export const FOOTNOTE_ID = /^-?\d{1,9}$/;
 
 /** 脚注与尾注的引用节点，正文里只有 id，内容在另一个部件。 */
 type FootnoteRefNode = Extract<PMNode, { type: "footnoteReference" | "endnoteReference" }>;
+
+/**
+ * 批注的三个锚点节点。区间两端是 `<w:p>` 的直接子元素（与书签同位），
+ * 引用记号待在它自己的 run 里（与脚注引用点同位），所以写侧分两条路径。
+ */
+type CommentNode = Extract<
+  PMNode,
+  { type: "commentRangeStart" | "commentRangeEnd" | "commentReference" }
+>;
 
 /**
  * 按文档顺序取出树里的所有书签节点（父节点在前，再进 `content`）。
@@ -963,12 +991,22 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
       // 单独丢掉起点会留下规范明确判为 non-conformant 的孤儿终点。
       const id = child.attributes?.["w:id"] as string | undefined;
       const name = child.attributes?.["w:name"] as string | undefined;
-      if (id && BOOKMARK_ID.test(id)) {
+      if (id && ANNOTATION_ID.test(id)) {
         out.push({ type: "bookmarkStart", attrs: name ? { id, name } : { id } });
       }
     } else if (child.name === "w:bookmarkEnd") {
       const id = child.attributes?.["w:id"] as string | undefined;
-      if (id && BOOKMARK_ID.test(id)) out.push({ type: "bookmarkEnd", attrs: { id } });
+      if (id && ANNOTATION_ID.test(id)) out.push({ type: "bookmarkEnd", attrs: { id } });
+    } else if (child.name === "w:commentRangeStart" || child.name === "w:commentRangeEnd") {
+      // 批注区间的两端与书签同位（`EG_RunLevelElts` ⊂ `EG_PContent`，与 `w:r` 平级），
+      // 靠 id 配对且可以跨段，所以各记一个空行内节点、位置留在各自那段里。
+      // 不做"必须配对"的清洗：源文档只写了起点时照样带回去，读→写不会把内容改掉。
+      const id = child.attributes?.["w:id"] as string | undefined;
+      if (id && ANNOTATION_ID.test(id))
+        out.push({
+          type: child.name === "w:commentRangeStart" ? "commentRangeStart" : "commentRangeEnd",
+          attrs: { id },
+        });
     } else if (isElement(child)) {
       for (const sub of children(child)) {
         if (sub.name === "w:r") out.push(...runToInlines(sub, ctx));
@@ -1234,6 +1272,14 @@ function runToInlines(r: Element, ctx: InlineCtx = {}): PMNode[] {
             attrs: { id },
           });
         }
+        break;
+      }
+      case "w:commentReference": {
+        // 批注的引用记号，形状与脚注引用点一致：正文只带 id，批注内容在 `word/comments.xml`。
+        // 外面那个 run 的 rPr（上标 + AnnotationReference 样式）是 Word 的呈现，读侧忽略、
+        // 写侧固定补回，因此"读→写→读"稳定。
+        const id = child.attributes?.["w:id"] as string | undefined;
+        if (id && ANNOTATION_ID.test(id)) out.push({ type: "commentReference", attrs: { id } });
         break;
       }
       default:
@@ -2082,13 +2128,17 @@ function groupByMarks(nodes: PMNode[]): PMNode[][] {
       current.push(n);
       continue;
     }
-    // 这几类各自成组，不跟文本合用一个 <w:r>：书签压根不是 run 的内容，另三类各带自己的 run 结构。
+    // 这几类各自成组，不跟文本合用一个 <w:r>：书签与批注区间端点压根不是 run 的内容，
+    // 另几类各带自己的 run 结构。
     if (
       n.type === "image" ||
       n.type === "field" ||
       n.type === "pageBreak" ||
       n.type === "bookmarkStart" ||
       n.type === "bookmarkEnd" ||
+      n.type === "commentRangeStart" ||
+      n.type === "commentRangeEnd" ||
+      n.type === "commentReference" ||
       n.type === "fieldBegin" ||
       n.type === "fieldEnd" ||
       n.type === "footnoteReference" ||
@@ -2116,6 +2166,8 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
   if (nodes.length === 1 && (nodes[0]!.type === "bookmarkStart" || nodes[0]!.type === "bookmarkEnd")) {
     return bookmarkXml(nodes[0]!);
   }
+  // 批注的三个锚点各自成组：区间端点是段落直接子元素，引用记号在自己的 run 里。
+  if (nodes.length === 1 && isCommentNode(nodes[0]!)) return commentXml(nodes[0] as CommentNode);
   // 跨段域的边界标记同理单独成组：它们各自的 run 里只有 fldChar / instrText，
   // 合进文本 run 会把域边界和正文混在一个 run 里（Word 会把指令当成正文显示）。
   if (nodes.length === 1 && (nodes[0]!.type === "fieldBegin" || nodes[0]!.type === "fieldEnd")) {
@@ -2453,10 +2505,56 @@ function fieldResultRuns(display: string): string {
  */
 function bookmarkXml(node: BookmarkNode): string {
   const id = String(node.attrs.id ?? "");
-  if (!BOOKMARK_ID.test(id)) return "";
+  if (!ANNOTATION_ID.test(id)) return "";
   if (node.type === "bookmarkEnd") return `<w:bookmarkEnd w:id="${id}"/>`;
   const name = node.attrs.name;
   return `<w:bookmarkStart w:id="${id}"${name ? ` w:name="${escapeXml(name)}"` : ""}/>`;
+}
+
+/**
+ * 这个节点是不是批注的锚点。
+ *
+ * @param node 段落行内内容里的一个节点。
+ * @returns 是 `commentRangeStart` / `commentRangeEnd` / `commentReference` 之一则 true。
+ */
+function isCommentNode(node: PMNode): boolean {
+  return (
+    node.type === "commentRangeStart" ||
+    node.type === "commentRangeEnd" ||
+    node.type === "commentReference"
+  );
+}
+
+/**
+ * 批注锚点 → OOXML。
+ *
+ * 区间两端与书签一样是 `<w:p>` 的直接子元素，绝不能包进 run；引用记号反过来必须是
+ * run 的内容（属 `EG_RunInnerContent`），所以两者分头输出。id 不是非负整数时返回空串，
+ * 宁可不写也不产出违规元素。
+ *
+ * @param node 批注的三个锚点节点之一。
+ * @returns 插进 `<w:p>` 的片段。
+ */
+function commentXml(node: CommentNode): string {
+  const id = String(node.attrs.id ?? "");
+  if (!ANNOTATION_ID.test(id)) return "";
+  if (node.type === "commentRangeStart") return `<w:commentRangeStart w:id="${id}"/>`;
+  if (node.type === "commentRangeEnd") return `<w:commentRangeEnd w:id="${id}"/>`;
+  return refMarkRunXml("w:commentReference", id, false);
+}
+
+/**
+ * 只装一个引用记号的 run：脚注、尾注、批注的引用点在正文里都是这个形状。
+ *
+ * @param tag 记号的元素名，如 `w:commentReference`。
+ * @param id 已通过合法判据的 `w:id`。
+ * @param isSuperscript 编号是否排成上标：脚注与尾注由 Word 带上标呈现；批注的记号归
+ *   `AnnotationReference` 字符样式管，我们不在 run 上替它做这个决定。
+ * @returns 一个完整的 `<w:r>`。
+ */
+function refMarkRunXml(tag: string, id: string, isSuperscript: boolean): string {
+  const rPr = isSuperscript ? '<w:rPr><w:vertAlign w:val="superscript"/></w:rPr>' : "";
+  return `<w:r>${rPr}<${tag} w:id="${id}"/></w:r>`;
 }
 
 /**
@@ -2473,10 +2571,7 @@ function footnoteRefXml(node: FootnoteRefNode): string {
   const id = String(node.attrs.id ?? "");
   if (!FOOTNOTE_ID.test(id)) return "";
   const tag = node.type === "footnoteReference" ? "w:footnoteReference" : "w:endnoteReference";
-  return (
-    `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr>` +
-    `<${tag} w:id="${id}"/></w:r>`
-  );
+  return refMarkRunXml(tag, id, true);
 }
 
 function imageXml(node: Extract<PMNode, { type: "image" }>): string {
@@ -2696,7 +2791,13 @@ function textOf(el: Element): string {
   return out;
 }
 
-function escapeXml(s: string): string {
+/**
+ * XML 文本与属性值的转义。写出裸 XML 片段的地方（正文、部件属性）都走这一份。
+ *
+ * @param s 原始字符串，可以含 `&`、尖括号与引号。
+ * @returns 可以直接拼进 XML 的字符串。
+ */
+export function escapeXml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

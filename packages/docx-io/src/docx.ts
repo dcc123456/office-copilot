@@ -37,6 +37,18 @@ import {
   type FootnoteKind,
   type FootnoteStore,
 } from "./footnotes.js";
+import {
+  COMMENT_CONTENT_TYPE,
+  COMMENT_PART,
+  COMMENT_REL_TYPE,
+  applyCommentBodies,
+  collectCommentRefs,
+  loadComments,
+  serializeCommentsPart,
+  syncCommentIds,
+  type CommentBody,
+  type CommentStore,
+} from "./comments.js";
 
 export interface DocxParagraph {
   index: number;
@@ -99,6 +111,11 @@ export interface PmLoadResult {
    * 两个数组都空 = 这份文档没有脚注/尾注；正文里插入新引用时保存会自动补条目。
    */
   footnotes: FootnoteStore;
+  /**
+   * 批注部件的条目，按 `w:id` 对应正文里的锚点（区间两端 + 引用记号）。
+   * 空条目 = 这份文档没有批注；正文里出现新锚点时保存会自动补条目。
+   */
+  comments: CommentStore;
 }
 
 /**
@@ -177,6 +194,8 @@ export class DocxFile {
   private headers: HeaderFooterBundle = { entries: {} };
   /** 脚注/尾注部件的条目；正文只放引用点，内容住在这里。 */
   private footnotes: FootnoteStore = { footnote: [], endnote: [], unmodeled: [] };
+  /** 批注部件的条目；正文只放锚点，内容与作者信息住在这里。 */
+  private comments: CommentStore = { entries: [], isUnmodeled: false };
   private pendingSection?: SectionGeometry;
   private pendingStyle?: DocStyle;
 
@@ -212,6 +231,7 @@ export class DocxFile {
     const file = new DocxFile(zip, root, numbering, styles, headers);
     file.stylesXml = stylesXml;
     file.footnotes = await loadFootnotes(zip, relsXml, numbering, styles);
+    file.comments = await loadComments(zip, relsXml, numbering, styles);
     return file;
   }
 
@@ -268,6 +288,7 @@ export class DocxFile {
       styles: this.styles.paneStyles(),
       styleFormats: resolvedStyles(this.styles),
       footnotes: this.footnotes,
+      comments: this.comments,
     };
   }
 
@@ -310,6 +331,18 @@ export class DocxFile {
    */
   setFootnoteBodies(kind: FootnoteKind, bodies: readonly FootnoteBody[]): void {
     this.footnotes = applyFootnoteBodies(this.footnotes, kind, bodies);
+  }
+
+  /**
+   * 收下批注窗格改过的正文与作者信息，下一次保存写进 `word/comments.xml`。
+   *
+   * 只并列出来的条目：没被列出的条目保持原样透传，被标为不可重写的部件一个字节都不动。
+   * 正文里删掉的锚点不在此处处理，由保存时的 `syncCommentIds` 按锚点对齐。
+   *
+   * @param bodies 编辑器交回的批注，`id` 与正文里的锚点一致。
+   */
+  setCommentBodies(bodies: readonly CommentBody[]): void {
+    this.comments = applyCommentBodies(this.comments, bodies);
   }
 
   /**
@@ -388,6 +421,9 @@ export class DocxFile {
 
     // 脚注/尾注部件：正文里的引用点决定条目的增删，没被编辑过的条目按原始 XML 透传。
     await this.writeFootnoteParts(doc);
+
+    // 批注部件：正文里的锚点决定条目的增删，没被编辑过的条目同样按原始 XML 透传。
+    await this.writeCommentPart(doc);
 
     return warnings;
   }
@@ -523,6 +559,25 @@ export class DocxFile {
         FOOTNOTE_CONTENT_TYPE[kind],
       );
     }
+  }
+
+  /**
+   * 写 `word/comments.xml`：正文里的锚点决定条目增删，没编辑过的按原始 XML 透传。
+   *
+   * 一条批注都没有时既不写文件也不登记关系——空的 `w:comments` 会让 Word 觉得文档
+   * 有批注区，比没有这个部件更糟。
+   *
+   * @param doc 即将写进正文的 PM doc，锚点从它身上收集（只读 attrs.id）。
+   * @returns 无返回值。
+   */
+  private async writeCommentPart(doc: PMDoc): Promise<void> {
+    this.comments = syncCommentIds(this.comments, collectCommentRefs(doc));
+    if (this.comments.isUnmodeled) return;
+    const xml = serializeCommentsPart(this.comments.entries, this.numbering);
+    if (!xml) return;
+    const path = this.comments.partPath ?? COMMENT_PART;
+    this.zip.file(path, xml);
+    await this.ensurePartReference(path, COMMENT_REL_TYPE, COMMENT_CONTENT_TYPE);
   }
 
   // -------- Legacy edit API (CLI) --------
