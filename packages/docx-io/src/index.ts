@@ -35,4 +35,12 @@ export type {
   PaneStyle,
   HeadingStyleLookup,
 } from "./styles.js";
-export type { PPrAttrs, PMDoc, PMNode, PMMark } from "./pm-schema.js";
+export type {
+  PPrAttrs,
+  PMDoc,
+  PMNode,
+  PMMark,
+  TabStop,
+  TabStopAlignment,
+  TabStopLeader,
+} from "./pm-schema.js";

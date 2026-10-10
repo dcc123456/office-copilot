@@ -1,5 +1,6 @@
 import { Extension, type CommandProps } from "@tiptap/core";
 import type { Node as PMNode, NodeType } from "@tiptap/pm/model";
+import type { TabStop } from "@office-copilot/docx-io";
 
 /**
  * Adds paragraph/heading formatting commands and global attributes:
@@ -10,6 +11,7 @@ import type { Node as PMNode, NodeType } from "@tiptap/pm/model";
  *   - keepWithNext / keepLines / widowControl / snapToGrid (Word 的分页开关)
  *   - outlineLevel (raw `w:outlineLvl`，0–8 = 一级～八级，9 = 正文文本)
  *   - styleId (段落套的具名样式 id，即 `<w:pStyle>` 的原值)
+ *   - tabStops (`<w:tabs>` 的制表位清单，位置是 pt)
  *
  * These are surfaced to the user via ParagraphPopover and round-tripped
  * by docx-io: the OOXML converter emits <w:spacing w:before/after=...
@@ -34,6 +36,11 @@ interface ParagraphFormatAttrs {
   outlineLevel?: number;
   /** null = 用户显式清掉了样式；缺失 = 没套用也没清除，导出沿用源文档写法。 */
   styleId?: string | null;
+  /**
+   * 制表位定义，位置是 pt（`<w:tabs>`，换算只在 docx-io）。空数组 = 用户"全部清除"，
+   * 缺失 = 这一段没建模过，导出沿用源文档写法。
+   */
+  tabStops?: TabStop[];
 }
 
 declare module "@tiptap/core" {
@@ -234,6 +241,19 @@ export const ParagraphFormatting = Extension.create({
                 ? {}
                 : { "data-style-id": String(attrs.styleId ?? "") },
           },
+          tabStops: {
+            // 与 styleId 同一条理由：默认只能是 undefined。拿 [] 当默认值等于每个段落
+            // 都声明"制表位已全部清除"，导入文档里的 w:tabs 会整批消失。
+            default: undefined,
+            parseHTML: (el) =>
+              parseTabStops((el as HTMLElement).getAttribute("data-tab-stops")),
+            // 浏览器没有"按制表位对齐"的排版能力，所以只留 data-* 供 docx-io 读回；
+            // 编辑器内的 Tab 仍按默认宽度显示，这是规格里写明的差距（排名 5）。
+            renderHTML: (attrs) =>
+              Array.isArray(attrs.tabStops)
+                ? { "data-tab-stops": JSON.stringify(attrs.tabStops) }
+                : {},
+          },
         },
       },
     ];
@@ -309,6 +329,35 @@ function switchHtml(
   return css
     ? { [dataKey]: String(value), style: css }
     : { [dataKey]: String(value) };
+}
+
+/**
+ * 读 HTML 上的制表位清单（`data-tab-stops`，我们自己的 renderHTML 写的 JSON）。
+ *
+ * @param raw 属性值；没有这个属性时是 null。
+ * @returns 制表位数组（空数组是"全部清除"，必须留着）；读不出形状时返回 undefined，
+ *   含义是"这一段没建模过制表位"，导出因此沿用源文档写法。对齐方式与前导符不在这里
+ *   校验——docx-io 写 `w:tab` 时才认那张白名单，校验点只留一处。
+ */
+function parseTabStops(raw: string | null): TabStop[] | undefined {
+  if (raw === null || raw === "") return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const isStop = (stop: unknown): stop is TabStop => {
+    const { positionPt, alignment } = (stop ?? {}) as Partial<TabStop>;
+    return (
+      typeof positionPt === "number" &&
+      Number.isFinite(positionPt) &&
+      positionPt >= 0 &&
+      typeof alignment === "string"
+    );
+  };
+  return parsed.every(isStop) ? (parsed as TabStop[]) : undefined;
 }
 
 /**

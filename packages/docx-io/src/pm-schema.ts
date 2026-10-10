@@ -43,6 +43,39 @@ export interface PMTextNode {
   marks?: PMMark[];
 }
 
+/** `<w:tab>` 的 `w:val`；`clear` 是 Word 自己的写法："这个位置上的制表位在此作废"。 */
+export type TabStopAlignment =
+  | "left"
+  | "center"
+  | "right"
+  | "decimal"
+  | "bar"
+  | "list"
+  | "clear";
+
+/** `<w:tab>` 的 `w:leader`，即 Word"前导符"下拉框里的七种。 */
+export type TabStopLeader =
+  | "none"
+  | "dot"
+  | "hyphen"
+  | "dash"
+  | "line"
+  | "heavy"
+  | "middleDot";
+
+/**
+ * 一个制表位，即 `<w:pPr><w:tabs><w:tab w:val w:leader w:pos/>`（ECMA-376 §17.3.1.1 的
+ * CT_TabStop）。与"这一段没定义制表位"不是一回事的 `clear` 原样保留，不做归一化。
+ */
+export type TabStop = {
+  /** 位置，pt（导出 ×20 成 twips；页面坐标从文字区左边界起算）。 */
+  positionPt: number;
+  /** `w:val`。缺省按 left，与 Word 一致。 */
+  alignment: TabStopAlignment;
+  /** `w:leader`。缺省按 none，即空白前导。 */
+  leader?: TabStopLeader;
+};
+
 /**
  * 段落与标题共用的 `<w:pPr>` 建模属性（用 type 而非 interface：写回侧把它当
  * `Record<string, unknown>` 遍历，type 才有隐式索引签名）。
@@ -83,13 +116,19 @@ export type PPrAttrs = {
   indentRight?: number;
   /** First-line indent, in points. Negative = hanging indent. */
   indentFirst?: number;
+  /**
+   * 段落的制表位定义（`<w:tabs>`）。undefined = 这一段没建模过（源文档的 `w:tabs` 原样透传）；
+   * 空数组 = 用户在"制表位"里全部清除，写出的 pPr 不再带 `w:tabs`，源文档那条也不留——
+   * 这正是 Word 删掉直接制表位后的行为（样式给的制表位仍然生效）。
+   */
+  tabStops?: TabStop[];
   /** Line height as a CSS-like number (1.0, 1.15, 1.5, 2.0). */
   lineHeight?: string;
   /**
    * Raw <w:pPr> inner XML (everything between <w:pPr> and </w:pPr>)
    * captured from the source document. pmToOoxml merges it with the
    * attrs it models: the modeled children are rebuilt from both sides,
-   * every other element (borders, tabs, run properties, …) rides through
+   * every other element (borders, run properties, …) rides through
    * untouched and keeps its place in CT_PPr's sequence. See
    * `mergedElementXml` and `PPR_CHILD_ORDER` in ooxml-pm.ts.
    */

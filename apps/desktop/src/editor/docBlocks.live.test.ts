@@ -306,6 +306,22 @@ describe("段落对话框补齐的字段（真实 schema）", () => {
     // styleId 反过来必须是"缺失"：null 在 docx-io 里是"用户清了样式"，
     // 新建段落若默认成 null，导出就会连源文档带着的引用一起删。
     expect(p.attrs.styleId).toBeUndefined();
+    // tabStops 同一条理由只能是 undefined：[] 在 docx-io 里是"制表位全部清除"，
+    // 拿它当默认值会把导入文档每个段落的 w:tabs 都删掉。
+    expect(p.attrs.tabStops).toBeUndefined();
+  });
+
+  it("制表位清单活过 doc JSON 往返，位置仍是 pt", () => {
+    const stops = [{ positionPt: 415.3, alignment: "right", leader: "dot" }];
+    const node = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: { tabStops: stops },
+      content: [text("第一章")],
+    })!;
+    expect(node.attrs.tabStops).toEqual(stops);
+    const again = schema.nodeFromJSON(node.toJSON())!;
+    expect(again.attrs.tabStops).toEqual(stops);
+    expect(() => again.check()).not.toThrow();
   });
 });
 

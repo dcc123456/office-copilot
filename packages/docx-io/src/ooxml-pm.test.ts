@@ -850,6 +850,61 @@ describe("段落开关与大纲级别（Word 段落对话框的其余字段）",
     // 一段纯文字不该长出 pPr。
     expect(pPrOf({})).toBe("");
   });
+
+  it("reads 制表位：位置换算成 pt，对齐与前导符原样带走", () => {
+    // Word 的目录条目就是这么写的：右对齐 + 点前导符，位置在右页边（twips）。
+    const tabs = '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>';
+    const { attrs, pPr } = roundTripPpr(tabs);
+    expect(attrs.tabStops).toEqual([{ positionPt: 415.3, alignment: "right", leader: "dot" }]);
+    expect(pPr).toBe(`<w:pPr>${tabs}</w:pPr>`);
+  });
+
+  it("keeps 缺省写法与 clear：没 w:val 是 left，没 w:leader 就不写", () => {
+    const tabs =
+      '<w:tabs><w:tab w:val="center" w:pos="4000"/><w:tab w:pos="200"/><w:tab w:val="clear" w:pos="9016"/></w:tabs>';
+    const { attrs, pPr } = roundTripPpr(tabs);
+    expect(attrs.tabStops).toEqual([
+      { positionPt: 200, alignment: "center" },
+      { positionPt: 10, alignment: "left" },
+      { positionPt: 450.8, alignment: "clear" },
+    ]);
+    // 没写过的 w:leader 不补；缺省的 w:val 由 Word 省略，我们写出显式的 left。
+    expect(pPr).toContain('<w:tab w:val="center" w:pos="4000"/>');
+    expect(pPr).toContain('<w:tab w:val="clear" w:pos="9016"/>');
+    expect(pPr).not.toContain("w:leader");
+  });
+
+  it("编辑器里清空制表位时，源文档那条 w:tabs 不再透传回来", () => {
+    // Word 的"全部清除"就是删掉这一段自己的制表位定义（样式给的仍然生效），
+    // 所以写出的是不带 w:tabs 的 pPr，而不是补一条空的 tabs。
+    const pm = ooxmlToPm(
+      bodyXml(
+        '<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>' +
+          '<w:spacing w:after="120"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>',
+      ),
+    );
+    const attrs = { ...(pm.content?.[0]?.attrs as PPrAttrs), tabStops: [] };
+    const out = pmToOoxml({
+      type: "doc",
+      content: [{ type: "paragraph", attrs, content: [{ type: "text", text: "x" }] }],
+    });
+    const pPr = /<w:pPr>[\s\S]*?<\/w:pPr>/.exec(out)?.[0] ?? "";
+    expect(pPr).not.toContain("w:tabs");
+    expect(pPr).toContain('<w:spacing w:after="120"');
+  });
+
+  it("制表位读不懂时整组当作没建模过，原文原样带走", () => {
+    // 只留认得出的那几条 = 静默删掉用户的制表位；w:val 是表外值或没有 w:pos 都算读不懂。
+    for (const tabs of [
+      '<w:tabs><w:tab w:val="bogus" w:pos="100"/><w:tab w:val="right" w:pos="200"/></w:tabs>',
+      '<w:tabs><w:tab w:val="right"/></w:tabs>',
+      '<w:tabs><w:tab w:val="right" w:leader="stars" w:pos="100"/></w:tabs>',
+    ]) {
+      const { attrs, pPr } = roundTripPpr(tabs);
+      expect(attrs.tabStops).toBeUndefined();
+      expect(pPr).toBe(`<w:pPr>${tabs}</w:pPr>`);
+    }
+  });
 });
 
 describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {

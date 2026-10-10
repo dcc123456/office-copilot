@@ -230,6 +230,18 @@ describe("DocxFile", () => {
     expect(twice).toBe(once);
   });
 
+  it("keeps a right tab stop with a dot leader through a real save", async () => {
+    // 目录条目的"标题⇥页码"靠这条制表位对齐（排名 3 与排名 5 的共同前提）。
+    // attrs 已经建模了它，第二次保存必须写出同一条，而不是从 rawPpr 再透传一份变成两条。
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs>` +
+        `<w:spacing w:after="60"/></w:pPr><w:r><w:t>第一章</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:p>`,
+    ]);
+    expect(once.match(/<w:tabs>/g)).toHaveLength(1);
+    expect(once).toContain('<w:tab w:val="right" w:leader="dot" w:pos="8306"/>');
+    expect(twice).toBe(once);
+  });
+
   it("keeps a bookmark that spans two paragraphs through a real save", async () => {
     // 目录与交叉引用都靠书签定位（排名 3 的前提），所以这一对必须经
     // fromBytes → toProseMirror → replaceProseMirror → toBytes 整条路原样回来。

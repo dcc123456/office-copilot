@@ -2,6 +2,7 @@ import {
   children,
   collectDescendants,
   escapeAttr,
+  findChildren,
   firstChild,
   isElement,
   onOffValue,
@@ -11,7 +12,16 @@ import {
   val,
   type Element,
 } from "./xml.js";
-import type { PPrAttrs, PMDoc, PMMark, PMNode, PMTextNode } from "./pm-schema.js";
+import type {
+  PPrAttrs,
+  PMDoc,
+  PMMark,
+  PMNode,
+  PMTextNode,
+  TabStop,
+  TabStopAlignment,
+  TabStopLeader,
+} from "./pm-schema.js";
 import { NumberingMap, readListProps, type NumberingKind } from "./numbering.js";
 import { StyleMap, fitStyleId } from "./styles.js";
 import {
@@ -473,7 +483,7 @@ function paragraphFromXml(
 }
 
 /**
- * Read a `<w:pPr>` into PM attrs: 具名样式 id、`<w:spacing>`、`<w:ind>` 与分页开关
+ * Read a `<w:pPr>` into PM attrs: 具名样式 id、`<w:spacing>`、`<w:ind>`、`<w:tabs>` 与分页开关
  * (points / CSS ratio)。All unit conversions happen here so the UI can stay in
  * familiar points.
  *
@@ -550,7 +560,103 @@ export function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
     if (firstLine !== undefined) out.indentFirst = firstLine;
     else if (hanging !== undefined) out.indentFirst = -hanging;
   }
+  const tabs = readTabStops(pPr);
+  if (tabs) out.tabStops = tabs;
   return out;
+}
+
+/** `<w:tab>` 的 `w:val` 合法值，与 `TabStopAlignment` 一一对应（写侧据此丢掉读不懂的值）。 */
+const TAB_ALIGNMENTS = [
+  "left",
+  "center",
+  "right",
+  "decimal",
+  "bar",
+  "list",
+  "clear",
+] as const satisfies readonly TabStopAlignment[];
+
+/** `<w:tab>` 的 `w:leader` 合法值，与 `TabStopLeader` 一一对应。 */
+const TAB_LEADERS = [
+  "none",
+  "dot",
+  "hyphen",
+  "dash",
+  "line",
+  "heavy",
+  "middleDot",
+] as const satisfies readonly TabStopLeader[];
+
+/**
+ * 读 `<w:pPr><w:tabs>` 成制表位清单。
+ *
+ * @param pPr 段落的 `<w:pPr>` 元素（可缺）。
+ * @returns 建模好的清单，可能是空表；这一段没有 `w:tabs`、或其中任何一条读不懂
+ *   （没有 `w:pos`、`w:val`/`w:leader` 是表外值）时返回 undefined，意思是"整组没建模过"——
+ *   写侧因此把原文原样带走，而不是只留下能认的那几条。
+ */
+function readTabStops(pPr: Element | null | undefined): TabStop[] | undefined {
+  const tabs = pPr ? firstChild(pPr, "w:tabs") : undefined;
+  if (!tabs) return undefined;
+  const stops: TabStop[] = [];
+  for (const el of findChildren(tabs, "w:tab")) {
+    const attributes = el.attributes ?? {};
+    const pos = Number(attributes["w:pos"]);
+    const rawVal = attributes["w:val"] as string | undefined;
+    const rawLeader = attributes["w:leader"] as string | undefined;
+    const alignment =
+      rawVal === undefined
+        ? "left"
+        : (TAB_ALIGNMENTS as readonly string[]).includes(rawVal)
+          ? (rawVal as TabStopAlignment)
+          : undefined;
+    const leader =
+      rawLeader === undefined
+        ? undefined
+        : (TAB_LEADERS as readonly string[]).includes(rawLeader)
+          ? (rawLeader as TabStopLeader)
+          : undefined;
+    if (!Number.isFinite(pos) || alignment === undefined) return undefined;
+    if (rawLeader !== undefined && leader === undefined) return undefined;
+    stops.push({
+      positionPt: Math.round((pos / 20) * 10) / 10,
+      alignment,
+      ...(leader ? { leader } : {}),
+    });
+  }
+  return stops;
+}
+
+/**
+ * 写 `<w:tabs>`，是 `readTabStops` 的逆运算。
+ *
+ * @param stops 段落 attrs 里的制表位清单，位置是 pt；这里 ×20 换成 twips
+ *   （AGENTS §2.1：换算只发生在 docx-io 进出口）。
+ * @returns 元素字符串；清单为空时返回空串——调用方仍会把 `w:tabs` 记为"已建模"，
+ *   于是源文档那条被清掉，对应 Word 里"全部清除"之后的段落。
+ */
+function tabsElementXml(stops: readonly unknown[]): string {
+  const inner = stops.map(tabElementXml).join("");
+  return inner ? `<w:tabs>${inner}</w:tabs>` : "";
+}
+
+/**
+ * 一条 `<w:tab/>`，属性按 Word 自己的书写顺序（`w:val` → `w:leader` → `w:pos`）。
+ *
+ * @param stop attrs 里的一个制表位；不是对象或位置不是数字时产不出元素。
+ * @returns 元素字符串；无法建模时返回空串（跳过这一条，不写一个假位置）。
+ */
+function tabElementXml(stop: unknown): string {
+  const { positionPt, alignment, leader } = (stop ?? {}) as Partial<TabStop>;
+  const position = Number(positionPt);
+  if (!Number.isFinite(position)) return "";
+  const val = (TAB_ALIGNMENTS as readonly string[]).includes(alignment ?? "")
+    ? alignment
+    : "left";
+  const leaderAttr = (TAB_LEADERS as readonly string[]).includes(leader ?? "")
+    ? ` w:leader="${leader}"`
+    : "";
+  return `<w:tab w:val="${val}"${leaderAttr} w:pos="${Math.round(position * 20)}"/>`;
 }
 
 /**
@@ -1370,6 +1476,11 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
   push("w:snapToGrid", onOffXml("w:snapToGrid", a.snapToGrid));
   push("w:spacing", spacingElementXml(a, rawPpr));
   push("w:ind", indElementXml(a, rawPpr));
+  // 制表位是唯一"空清单也要记名"的一项：用户点了全部清除时 attrs 是 []，
+  // 写出的是没有 w:tabs 的 pPr，但 covered 必须有它，否则源文档那条又被透传回来。
+  if (Array.isArray(a.tabStops)) {
+    parts.push({ name: "w:tabs", xml: tabsElementXml(a.tabStops) });
+  }
   push("w:jc", jcXml(a.textAlign));
   const lvl = a.outlineLevel;
   if (typeof lvl === "number" && Number.isInteger(lvl) && lvl >= 0 && lvl <= 9) {
@@ -1385,8 +1496,9 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
  * @param covered attrs 这一轮已经写出的元素名，同名元素由 attrs 说了算。
  * @returns 待排序写出的子元素。`w:pStyle` 永远不在这里生成：它由 `pStylePart` 单独
  *   决定，同一份 pPr 里出现两个时 Word 取第一个，套哪个样式变得不可预测；样式定义里
- *   写它更是自己引用自己。`w:numPr` 与其余没建模的写法（`w:tabs`、`w:pBdr`）一样带走——
- *   我们从选区抓不到列表编号，更没有权力删掉用户原本挂在段落或样式上的编号。
+ *   写它更是自己引用自己。`w:numPr` 与其余没建模的写法（`w:pBdr`、 attrs 里没有
+ *   `tabStops` 时的 `w:tabs`）一样带走——我们从选区抓不到列表编号，更没有权力删掉
+ *   用户原本挂在段落或样式上的编号。
  */
 function unmodeledRawParts(rawEls: Element[], covered: Set<string>): PprPart[] {
   return rawEls
