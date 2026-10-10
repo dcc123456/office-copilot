@@ -156,8 +156,8 @@ export type PMNode =
        * `<w:tab/>` / `<w:br/>`（目录条目的"标题⇥页码"就靠它对齐），空串表示 Word
        * 还没算过结果——我们不替用户编一个占位文字写回文档。
        *
-       * 局限：一个节点只表示**同段落内** begin/end 配对的域。跨段落的域（Word 生成的多行
-       * 目录）读回来只有第一段成为 field 节点，后面的条目退化成普通文字。
+       * 边界：一个节点只表示**同段落内** begin/end 配对的域。Word 自己生成的多行目录
+       * 是 begin 在首段、end 在末段，这种跨段域用 `fieldBegin` / `fieldEnd` 建模。
        */
       type: "field";
       attrs: {
@@ -165,6 +165,28 @@ export type PMNode =
         instr?: string;
         display: string;
       };
+    }
+  | {
+      /**
+       * 跨段落复合域的**起始边界**：`<w:r><w:fldChar w:fldCharType="begin"/></w:r>`
+       * 加上紧随其后的 `<w:instrText>`（指令存进 `instr`，不再作为可见文字），
+       * 以及可选的 `<w:fldChar w:fldCharType="separate"/>`（`isSeparated` 记录有没有写）。
+       *
+       * Word 的目录就是这个形状：首段写 begin+instr+separate，条目段落是域的结果，
+       * 末段末尾写 end。用 `field` 表示会把整棵目录吞成一段缓存文本，所以这里只落边界，
+       * 边界之后的内容照常按结构读（条目里的 PAGEREF 仍是 `field` 节点）。
+       */
+      type: "fieldBegin";
+      attrs: {
+        kind: string;
+        instr?: string;
+        /** 是否已经写下 separate 记号；false 表示 Word 还没算过结果。 */
+        isSeparated?: boolean;
+      };
+    }
+  | {
+      /** 跨段落复合域的结束边界，即 `<w:r><w:fldChar w:fldCharType="end"/></w:r>`。 */
+      type: "fieldEnd";
     }
   | {
       /**

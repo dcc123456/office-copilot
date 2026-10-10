@@ -659,9 +659,15 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
   // 复合域的 begin/separate/end 跨多个 run，而域的结果里还能再套域（目录的每条条目
   // 里就有一个 PAGEREF 域）。所以按深度计数：只有最外层那一对 begin/end 产出 field 节点，
   // 内层的指令与文字一律当作"缓存结果的文本"收走——否则内层那次 begin 会把外层的指令清零。
+  const fieldTypes = fldCharTypes(p);
+  // Word 生成的目录把 begin+instr+separate 写在首段、end 写在末段：这种域在本段配不上对，
+  // 只能落 `fieldBegin`/`fieldEnd` 边界标记，让边界之后的内容回到正常结构（条目里的
+  // PAGEREF 仍是 field 节点、制表符仍是 run），而不是被吞成一段缓存文本。
+  const isBoundary = fieldTypes.includes("begin") && !closesInParagraph(fieldTypes);
   let fieldDepth = 0;
   let fieldInstr: string | null = null;
   let fieldDisplay = "";
+  let boundaryDone = false;
 
   const flushField = () => {
     if (fieldInstr === null) return;
@@ -676,6 +682,22 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
     });
     fieldInstr = null;
     fieldDisplay = "";
+  };
+
+  /** 起始边界落成节点：指令归它自己，域内容从这里起按结构读，深度清零。 */
+  const flushBoundary = (isSeparated: boolean) => {
+    if (fieldInstr === null) return;
+    out.push({
+      type: "fieldBegin",
+      attrs: {
+        kind: fieldKind(fieldInstr),
+        instr: fieldInstr.trim(),
+        isSeparated,
+      },
+    });
+    fieldInstr = null;
+    fieldDepth = 0;
+    boundaryDone = true;
   };
 
   for (const child of children(p)) {
@@ -693,11 +715,17 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
               fieldDisplay = "";
             }
             fieldDepth++;
+          } else if (t === "separate") {
+            if (isBoundary && !boundaryDone && fieldDepth === 1) flushBoundary(true);
           } else if (t === "end") {
-            fieldDepth = Math.max(0, fieldDepth - 1);
-            if (fieldDepth === 0) flushField();
+            if (fieldDepth === 0) {
+              // 上一段的 begin 在这里收尾（目录末段）：没有配对的指令，只落一个结束边界。
+              out.push({ type: "fieldEnd" });
+            } else {
+              fieldDepth = Math.max(0, fieldDepth - 1);
+              if (fieldDepth === 0) flushField();
+            }
           }
-          // "separate" 只是"从这里起是结果"的记号；收什么由 fieldDepth 决定，不必单独分支。
           consumed = true;
         } else if (sub.name === "w:instrText") {
           // 只有最外层那一段指令属于这个域；内层域的指令是它自己结果的一部分。
@@ -754,12 +782,55 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
     }
   }
   // If a field was unterminated, flush what we have so it isn't lost.
-  flushField();
+  if (isBoundary && !boundaryDone) {
+    // 有 begin 有指令但没写到 separate（Word 标记为 dirty、等着自己重算的域）：
+    // 仍按起始边界建模，指令之后的内容折成文字，免得整段丢掉。
+    flushBoundary(false);
+    if (fieldDisplay) out.push({ type: "text", text: fieldDisplay });
+    fieldDisplay = "";
+  } else {
+    flushField();
+  }
   const inlines = mergeAdjacentText(out);
   if (!ctx.floats) return inlines;
   // The marks only say "a box sat here"; the boxes are block-level and were
   // collected into `ctx.floats` in source order.
   return inlines.filter((n) => n !== FLOAT_SLOT_MARK);
+}
+
+/**
+ * 段落里所有 `w:fldChar` 的类型，按出现顺序。
+ *
+ * @param p 段落元素。
+ * @returns 形如 `["begin", "separate", "end"]` 的序列；没有域时为空数组。
+ */
+function fldCharTypes(p: Element): string[] {
+  const types: string[] = [];
+  for (const child of children(p)) {
+    if (child.name !== "w:r") continue;
+    for (const sub of children(child)) {
+      if (sub.name === "w:fldChar") types.push(String(sub.attributes?.["w:fldCharType"] ?? ""));
+    }
+  }
+  return types;
+}
+
+/**
+ * 最外层那对 begin/end 是否在同一段落里闭合。
+ *
+ * @param types `fldCharTypes` 的结果。
+ * @returns true 表示段内域（用 field 节点），false 表示跨段域（用边界标记）。
+ */
+function closesInParagraph(types: string[]): boolean {
+  let depth = 0;
+  for (const t of types) {
+    if (t === "begin") depth++;
+    else if (t === "end") {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -1786,7 +1857,9 @@ function groupByMarks(nodes: PMNode[]): PMNode[][] {
       n.type === "field" ||
       n.type === "pageBreak" ||
       n.type === "bookmarkStart" ||
-      n.type === "bookmarkEnd"
+      n.type === "bookmarkEnd" ||
+      n.type === "fieldBegin" ||
+      n.type === "fieldEnd"
     ) {
       flush();
       groups.push([n]);
@@ -1810,6 +1883,11 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
   if (nodes.length === 1 && (nodes[0]!.type === "bookmarkStart" || nodes[0]!.type === "bookmarkEnd")) {
     return bookmarkXml(nodes[0]!);
   }
+  // 跨段域的边界标记同理单独成组：它们各自的 run 里只有 fldChar / instrText，
+  // 合进文本 run 会把域边界和正文混在一个 run 里（Word 会把指令当成正文显示）。
+  if (nodes.length === 1 && (nodes[0]!.type === "fieldBegin" || nodes[0]!.type === "fieldEnd")) {
+    return fieldBoundaryXml(nodes[0]!);
+  }
   // Determine marks from first text node.
   const first = nodes.find((n) => n.type === "text") as PMTextNode | undefined;
   const marks = first?.marks ?? [];
@@ -1821,15 +1899,18 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
   const parts: string[] = [];
   let buffer = "";
   const flushText = () => {
-    if (buffer.length) {
-      // Escape newlines as a <w:br/> inside the run.
-      const escaped = escapeXml(buffer).replace(
-        /\n/g,
-        `</w:t><w:br/><w:t xml:space="preserve">`,
-      );
+    if (!buffer.length) return;
+    // 制表符在 OOXML 里是 run 的元素 `<w:tab/>`，不是字符：留在 `<w:t>` 里只是一个空白字符，
+    // 目录条目"标题⇥页码"的对齐就没了（换行同一个道理，见下面那个 replace）。
+    const segments = buffer.split("\t");
+    segments.forEach((segment, index) => {
+      if (index > 0) parts.push("<w:tab/>");
+      if (!segment.length) return;
+      // Escape newlines as a <w:br/> inside the run（先转义再插记号，反了会把记号也转义掉）。
+      const escaped = escapeXml(segment).replace(/\n/g, `</w:t><w:br/><w:t xml:space="preserve">`);
       parts.push(`<w:t xml:space="preserve">${escaped}</w:t>`);
-      buffer = "";
-    }
+    });
+    buffer = "";
   };
   for (const n of nodes) {
     if (n.type === "text") {
@@ -2052,6 +2133,30 @@ function fieldXml(node: Extract<PMNode, { type: "field" }>): string {
     `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
     fieldResultRuns(display) +
     `<w:r><w:fldChar w:fldCharType="end"/></w:r>`
+  );
+}
+
+/**
+ * 跨段落域的边界节点 → OOXML 的 run 片段。
+ *
+ * `fieldBegin` 吐 begin 记号 + 指令 run（指令必须待在 `w:instrText` 里，写成 `w:t`
+ * 会被 Word 当成正文显示出来）+ 可选的 separate 记号；`fieldEnd` 只吐 end 记号。
+ *
+ * @param node `fieldBegin` 或 `fieldEnd` 节点。
+ * @returns 直接插进 `<w:p>` 的 `<w:r>` 序列。
+ */
+function fieldBoundaryXml(
+  node: Extract<PMNode, { type: "fieldBegin" }> | Extract<PMNode, { type: "fieldEnd" }>,
+): string {
+  if (node.type === "fieldEnd") return `<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+  const instr = node.attrs.instr ?? node.attrs.kind ?? "TOC";
+  const separate = node.attrs.isSeparated
+    ? `<w:r><w:fldChar w:fldCharType="separate"/></w:r>`
+    : "";
+  return (
+    `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+    `<w:r><w:instrText xml:space="preserve"> ${escapeXml(instr)} </w:instrText></w:r>` +
+    separate
   );
 }
 

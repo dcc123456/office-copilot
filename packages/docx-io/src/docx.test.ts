@@ -262,7 +262,40 @@ describe("DocxFile", () => {
     // `&quot;` 于是回到 `"` —— 这在 XML 文本里是合法的，别按属性位置的写法去断言。
     expect(once).toContain(`TOC \\o "1-3" \\h`);
     expect(once).toContain(`<w:t xml:space="preserve">第一章</w:t>`);
-    expect(once).toContain(`<w:r><w:tab/></w:r>`);
+    expect(twice).toBe(once);
+  });
+
+  it("keeps a Word-generated multi-paragraph TOC field through a real save", async () => {
+    // 真实 Word 存出来的目录：begin+instr+separate 在首段，end 在末段之后，
+    // 每条条目自己的 PAGEREF 是段内域。跨段边界必须经
+    // fromBytes → toProseMirror → replaceProseMirror → toBytes 保持在原来的段落里。
+    const entry = (title: string, anchor: string, page: string) =>
+      `<w:r><w:t>${title}</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF ${anchor} </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${page}</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>` +
+        `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+        `<w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; </w:instrText></w:r>` +
+        `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+        entry("第一章", "_Toc1", "3") +
+        `</w:p>`,
+      `<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>` +
+        entry("第二章", "_Toc2", "5") +
+        `<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`,
+    ]);
+    expect(once).toContain(`TOC \\o "1-3"`);
+    expect(once).toContain(`<w:pStyle w:val="TOC1"/>`);
+    // 条目的制表符要回到 run 元素 `<w:tab/>`：留在 `<w:t>` 里只是一个空白字符，
+    // Word 不会按制表位对齐，目录页码就贴不上右边界。
+    expect(once).toContain(`<w:t xml:space="preserve">第一章</w:t><w:tab/></w:r>`);
+    expect(once.match(/<w:tab\/>/g)).toHaveLength(2);
+    // 三条子域 + 一条外层域 = 4 对 begin/end，且 end 记号在两段里各留一个（子域 2 + 外层 1）。
+    expect(once.match(/fldCharType="begin"/g)).toHaveLength(3);
+    expect(once.match(/fldCharType="end"/g)).toHaveLength(3);
+    expect(once.indexOf(`fldCharType="end"`)).toBeLessThan(once.lastIndexOf(`fldCharType="end"`));
     expect(twice).toBe(once);
   });
 

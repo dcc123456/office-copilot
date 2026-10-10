@@ -1411,6 +1411,30 @@ body.is-window-resizing .ai-panel {
   border-left-style: dashed;
 }
 
+/* 跨段落域的边界（Word 生成的目录：begin 在首段、end 在末段）。
+   域内容本身是看得见的文字，边界必须画出来才删得掉——否则用户只看到一串目录条目，
+   找不到那个把整段吞进域结果的 begin，也就没法把目录整块移走。 */
+.pm-field-boundary {
+  display: inline-block;
+  width: 0;
+  border-left: 2px solid var(--paper-muted);
+  margin: 0 1px;
+}
+.pm-field-boundary-end {
+  border-left-style: dashed;
+}
+.pm-field-boundary-begin {
+  width: auto;
+  border-right: 2px solid var(--paper-muted);
+  font-size: 10px;
+  color: var(--paper-muted);
+  vertical-align: 2px;
+}
+.pm-field-boundary-begin::before {
+  content: attr(data-field-kind);
+  padding: 0 1px;
+}
+
 /* Inline header/footer editor popover */
 .hf-popover {
   position: absolute;

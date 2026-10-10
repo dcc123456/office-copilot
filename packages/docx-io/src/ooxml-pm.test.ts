@@ -1051,6 +1051,86 @@ describe("域（w:fldChar / w:instrText / w:fldSimple）", () => {
       attrs: { kind: "PAGE", instr: `PAGE   \\* MERGEFORMAT`, display: " 12 " },
     });
   });
+
+  /**
+   * Word 真正写出的多行目录：begin+instr+separate 在首段，end 在末段之后，
+   * 每条条目里的页码是各自独立的一对 begin/end（PAGEREF 子域）。
+   */
+  const MULTI_PARA_TOC = bodyXml(
+    `<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>第一章</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>3</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:p>`,
+    `<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>` +
+      `<w:r><w:t>第二章</w:t></w:r><w:r><w:tab/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Toc2 </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>5</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:p>`,
+  );
+
+  it("跨段落的域用 fieldBegin/fieldEnd 建模，条目内容不再被吞成缓存文本", () => {
+    const pm = ooxmlToPm(MULTI_PARA_TOC);
+    expect(pm.content[0]!.content?.[0]).toMatchObject({
+      type: "fieldBegin",
+      attrs: { kind: "TOC", instr: `TOC \\o "1-3"`, isSeparated: true },
+    });
+    // 边界之后是正文结构：标题文字、制表符、以及条目自己的 PAGEREF 芯片。
+    expect(pm.content[0]!.content?.slice(1)).toEqual([
+      { type: "text", text: "第一章\t" },
+      { type: "field", attrs: { kind: "PAGEREF", instr: "PAGEREF _Toc1", display: "3" } },
+    ]);
+    const last = pm.content[1]!.content!;
+    expect(last[last.length - 1]).toEqual({ type: "fieldEnd" });
+  });
+
+  it("跨段的域写回去还是跨段的：指令只进 instrText、末尾补 end 记号", () => {
+    const once = pmToOoxml(ooxmlToPm(MULTI_PARA_TOC));
+    // 写侧按属性式转义，`"` 变成 `&quot;`（读回来仍是原字符，往返一致即可）。
+    expect(once).toContain(
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \\o &quot;1-3&quot; </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>`,
+    );
+    // 目录指令绝不能变成看得见的文字。
+    expect(once).not.toContain(`<w:t xml:space="preserve"> TOC`);
+    expect(once.match(/PAGEREF _Toc1/g)).toHaveLength(1);
+    expect(once.match(/fldCharType="end"/g)).toHaveLength(3);
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  /** 有 begin 有指令，但既没 separate 也没 end：Word 标成 dirty、等着自己重算。 */
+  const DIRTY_TOC = bodyXml(
+    `<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> TOC \\o "1-3" </w:instrText></w:r>` +
+      `<w:r><w:t>旧目录第一条</w:t></w:r></w:p>`,
+  );
+
+  it("没写到 separate 的起始边界也建模，域内容退回普通文字", () => {
+    const para = ooxmlToPm(DIRTY_TOC).content[0]!;
+    expect(para.content).toEqual([
+      { type: "fieldBegin", attrs: { kind: "TOC", instr: `TOC \\o "1-3"`, isSeparated: false } },
+      { type: "text", text: "旧目录第一条" },
+    ]);
+    const xml = pmToOoxml(ooxmlToPm(DIRTY_TOC));
+    // 不凭空补 separate：Word 重算时才需要结果区，写侧不该替它决定。
+    expect(xml).not.toContain(`fldCharType="separate"`);
+    expect(pmToOoxml(ooxmlToPm(xml))).toBe(xml);
+  });
+
+  it("只有 end 的段落不造出幽灵起始边界", () => {
+    const para = ooxmlToPm(bodyXml(`<w:p><w:r><w:t>正文</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`))
+      .content[0]!;
+    expect(para.content).toEqual([{ type: "text", text: "正文" }, { type: "fieldEnd" }]);
+  });
 });
 
 describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {

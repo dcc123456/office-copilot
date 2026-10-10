@@ -580,6 +580,42 @@ describe("域芯片（真实 schema）", () => {
   });
 });
 
+describe("跨段域的边界（真实 schema）", () => {
+  const begin = (instr: string, isSeparated = true) => ({
+    type: "fieldBegin",
+    attrs: { kind: instr.split(" ")[0]!, instr, isSeparated },
+  });
+  const end = () => ({ type: "fieldEnd" });
+  const field = (instr: string, display: string) => ({
+    type: "field",
+    attrs: { kind: instr.split(" ")[0]!, instr, display },
+  });
+
+  it("目录那种 begin 在首段、end 在末段的域，两段都留在树里且不占正文", () => {
+    const doc = harness([
+      para([begin(`TOC \\o "1-3"`), text("第一章\t"), field("PAGEREF _Toc1", "3")]),
+      para([text("第二章\t"), field("PAGEREF _Toc2", "5"), end()]),
+    ]).state.doc;
+    expect(doc.textContent).toBe("第一章\t第二章\t");
+    expect(doc.firstChild!.child(0).type.name).toBe("fieldBegin");
+    expect(doc.lastChild!.child(2).type.name).toBe("fieldEnd");
+    const json = JSON.parse(JSON.stringify(doc.toJSON())) as {
+      content: { content: { type: string; attrs?: Record<string, unknown> }[] }[];
+    };
+    expect(json.content[0]!.content[0]!.attrs).toMatchObject({
+      instr: `TOC \\o "1-3"`,
+      isSeparated: true,
+    });
+  });
+
+  it("Word 标成 dirty、还没写 separate 的目录开头也保得住", () => {
+    const doc = harness([para([begin("TOC", false), text("旧目录第一条")])]).state.doc;
+    expect(doc.firstChild!.child(0).attrs.isSeparated).toBe(false);
+    // 边界不是文字：把它算进段落长度会让 AI 的改动块按错位置落地。
+    expect(doc.textContent).toBe("旧目录第一条");
+  });
+});
+
 describe("超链接与正文色", () => {
   const GONGWEN = templateById("gongwen")!;
   const linkMark = {
