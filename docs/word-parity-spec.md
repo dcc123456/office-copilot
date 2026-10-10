@@ -236,7 +236,7 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ① | 书签：`w:bookmarkStart/End` 往返（段内直子元素，落单的一半在序列化前丢掉）+ 编辑器锚点节点 | `ba17b00` |
 | ② | 域读侧：同段 begin/end 配对成一条 `field` 节点，保留 `instr` 与**字面**缓存结果（`\t`⇄`<w:tab/>`、`\n`⇄`<w:br/>`），域内套域按 fieldDepth 折进外层结果；`Field.ts` 属性补 parse/render | `16a0e89` |
 | ③.1 | 跨段域的边界模型：段落内 begin 而本段无 end 时吐 `fieldBegin`/`fieldEnd` 一对节点（`fldCharTypes`/`closesInParagraph` 预扫判定），begin 后域深度归零让条目里的 `PAGEREF` 继续结构化；写侧 `fieldBoundaryXml` 还原 begin+instrText+separate 三件套；编辑器两个行内 atom | `bc06382` |
-| ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页 | 待做 |
+| ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | 待做 |
 | ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
 
@@ -271,6 +271,17 @@ OOXML：`w:pPr/w:tabs/w:tab w:val="left|center|right|decimal|bar|list|clear" w:l
 渲染（Tiptap 里用 `white-space: pre-wrap` + 每段生成 `background-image`/`text-indent` 代价太大 →
 决定：制表位只做数据层与导出，编辑器内 Tab 仍按浏览器默认宽度呈现，并在规格里如实写明这个差距）。
 UI 挂在「段落」面板下方（对齐 Word 的"制表位…"按钮），支持"清除/全部清除"。
+
+提交切分（实际落地顺序与提交号）：
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| ① | 数据层：`TabStop` 类型 + `readTabStops`/`tabsElementXml` 往返（读不懂整组退回透传，空数组=全部清除）+ 编辑器段落属性 `tabStops` | `8c37fb4` |
+| ② | 「段落」面板下方的"制表位…"入口：列出/新增/修改/清除，位置用 cm 或字符宽度按 Word 的口径 | 待做 |
+| ③ | 样式定义里的制表位跟随"更新样式以匹配所选内容"（现在样式自己的 `w:tabs` 只透传，从选区抓不到） | 待做 |
+
+①排在排名 3 的目录生成（③.2）之前落地：Word 的目录条目靠**右对齐 + 点前导符**制表位把页码
+顶到右边距，没有这一层，我们生成的目录在 Word 里就是一行挤在一起的"标题页码"。
 
 ## 六、排名 6：上标 / 下标
 
