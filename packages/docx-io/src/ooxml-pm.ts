@@ -394,7 +394,8 @@ function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
   const widow = onOffValue(firstChild(pPr, "w:widowControl"));
   if (widow !== undefined) out.widowControl = widow;
   const grid = onOffValue(firstChild(pPr, "w:snapToGrid"));
-  if (grid !== undefined) out.snapToGrid = grid;  // 大纲级别：OOXML 存 0-9（0 = Word 的"1 级"，9 = 正文文本）。超出范围说明
+  if (grid !== undefined) out.snapToGrid = grid;
+  // 大纲级别：OOXML 存 0-9（0 = Word 的"1 级"，9 = 正文文本）。超出范围说明
   // 是别的写入方乱填的，当作没建模过，写回时原样透传。
   const lvl = Number(val(firstChild(pPr, "w:outlineLvl")));
   if (Number.isInteger(lvl) && lvl >= 0 && lvl <= 9) out.outlineLevel = lvl;
