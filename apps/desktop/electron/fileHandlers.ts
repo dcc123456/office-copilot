@@ -1,12 +1,12 @@
 import { dialog, type IpcMain, type BrowserWindow } from "electron";
 import fs from "node:fs/promises";
-import path from "node:path";
 import {
   DocxFile,
   type LinkStyle,
   type PaneStyle,
   type ResolvedStyle,
   type SectionGeometry,
+  type StyleEdit,
 } from "@office-copilot/docx-io";
 import type { PMDoc } from "@office-copilot/docx-io/src/pm-schema.js";
 
@@ -30,7 +30,29 @@ export interface HeaderFooterPayload {
   footer?: PMDoc | null;
   section?: SectionGeometry | null;
   link?: LinkStyle | null;
+  /**
+   * 样式窗格里"新建样式 / 更新样式以匹配所选内容"攒下的编辑，保存时一次性落进
+   * styles.xml。空数组与不带这个字段都表示"这次保存不动样式表"。
+   */
+  styles?: StyleEdit[];
 }
+
+/** 渲染层经 preload 送进来的保存请求：正文 + 需要落地的各项文档级设置。 */
+export type SavePayload = HeaderFooterPayload & {
+  doc: PMDoc;
+  path?: string | null;
+  defaultName?: string;
+};
+
+/**
+ * 样式窗格的预览：把待落地的样式编辑投影成窗格清单与样式链，**不碰磁盘**。
+ *
+ * 走的是保存时的同一个 `DocxFile.applyStyleEdits`，因此窗格里看到的名字、
+ * 加粗与颜色，就是保存后 Word 里的那份格式；渲染层不再自己拼第二套样式解析。
+ */
+export type StylePreview =
+  | { ok: true; styles: PaneStyle[]; styleFormats: ResolvedStyle[] }
+  | { ok: false; message: string };
 
 export type OpenResult =
   | {
@@ -110,22 +132,10 @@ export function registerFileHandlers(
     "file:save",
     async (
       _e,
-      payload: {
-        path: string | null;
-        doc: PMDoc;
-        header?: PMDoc | null;
-        footer?: PMDoc | null;
-        section?: SectionGeometry | null;
-        link?: LinkStyle | null;
-      },
+      payload: SavePayload,
     ): Promise<{ ok: true; path: string } | { ok: false; message: string }> => {
       if (!payload.path) return { ok: false, message: "没有目标路径。" };
-      return saveDocx(payload.path, payload.doc, {
-        header: payload.header ?? null,
-        footer: payload.footer ?? null,
-        section: payload.section ?? null,
-        link: payload.link ?? null,
-      });
+      return saveDocx(payload.path, payload.doc, payload);
     },
   );
 
@@ -133,14 +143,7 @@ export function registerFileHandlers(
     "file:save-as",
     async (
       _e,
-      payload: {
-        doc: PMDoc;
-        defaultName?: string;
-        header?: PMDoc | null;
-        footer?: PMDoc | null;
-        section?: SectionGeometry | null;
-        link?: LinkStyle | null;
-      },
+      payload: SavePayload,
     ): Promise<
       | { ok: true; path: string }
       | { ok: false; canceled: true }
@@ -155,12 +158,7 @@ export function registerFileHandlers(
       if (result.canceled || !result.filePath) {
         return { ok: false, canceled: true };
       }
-      const r = await saveDocx(result.filePath, payload.doc, {
-        header: payload.header ?? null,
-        footer: payload.footer ?? null,
-        section: payload.section ?? null,
-        link: payload.link ?? null,
-      });
+      const r = await saveDocx(result.filePath, payload.doc, payload);
       if (!r.ok) return r;
       return { ok: true, path: result.filePath };
     },
@@ -168,19 +166,16 @@ export function registerFileHandlers(
 
   ipc.handle(
     "file:write-docx",
+    async (_e, payload: SavePayload & { path: string }) =>
+      saveDocx(payload.path, payload.doc, payload),
+  );
+
+  ipc.handle(
+    "styles:preview",
     async (
       _e,
-      payload: {
-        path: string;
-        doc: PMDoc;
-        header?: PMDoc | null;
-        footer?: PMDoc | null;
-      },
-    ) =>
-      saveDocx(payload.path, payload.doc, {
-        header: payload.header ?? null,
-        footer: payload.footer ?? null,
-      }),
+      payload: { path: string | null; styles: StyleEdit[] },
+    ): Promise<StylePreview> => previewStyles(payload.path, payload.styles),
   );
 
   ipc.handle("file:pick-image", async () => {
@@ -244,37 +239,66 @@ async function saveDocx(
   hf: HeaderFooterPayload,
 ): Promise<{ ok: true; path: string } | { ok: false; message: string }> {
   try {
-    let docx: DocxFile;
-    let isNew = false;
-    if (await exists(filePath)) {
-      const bytes = await fs.readFile(filePath);
-      docx = await DocxFile.fromBytes(bytes);
-    } else {
-      docx = await DocxFile.fromBytes(await minimalDocxBytes());
-      isNew = true;
-    }
+    const docx = await loadForEdit(filePath);
     if (hf.header) docx.setHeaderFooter("header", hf.header);
     if (hf.footer) docx.setHeaderFooter("footer", hf.footer);
     if (hf.section) docx.setSectionGeometry(hf.section);
     if (hf.link) docx.setDocStyle({ link: hf.link });
-    const warnings = await docx.replaceProseMirror(pmDoc);
+    // 样式表要先落地：正文里的 w:pStyle 引用的是 styles.xml 声明的 id，
+    // 换了新 id 却还没写进样式表，Word 会当成未声明样式退回默认格式。
+    if (hf.styles?.length) await docx.applyStyleEdits(hf.styles);
+    await docx.replaceProseMirror(pmDoc);
     const out = await docx.toBytes();
     const tmp = filePath + ".tmp";
     await fs.writeFile(tmp, out);
     await fs.rename(tmp, filePath);
-    if (isNew) {
-      void 0;
-    }
-    void warnings;
-    return { ok: true, path: filePath } as { ok: true; path: string } & {
-      warnings?: string[];
-    };
+    return { ok: true, path: filePath };
   } catch (err) {
     return {
       ok: false,
       message: `保存失败：${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+/**
+ * 样式窗格的预览：在内存里把待落地的编辑合并进样式表，取回投影结果，**不写文件**。
+ *
+ * 与 `saveDocx` 同一个 `applyStyleEdits`，所以"窗格预览 == 保存结果"不是巧合，
+ * 而是同一段代码跑两遍；渲染层因此不需要自己的样式合并/链解析。
+ *
+ * @param filePath 当前文档路径；null 表示还没保存过的新文档，用空白模板打底。
+ * @param edits 攒下的样式编辑，按创建先后排列（同 id 的后续编辑会覆盖前一条）。
+ * @returns ok:true + 窗格清单与样式链；读文件失败时 ok:false + 说明（窗格保持原样）。
+ */
+async function previewStyles(
+  filePath: string | null,
+  edits: StyleEdit[],
+): Promise<StylePreview> {
+  try {
+    const docx = await loadForEdit(filePath);
+    const { styles, styleFormats } = await docx.applyStyleEdits(edits);
+    return { ok: true, styles, styleFormats };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `样式预览失败：${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+/**
+ * 取一份可以就地改写的文档：路径上有文件就读它，否则用空白模板新建（不落盘）。
+ *
+ * @param filePath 目标 .docx 路径；null / 空串表示尚无文件（新文档）。
+ * @returns 内存中的 `DocxFile`，调用方改完再决定要不要写回。
+ */
+async function loadForEdit(filePath: string | null): Promise<DocxFile> {
+  if (!filePath || !(await exists(filePath))) {
+    return DocxFile.fromBytes(await minimalDocxBytes());
+  }
+  const bytes = await fs.readFile(filePath);
+  return DocxFile.fromBytes(bytes);
 }
 
 async function exists(p: string): Promise<boolean> {
@@ -320,6 +344,5 @@ async function minimalDocxBytes(): Promise<Uint8Array> {
     `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`,
   );
-  void path;
   return zip.generateAsync({ type: "uint8array" });
 }

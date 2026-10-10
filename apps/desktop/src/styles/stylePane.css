@@ -1,7 +1,17 @@
 /* 样式窗格（排名 2）。宽度用双类选择器覆盖 .sidebar 的 --outline-w，
-   单类选择器同权重时结果取决于引入顺序，不可靠。 */
+   单类选择器同权重时结果取决于引入顺序，不可靠。
+   列布局是为了把底部的动作区钉住：.sidebar 本身是块级 + overflow-y:auto，
+   文档有几十条样式时"新建样式"会跟着列表一起滚出视野。 */
 .sidebar.style-pane {
   width: 240px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: hidden;
+}
+
+.style-pane .panel-header {
   flex: 0 0 auto;
 }
 
@@ -9,6 +19,9 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .style-item {
@@ -35,4 +48,59 @@
   background: var(--accent-tint);
   color: var(--accent);
   font-weight: 600;
+}
+
+/* 新建 / 更新样式（排名 2 ⑥⑦）：贴着窗格底边，跟 Word 的样式窗格同一个位置。 */
+.style-create {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.style-name-field {
+  appearance: none;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  width: 100%;
+}
+
+.style-name-field:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.style-action {
+  appearance: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.style-action:hover:not(:disabled) {
+  background: var(--accent-tint);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* 没起名 / 没选中样式时按 Word 的做法灰掉，而不是点击后报错。 */
+.style-action:disabled {
+  cursor: default;
+  opacity: 0.5;
 }

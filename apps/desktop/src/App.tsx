@@ -12,6 +12,7 @@ import type {
   PaneStyle,
   ResolvedStyle,
   SectionGeometry,
+  StyleEdit,
 } from "@office-copilot/docx-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
@@ -165,6 +166,11 @@ export function App() {
     dirtyRef.current = dirty;
   }, [dirty]);
 
+  // 样式窗格攒下的「新建 / 更新样式」编辑，保存时一次性交给主进程落进 styles.xml。
+  // 用 ref 不用 state：没有 UI 读它，而菜单、快捷键、工具栏拿到的 handler 必须始终
+  // 看到最新一份（handleSave 的依赖里塞 state 会让每个菜单项跟着重建）。
+  const styleEditsRef = useRef<StyleEdit[]>([]);
+
   // Reusable file actions (used by both menu and toolbar).
   const handleNew = useCallback(() => {
     if (!editor) return;
@@ -181,6 +187,8 @@ export function App() {
     setLinkStyle(null);
     setDocStyles([]);
     setDocStyleFormats([]);
+    // 换文档 = 攒下的样式编辑作废：它们指向的是上一份文档的 styles.xml。
+    styleEditsRef.current = [];
     setFilePath(null);
     setDirty(false);
     setStarted(true);
@@ -200,6 +208,7 @@ export function App() {
     setLinkStyle(null);
     setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
     setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
+    styleEditsRef.current = [];
     setFilePath(r.path ?? null);
     setDirty(false);
     setStarted(true);
@@ -231,6 +240,7 @@ export function App() {
       setLinkStyle(null);
       setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
       setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
+      styleEditsRef.current = [];
       setFilePath(r.path ?? p);
       setDirty(false);
       setStarted(true);
@@ -278,6 +288,32 @@ export function App() {
     [openPath],
   );
 
+  /**
+   * 收下一条样式窗格交出来的编辑：同一条样式只留最新一份，然后向主进程要一次预览投影。
+   *
+   * 预览走的是保存时同一个 `applyStyleEdits`（只是不落盘），所以窗格列表与注入编辑器
+   * 的样式表就是保存之后 Word 里的那份定义，渲染层不必自己再实现一遍样式合并。
+   *
+   * @param edit 窗格组装好的编辑，`styleId` 已定稿（新建的 id 也由 `nextStyleId` 分好了）。
+   */
+  const submitStyleEdit = useCallback(async (edit: StyleEdit) => {
+    const merged = [
+      ...styleEditsRef.current.filter((previous) => previous.styleId !== edit.styleId),
+      edit,
+    ];
+    styleEditsRef.current = merged;
+    const r = await window.officeCopilot.previewStyles({
+      path: filePathRef.current,
+      styles: merged,
+    });
+    if (!r.ok) {
+      toast(r.message ?? "样式预览失败。", "error");
+      return;
+    }
+    setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
+    setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (!editor) return;
     const json = editor.getJSON() as PMDoc;
@@ -288,6 +324,7 @@ export function App() {
       footer: footerDoc as never,
       section: section as never,
       link: linkStyle as never,
+      styles: styleEditsRef.current,
     });
     if (r.ok && r.path) {
       setFilePath(r.path);
@@ -311,6 +348,7 @@ export function App() {
       footer: footerDoc as never,
       section: section as never,
       link: linkStyle as never,
+      styles: styleEditsRef.current,
     });
     if (r.ok && r.path) {
       setFilePath(r.path);
@@ -743,6 +781,7 @@ export function App() {
           <StylePane
             editor={editor}
             styles={docStyles}
+            onEdit={(edit) => void submitStyleEdit(edit)}
             onClose={() => setStylePaneOpen(false)}
           />
         )}

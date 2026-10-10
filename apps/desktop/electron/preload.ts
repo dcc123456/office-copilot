@@ -43,6 +43,17 @@ interface SavePayload {
   footer?: unknown;
   section?: unknown;
   link?: unknown;
+  /** 待落进 styles.xml 的样式编辑，见 @office-copilot/docx-io 的 StyleEdit。 */
+  styles?: unknown;
+}
+
+interface StylePreview {
+  ok: boolean;
+  /** 应用编辑后的样式窗格清单，结构见 docx-io 的 PaneStyle。 */
+  styles?: unknown;
+  /** 同一份编辑投影出的样式链，结构见 docx-io 的 ResolvedStyle。 */
+  styleFormats?: unknown;
+  message?: string;
 }
 
 /**
@@ -62,6 +73,14 @@ const api = {
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   writeDocx: (payload: { path: string; doc: unknown }): Promise<SaveResult> =>
     ipcRenderer.invoke("file:write-docx", payload),
+  /**
+   * 样式窗格的预览：主进程在内存里合并样式编辑并投影回窗格数据，不落盘。
+   * 预览与保存共用同一段合并逻辑，所以窗格里的格式就是 Word 里看到的格式。
+   */
+  previewStyles: (payload: {
+    path: string | null;
+    styles: unknown;
+  }): Promise<StylePreview> => ipcRenderer.invoke("styles:preview", payload),
   pickImage: (): Promise<
     | { ok: true; path: string; dataUrl: string }
     | { ok: false; canceled: true }

@@ -41,6 +41,8 @@ interface OfficeCopilotAPI {
     footer?: unknown;
     section?: unknown;
     link?: unknown;
+    /** 待落进 styles.xml 的样式编辑，结构见 docx-io 的 StyleEdit。 */
+    styles?: unknown;
   }) => Promise<any>;
   saveFileAs: (payload: {
     doc: unknown;
@@ -49,6 +51,7 @@ interface OfficeCopilotAPI {
     footer?: unknown;
     section?: unknown;
     link?: unknown;
+    styles?: unknown;
   }) => Promise<any>;
   readDocx: (filePath: string) => Promise<any>;
   pathForFile: (file: File) => string;
@@ -58,6 +61,19 @@ interface OfficeCopilotAPI {
     header?: unknown;
     footer?: unknown;
   }) => Promise<any>;
+  /**
+   * 样式窗格预览：主进程内存里合并样式编辑，返回窗格清单与样式链，不写磁盘。
+   * styles / styleFormats 的结构分别是 docx-io 的 PaneStyle[] / ResolvedStyle[]。
+   */
+  previewStyles: (payload: {
+    path: string | null;
+    styles: unknown;
+  }) => Promise<{
+    ok: boolean;
+    styles?: unknown;
+    styleFormats?: unknown;
+    message?: string;
+  }>;
   pickImage: () => Promise<
     | { ok: true; path: string; dataUrl: string }
     | { ok: false; canceled: true }

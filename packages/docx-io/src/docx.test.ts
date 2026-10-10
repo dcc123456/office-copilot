@@ -405,6 +405,35 @@ describe("DocxFile", () => {
     expect(reloaded.styleFormats).toEqual(styleFormats);
   });
 
+  /**
+   * 主进程 `saveDocx` 的写入顺序（样式表先落地，再写正文）钉在这条用例里：
+   * 正文引用一条刚刚新建的样式时，**声明与引用必须同时出现在保存出来的文件里**。
+   * 只有 `w:pStyle` 没有 `w:style`，Word 会把这段排成本文档的默认格式（排名 2 ⑥/⑦）。
+   */
+  it("saves both the declaration and the body reference of a created style", async () => {
+    const docx = await DocxFile.fromBytes(await makeDocx(["正文"]));
+    await docx.applyStyleEdits([
+      { styleId: "Emphasis", name: "重点段落", paragraph: { indent: 36 }, marks: [] },
+    ]);
+    await docx.replaceProseMirror({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          attrs: { styleId: "Emphasis" },
+          content: [{ type: "text", text: "重点" }],
+        },
+      ],
+    } as PMDoc);
+    const zip = await JSZip.loadAsync(await docx.toBytes());
+    expect(await zip.file("word/document.xml")!.async("string")).toContain(
+      '<w:pStyle w:val="Emphasis"/>',
+    );
+    expect(await zip.file("word/styles.xml")!.async("string")).toContain(
+      'w:styleId="Emphasis"',
+    );
+  });
+
   /** 已有样式表时按 splice-and-keep 合并：docDefaults 那条链不能被保存一次就抹平。 */
   it("keeps docDefaults alive when a style is edited", async () => {
     const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
