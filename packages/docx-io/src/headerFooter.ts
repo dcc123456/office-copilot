@@ -1,8 +1,8 @@
 import type JSZip from "jszip";
 import { children, firstChild, parseDocument, wordPartPath } from "./xml.js";
 import { ooxmlFragmentToPm, pmToOoxmlFragment } from "./ooxml-pm.js";
-import type { PMDoc } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
+import { emptyPmDoc, type PMDoc } from "./pm-schema.js";
 import { StyleMap } from "./styles.js";
 
 export type HeaderFooterType =
@@ -156,31 +156,28 @@ export function serializeHeaderFooters(
 }
 
 /**
- * If a brand-new header/footer is added (one that didn't exist in the
- * source document), generate both its part file and a Relationship +
- * sectPr reference. This is a helper; the DocxFile layer decides when
- * to call it.
+ * 取某一类页眉/页脚部件，文档里本来没有就当场建一个空的。
+ *
+ * rId 按类型给死（页眉 `rIdHf1`、页脚 `rIdHf2`）：两者撞号时
+ * `writeHeaderFooters` 的 `ensureRel` 会以为关系已经登记过，页脚引用于是指到页眉部件上。
+ *
+ * @param bundle 当前文档的页眉页脚集合。
+ * @param kind 建哪一类，只建这一类——建页眉时不该顺手塞一个用户没要过的页脚。
+ * @returns 条目本体，调用方直接改它的 `pm` 与 `dirty`。
  */
-export function ensureDefaultHeaderFooter(
+export function ensureHeaderFooterPart(
   bundle: HeaderFooterBundle,
-  numbering: NumberingMap,
-): { headerPath: string; footerPath: string; headerRId: string; footerRId: string } {
-  const mkPart = (kind: "header" | "footer", id: number): { path: string; rId: string } => {
-    const path = `word/${kind}${id}.xml`;
-    if (!bundle.entries[kind]) {
-      bundle.entries[kind] = {
-        type: kind,
-        rId: `rIdHf${id}`,
-        path,
-        pm: { type: "doc", content: [{ type: "paragraph", content: [] }] },
-        rawXml: "",
-        dirty: true,
-      };
-    }
-    return { path, rId: bundle.entries[kind]!.rId };
-  };
-  const h = mkPart("header", 1);
-  const f = mkPart("footer", 1);
-  void numbering;
-  return { headerPath: h.path, footerPath: f.path, headerRId: h.rId, footerRId: f.rId };
+  kind: "header" | "footer",
+): HeaderFooterEntry {
+  if (!bundle.entries[kind]) {
+    bundle.entries[kind] = {
+      type: kind,
+      rId: kind === "header" ? "rIdHf1" : "rIdHf2",
+      path: `word/${kind}1.xml`,
+      pm: emptyPmDoc(),
+      rawXml: "",
+      dirty: true,
+    };
+  }
+  return bundle.entries[kind]!;
 }

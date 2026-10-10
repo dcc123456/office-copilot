@@ -25,11 +25,17 @@ import { StyleMap, type PaneStyle } from "./styles.js";
 import { resolvedStyles, type ResolvedStyle } from "./style-format.js";
 import { mergeStylesXml, type StyleEdit } from "./style-edit.js";
 import {
-  ensureDefaultHeaderFooter,
+  ensureHeaderFooterPart,
   loadHeaderFooters,
   serializeHeaderFooters,
   type HeaderFooterBundle,
 } from "./headerFooter.js";
+import {
+  applyWatermark,
+  readWatermark,
+  sameWatermark,
+  type SectionWatermark,
+} from "./watermark.js";
 import {
   FOOTNOTE_CONTENT_TYPE,
   FOOTNOTE_PART,
@@ -173,6 +179,12 @@ export interface SectionGeometry {
   pageBorders?: SectionPageBorders | null;
   /** 行号（`w:lnNumType`），`undefined`/`null` 的语义同 `pageBorders`。 */
   lineNumbers?: SectionLineNumbers | null;
+  /**
+   * 水印。它不是节属性——Word 把它写成**页眉部件里的一个 VML 艺术字形状**，
+   * 所以读的时候从页眉原始 XML 里取，写的时候在页眉序列化之后做字符串级替换。
+   * `undefined`/`null` 的语义同 `pageBorders`。
+   */
+  watermark?: SectionWatermark | null;
 }
 
 /**
@@ -366,6 +378,9 @@ export class DocxFile {
     }
     const section = readSectionGeometry(this.body);
     section.paraSpacingAfter = this.styles.defaultSpacingAfterPx;
+    // 水印住在页眉部件里，形状（VML 艺术字）PM 表示不了，只能读原始 XML 那一份。
+    const watermark = readWatermark(this.headers.entries.header?.rawXml);
+    if (watermark) section.watermark = watermark;
     return {
       doc: pm,
       sourceXml,
@@ -384,20 +399,7 @@ export class DocxFile {
    * leave an entry untouched. Pass an empty doc to clear it.
    */
   setHeaderFooter(type: "header" | "footer", pm: PMDoc): void {
-    let entry = this.headers.entries[type];
-    if (!entry) {
-      const { headerRId, footerRId, headerPath, footerPath } =
-        ensureDefaultHeaderFooter(this.headers, this.numbering);
-      if (type === "header") {
-        entry = this.headers.entries.header!;
-        void headerRId;
-        void headerPath;
-      } else {
-        entry = this.headers.entries.footer!;
-        void footerRId;
-        void footerPath;
-      }
-    }
+    const entry = ensureHeaderFooterPart(this.headers, type);
     entry.pm = pm;
     entry.dirty = true;
   }
@@ -517,6 +519,9 @@ export class DocxFile {
 
   private async writeHeaderFooters(): Promise<void> {
     const bundle = this.headers;
+    const watermark = this.pendingSection?.watermark;
+    // 只设了水印、文档本来没有页眉：先补一个页眉部件，形状才有地方放。
+    if (watermark && !bundle.entries.header) ensureHeaderFooterPart(bundle, "header");
     const hasAny = Object.keys(bundle.entries).length > 0;
     if (!hasAny) return;
 
@@ -529,6 +534,15 @@ export class DocxFile {
     }
 
     const parts = serializeHeaderFooters(bundle, this.numbering);
+    const header = bundle.entries.header;
+    if (watermark !== undefined && header) {
+      const xml = parts.get(header.path);
+      // 值等价就不重建：页面设置每次保存都会把读到的水印带回来，
+      // 重写会把 Word 那份形状换成我们那份，字节级别来回变。
+      if (xml && !sameWatermark(readWatermark(xml), watermark)) {
+        parts.set(header.path, applyWatermark(xml, watermark));
+      }
+    }
     for (const [path, xml] of parts) {
       this.zip.file(path, xml);
     }
@@ -562,19 +576,26 @@ export class DocxFile {
     }
 
     // Ensure document.xml.rels contains the relationships.
+    // 必须解析后追加：rels 一条关系都没有时 serialize 出来的是自闭合的
+    // `<Relationships …/>`，字符串替换 `</Relationships>` 匹配不上，页眉关系就悄悄丢了，
+    // 而 sectPr 里的 `r:id` 指着不存在的目标 = Word 判文档损坏。
     const relsFile = this.zip.file(RELS_XML);
-    let rels = relsFile ? await relsFile.async("string") : `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>`;
-    const ensureRel = (rId: string, target: string, type: string) => {
-      if (!rels.includes(`Id="${rId}"`)) {
-        rels = rels.replace(
-          "</Relationships>",
-          `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}" Target="${target}"/></Relationships>`,
-        );
-      }
-    };
-    if (bundle.entries.header) ensureRel(bundle.entries.header.rId, "header1.xml", "header");
-    if (bundle.entries.footer) ensureRel(bundle.entries.footer.rId, "footer1.xml", "footer");
-    this.zip.file(RELS_XML, rels);
+    const relsRoot = relsFile
+      ? parseDocument(await relsFile.async("string"))
+      : newRelsDocument();
+    const relBase = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/";
+    let addedRel = false;
+    if (bundle.entries.header) {
+      addedRel =
+        addRelationship(relsRoot, bundle.entries.header.rId, `${relBase}header`, "header1.xml") ||
+        addedRel;
+    }
+    if (bundle.entries.footer) {
+      addedRel =
+        addRelationship(relsRoot, bundle.entries.footer.rId, `${relBase}footer`, "footer1.xml") ||
+        addedRel;
+    }
+    if (addedRel) this.zip.file(RELS_XML, serialize(relsRoot));
 
     // Inject headerReference/footerReference into sectPr if missing.
     // OOXML schema order requires headerReference/footerReference to
@@ -1037,16 +1058,12 @@ export class DocxFile {
     if (relsXml?.includes(relationshipTypeUrl)) return;
     const rels = relsXml ? parseDocument(relsXml) : newRelsDocument();
     const existingIds = children(rels).map((c) => c.attributes?.["Id"] as string);
-    (rels.children as unknown as Element[]).push({
-      type: "element",
-      name: "Relationship",
-      attributes: {
-        Id: nextRid(existingIds),
-        Type: relationshipTypeUrl,
-        Target: partName.split("/").pop() ?? partName,
-      },
-      children: [],
-    } as unknown as Element);
+    addRelationship(
+      rels,
+      nextRid(existingIds),
+      relationshipTypeUrl,
+      partName.split("/").pop() ?? partName,
+    );
     this.zip.file(RELS_XML, serialize(rels));
   }
 
@@ -1736,4 +1753,29 @@ function newRelsDocument(): Element {
   );
   if (!root) throw new Error("构造 rels 失败。");
   return root;
+}
+
+/**
+ * 往已解析的 rels 根上追加一条文档关系，同一个 `@Id` 已经在了就不重复加。
+ *
+ * @param relsRoot `word/_rels/document.xml.rels` 解析出来的根元素，原地改它的 children。
+ * @param id 关系的 `@Id`，正文里的 `r:id` 就指着它。
+ * @param typeUrl 完整的 `@Type` URL（不是缩写）。
+ * @param target 相对 `word/` 的目标路径，如 "header1.xml"。
+ * @returns 真的加了这条关系才 true；调用方据此决定要不要重写部件。
+ */
+function addRelationship(
+  relsRoot: Element,
+  id: string,
+  typeUrl: string,
+  target: string,
+): boolean {
+  if (children(relsRoot).some((c) => c.attributes?.["Id"] === id)) return false;
+  (relsRoot.children as unknown as Element[]).push({
+    type: "element",
+    name: "Relationship",
+    attributes: { Id: id, Type: typeUrl, Target: target },
+    children: [],
+  } as unknown as Element);
+  return true;
 }

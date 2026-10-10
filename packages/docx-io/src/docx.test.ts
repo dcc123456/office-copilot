@@ -244,7 +244,10 @@ describe("DocxFile", () => {
    *   是两回事——节属性重建就在这一步。
    * @param opts.editSection 用户在页面设置里改过的字段：先读回节属性，套上这个变换
    *   再写回去（只在 `applyPageSetup` 下生效），用来测"改栏数"这类真有编辑的保存。
-   * @returns 保存一次与保存两次后的 document.xml 文本。
+   * @param opts.parts 额外部件（页眉部件就靠它造），透传给 makeDocx。
+   * @param opts.documentRels 额外关系条目，透传给 makeDocx。
+   * @param opts.readPart 断言对象是哪份部件，默认 `word/document.xml`。
+   * @returns 保存一次与保存两次后的部件文本。
    */
   async function saveTwice(
     paragraphs: string[],
@@ -252,11 +255,14 @@ describe("DocxFile", () => {
       sectPr?: string;
       applyPageSetup?: boolean;
       editSection?: (s: SectionGeometry) => SectionGeometry;
+      parts?: Record<string, string>;
+      documentRels?: string;
+      readPart?: string;
     } = {},
   ): Promise<{ once: string; twice: string }> {
     const readBody = async (bytes: Uint8Array) => {
       const zip = await JSZip.loadAsync(bytes);
-      return (await zip.file("word/document.xml")!.async("string"));
+      return (await zip.file(opts.readPart ?? "word/document.xml")!.async("string"));
     };
     const reopen = async (bytes: Uint8Array): Promise<Uint8Array> => {
       const docx = await DocxFile.fromBytes(bytes);
@@ -270,6 +276,8 @@ describe("DocxFile", () => {
     const source = await makeDocx([], {
       rawParagraphs: paragraphs,
       sectPr: opts.sectPr,
+      parts: opts.parts,
+      documentRels: opts.documentRels,
     });
     const onceBytes = await reopen(source);
     return {
@@ -538,6 +546,171 @@ describe("DocxFile", () => {
       }),
     });
     expect(once).not.toContain("<w:pgBorders");
+  });
+
+  /** 一份带 Word 水印形状的页眉部件，`<w:pict>` 里只有形状，没有别的正文。 */
+  function headerWithWatermark(text = "机密"): string {
+    return (
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ` +
+      `xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">` +
+      `<w:p><w:r><w:pict>` +
+      `<v:shapetype id="_x0000_t136" o:spt="136"><v:textpath on="t" fitshape="t"/></v:shapetype>` +
+      `<v:shape type="#_x0000_t136" rotation="315" fillcolor="#c0c0c0" stroked="f">` +
+      `<v:fill on="t" opacity="50000f"/>` +
+      `<v:textpath style="font-family:'宋体';font-size:1pt" fitshape="t" string="${text}"/>` +
+      `</v:shape></w:pict></w:r></w:p></w:hdr>`
+    );
+  }
+
+  /** 页眉部件的夹具三件套：部件本体 + 关系 + 节属性里的引用。 */
+  const HEADER_SECT_PR =
+    `<w:headerReference w:type="default" r:id="rIdHdr"/>` +
+    `<w:pgSz w:w="11906" w:h="16838"/>` +
+    `<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/>`;
+  const HEADER_RELS =
+    `<Relationship Id="rIdHdr" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>`;
+
+  it("reads the watermark out of the header part into the section geometry", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr: HEADER_SECT_PR,
+        documentRels: HEADER_RELS,
+        parts: { "word/header1.xml": headerWithWatermark("机密★内部资料") },
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    // 定点写法 50000f 就是 50%，`fitshape="t"` 读成"自动"字号。
+    expect(section?.watermark).toEqual({
+      text: "机密★内部资料",
+      font: "宋体",
+      sizePt: null,
+      color: "#c0c0c0",
+      semiTransparent: true,
+      layout: "diagonal",
+    });
+  });
+
+  it("leaves the watermark unset when the header holds only text", async () => {
+    const { once, twice } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: HEADER_SECT_PR,
+      documentRels: HEADER_RELS,
+      parts: {
+        "word/header1.xml":
+          headerWithWatermark().replace(/<w:p>[\s\S]*<\/w:p>/, "<w:p><w:r><w:t>页眉：编号</w:t></w:r></w:p>"),
+      },
+      readPart: "word/header1.xml",
+    });
+    expect(once).toContain("页眉：编号");
+    expect(once).not.toContain("v:shape");
+    expect(twice).toBe(once);
+  });
+
+  it("keeps an untouched watermark byte-identical through the app save path", async () => {
+    // 桌面 app 每次保存都会把打开时读到的页面设置带回去（fileHandlers.saveDocx），
+    // 水印值没变就不该重写页眉——重写会把 Word 那份形状换成我们那份。
+    const { once, twice } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: HEADER_SECT_PR,
+      documentRels: HEADER_RELS,
+      parts: { "word/header1.xml": headerWithWatermark("机密★内部资料") },
+      readPart: "word/header1.xml",
+    });
+    expect(once).toContain('string="机密★内部资料"');
+    expect(once.match(/<v:shape\b/g)).toHaveLength(1);
+    expect(once.match(/<v:shapetype\b/g)).toHaveLength(1);
+    expect(twice).toBe(once);
+  });
+
+  it("replaces the watermark shape when the user edits it", async () => {
+    const { once, twice } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: HEADER_SECT_PR,
+      documentRels: HEADER_RELS,
+      parts: { "word/header1.xml": headerWithWatermark("机密★内部资料") },
+      readPart: "word/header1.xml",
+      editSection: (s) => ({
+        ...s,
+        watermark: {
+          text: '作废"<草稿>',
+          font: "黑体",
+          sizePt: 48,
+          color: "#ff0000",
+          semiTransparent: false,
+          layout: "horizontal",
+        },
+      }),
+    });
+    expect(once).not.toContain("机密★内部资料");
+    // 文字里的引号必须转义，否则形状属性被截断（§2.2 同一条纪律：看不懂的不如不写）。
+    expect(once).toContain('string="作废&quot;&lt;草稿&gt;"');
+    expect(once).toContain('font-family:\'黑体\';font-size:48pt');
+    expect(once).not.toContain('rotation="315"');
+    expect(once).not.toContain("opacity=");
+    expect(once.match(/<v:shape\b/g)).toHaveLength(1);
+    // 形状定义块只有一份，重复 id 会让 Word 判定文档有问题。
+    expect(once.match(/<v:shapetype\b/g)).toHaveLength(1);
+    expect(twice).toBe(once);
+  });
+
+  it("strips the watermark paragraph but keeps the header text", async () => {
+    const withText = headerWithWatermark("机密").replace(
+      "</w:hdr>",
+      `<w:p><w:r><w:t>页眉：合同编号</w:t></w:r></w:p></w:hdr>`,
+    );
+    const { once, twice } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: HEADER_SECT_PR,
+      documentRels: HEADER_RELS,
+      parts: { "word/header1.xml": withText },
+      readPart: "word/header1.xml",
+      editSection: (s) => ({ ...s, watermark: null }),
+    });
+    expect(once).not.toContain("v:shape");
+    expect(once).toContain("页眉：合同编号");
+    expect(twice).toBe(once);
+  });
+
+  it("creates a header part, relationship and section reference for a watermark-only document", async () => {
+    // 文档本来没有页眉：水印还是得有个地方放，所以补部件 + 登记 + 节属性引用，
+    // 但只补页眉那一份，不该顺手塞一个用户没要过的页脚。
+    const source = await makeDocx(["正文"], {
+      sectPr: `<w:pgSz w:w="11906" w:h="16838"/>`,
+    });
+    const reopen = async (bytes: Uint8Array) => {
+      const docx = await DocxFile.fromBytes(bytes);
+      const loaded = await docx.toProseMirror();
+      docx.setSectionGeometry({
+        ...loaded.section,
+        watermark: {
+          text: "内部资料",
+          font: "宋体",
+          sizePt: null,
+          color: "#c0c0c0",
+          semiTransparent: true,
+          layout: "diagonal",
+        },
+      });
+      await docx.replaceProseMirror(loaded.doc);
+      return JSZip.loadAsync(await docx.toBytes());
+    };
+    const once = await reopen(source);
+    const header = await once.file("word/header1.xml")!.async("string");
+    expect(header).toContain('string="内部资料"');
+    expect(header).toContain('xmlns:v="urn:schemas-microsoft-com:vml"');
+    const ct = await once.file("[Content_Types].xml")!.async("string");
+    expect(ct).toContain("/word/header1.xml");
+    const rels = await once.file("word/_rels/document.xml.rels")!.async("string");
+    expect(rels).toContain('Target="header1.xml"');
+    const doc = await once.file("word/document.xml")!.async("string");
+    expect(doc).toMatch(/<w:headerReference\b[^>]*r:id="rIdHf1"/);
+    expect(doc).not.toContain("footerReference");
+    expect(once.file("word/footer1.xml")).toBeNull();
+
+    const twice = await reopen(await once.generateAsync({ type: "uint8array" }));
+    expect(await twice.file("word/header1.xml")!.async("string")).toBe(header);
+    expect((await twice.file("word/_rels/document.xml.rels")!.async("string")).match(/rIdHf1/g)).toHaveLength(1);
   });
 
   it("keeps a right tab stop with a dot leader through a real save", async () => {

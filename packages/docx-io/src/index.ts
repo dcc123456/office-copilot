@@ -11,6 +11,8 @@ export type {
   DocStyle,
   PmLoadResult,
 } from "./docx.js";
+// 水印住在页眉部件里，但它是 SectionGeometry 的一个字段，类型要跟着出去给渲染层。
+export type { SectionWatermark, WatermarkLayout } from "./watermark.js";
 export * as xml from "./xml.js";
 export {
   ooxmlToPm,
