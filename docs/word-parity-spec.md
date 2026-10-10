@@ -236,9 +236,21 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ① | 书签：`w:bookmarkStart/End` 往返（段内直子元素，落单的一半在序列化前丢掉）+ 编辑器锚点节点 | `ba17b00` |
 | ② | 域读侧：同段 begin/end 配对成一条 `field` 节点，保留 `instr` 与**字面**缓存结果（`\t`⇄`<w:tab/>`、`\n`⇄`<w:br/>`），域内套域按 fieldDepth 折进外层结果；`Field.ts` 属性补 parse/render | `16a0e89` |
 | ③.1 | 跨段域的边界模型：段落内 begin 而本段无 end 时吐 `fieldBegin`/`fieldEnd` 一对节点（`fldCharTypes`/`closesInParagraph` 预扫判定），begin 后域深度归零让条目里的 `PAGEREF` 继续结构化；写侧 `fieldBoundaryXml` 还原 begin+instrText+separate 三件套；编辑器两个行内 atom | `bc06382` |
-| ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | 待做 |
+| ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | `2dadd0a` |
+| ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | 待做 |
 | ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
+
+③.2 的取舍（都是刻意的，不要当成待修项）：
+
+- **不写 `w:pStyle`**：文档里没有 `TOC1`/`TOC2` 样式定义，写过去就是一个悬空引用，Word 会回落到默认样式并
+  判定文档可疑。条目段的缩进用 `w:ind`、制表位用 `w:tabs`，都走排名 5 ① 已经打通的 attrs。
+- **不包 `w:hyperlink`**：`\h` 是"更新域时由 Word 生成超链接"，我们此刻手写的链接只会让每一条都变蓝带下划线。
+- **前导符在编辑器里还看不见**：制表位只呈现为 `data-tab-stops`，没有对应的 CSS，所以目录行在编辑器里是
+  "文字 + 一串空格似的东西"，写进文件才是点线。这一条由排名 5 ②（段落浮层里的制表位 UI + 呈现）一并关掉。
+- **`deleteBlock` 的逆操作会降级 json 段**：撤销一个插入目录的 op 时，`newFromBlock()` 按纯文本重建，
+  `\t` 仍能序列化成 `<w:tab/>`，但 `PAGEREF` 域与 `tabStops` attrs 会丢。整块撤销的语义仍然是"文字回到原样"，
+  结构回到原样要等 json 段自己的逆操作。
 
 ②的已知差距：一个 `field` 节点只表示**同一段内**的 begin/end 配对，Word 生成的多段目录从第二段起读成纯文本
 ——已由 ③.1 解决。缓存结果里的嵌套域指令（如目录条目的 `PAGEREF`）②只保留文本，③.1 起改由边界节点之间的
