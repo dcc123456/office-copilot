@@ -241,7 +241,7 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ④.1 | 脚注/尾注部件保真（`footnotes.xml`/`endnotes.xml` + Content_Types + rels）+ 正文引用点的行内 atom | `013d8ca` |
 | ④.2 | 脚注正文的编辑与编号：在编辑器里改脚注内容、插入/删除脚注时重排 `w:id` 与 Word 的显示编号 | `f005b3c` |
 | ⑤.1 | 题注 `SEQ`：`SEQ 图 \* ARABIC` 域 + `_Ref` 书签包裹缓存编号，标签各自计数、编号随正文派生重排；对话框选标签/位置/说明文字 | `51750c3` |
-| ⑤.2 | 交叉引用 `REF`/`PAGEREF`：指向 `_Ref…`/`_Toc…` 书签的引用弹窗 | 待做 |
+| ⑤.2 | 交叉引用 `REF`/`PAGEREF`：指向 `_Ref…`/`_Toc…` 书签的引用弹窗，新 op `insertInline`/`removeInline`；前置的读侧保真 `2e71a6f` | `2e71a6f` `4284046` |
 
 ③.2 的取舍（都是刻意的，不要当成待修项）：
 
@@ -260,7 +260,8 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
   开弹窗 → 默认"光标所在段之后"、收录 1 个标题 → 确定后 toast「已插入目录（1 条）。」，条目段落
   `data-tab-stops` 为 `{positionPt: 451.5, alignment: "right", leader: "dot"}`，文字 `无标题⇥1`，脏标记亮起。
 - **多页刷新路径未走通**：实测样例只有一页，`watchTocPageNumbers` 的"分页收敛后页码变了"这条分支没被真正触发过；
-  它的正确性目前只有 `tocPageNumberRefresh` 的单测背书。
+  它的正确性目前只有 `tocPageNumberRefresh` 的单测背书。（这两个函数在 ⑤.2 改名
+  `watchFieldPageNumbers`/`fieldPageNumberRefresh`，因为目录条目与交叉引用共用同一套页码刷新。）
 - **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，`.docx` 只做到读回一致。
 - 前导符在编辑器里依旧不可见（见上面 ③.2 的取舍），排名 5 ② 一并关掉。
 
@@ -356,6 +357,63 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
   **没有夹进本次题注提交**。
 - 差距：题注段没有 `Caption` 样式，在 Word 里不会自动带出题注的字号与间距；编号只在编辑器里派生，
   落盘是域的缓存值，Word 按 F9 重算时以自己为准。
+- **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
+
+⑤.2 的做法（交叉引用 `REF`/`PAGEREF`）：一手依据是微软「字段代码：Ref 域」（形状是
+`{ REF 书签名 [开关] }`，该文列出的开关只有 `\d \f \h \n \p \r \t \w`；不带开关取"书签所代表的那段文字"，
+`\p` 给 above/below，`\h` 是"更新域时做成超链接"），页码那一档走 `PAGEREF`（③.2 的目录条目已经在写它）。
+可引用目标 = 文档里**成对出现**的书签（`collectRefTargets` 按 `w:id` 配对，落单的半边不列，与 Word 的
+对话框一致）；"书签文字"取书签实际裹住的那段行内内容，而域是原子节点、它对外贡献的是自己的 `display`，
+所以 `_Ref…` 裹住 `SEQ` 域时书签文字就是编号——这与 Word 的列法一致。落文档新加一对 op：
+`insertInline`/`removeInline`（`ai/docEdit.ts` 模拟 + `editor/docBlocks.ts` 落地）。为什么不复用 `setText`：
+撤一条引用会连带整段重排，把用户同段里的图片、域与字符样式一起拍平（§2.3）；`insertInline` 只放一个行内
+原子域、不贡献 `textContent`，块的地址文字因此不变，逆操作 `removeInline` 按**指令文字**认域（内容寻址、
+不含坐标），因此撤引用不牵连别处后来的手工编辑（§2.5）。插入点用块模型的文字偏移
+（`inlinePosForTextOffset` 只在文字上计数，域与书签不占位）。页码档取自本地分页 `pageNumberOf`，与 ③.3
+同一个来源：`bookmarkPages` 去掉 `_Toc` 前缀过滤（`PAGEREF _Ref…` 也要查得到页码），
+`tocPageNumberRefresh`/`watchTocPageNumbers` 因此改名 `fieldPageNumberRefresh`/`watchFieldPageNumbers`。
+编号档：`captionNumberPatches` 在同一次遍历里记下"书签名 → 那条 `SEQ` 的号数"，走完文档再回头刷
+`REF _Ref…` 的缓存结果，所以"引用在前、题注在后"（Word 的"以下"）也能跟着重排。
+读侧另有一处**既有缺陷**被本次实测抓出来并单独提交（`2e71a6f`）：`w:hyperlink` 里只按 run 抽文字，
+Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文字；改成链接内部走同一套域状态机。
+同一提交还修了 `w:anchor` 越存越长的 `#`（读侧折成 `#名字`，写侧没剥掉）。
+
+⑤.2 的取舍（都是刻意的，不要当成待修项）：
+
+- **`\h` 只写进指令，不手写 `w:hyperlink`**：同 ③.2。链接只落在文字上（`addMark` 的既有约定），
+  所以整条 `w:hyperlink` 里只有域、没有文字时，存回去不再有链接——指令保住了，超链接让 Word 更新域时补。
+- **"以上/以下"的中文措辞是推断**：位置判定（域在书签之前算 below、之后算 above）按官方文档实现且实测写出，
+  但字面语言由更新方的界面语言决定，本机没有 Word，观察不到它重算后的措辞。
+- **不做跳转**：点芯片不导航到书签；`\h` 生成的链接要在 Word 里按 F9 之后才可点。
+- **引用块模型的地址文字仍带题注那个双空格**（`图  系统架构`），与 ⑤.1 同因；`setText` 会把它归一成一个空格，
+  单测里那条断言按归一化后的文字写。
+
+⑤.2 的验收与差距：
+
+- 真实 app 实测（构建产物 + CDP 驱动，独立 `--user-data-dir`）：样例是"带 `_Toc1` 书签的标题 +
+  一条正文 + Word 写的题注（`_Ref10` 裹 `SEQ`，缓存 1）+ Word 写的交叉引用（`{ PAGEREF _Ref10 \h }` 整条被
+  `w:hyperlink` 包着）+ 一条正文"。打开后芯片 `["1","2"]`——**Word 那条交叉引用读成了域**
+  （`2e71a6f` 之前只有 `["1"]`，链接里的指令被折成死文字）。
+- 弹窗列出 `["目录条目：第一章 绪论","题注：图  系统架构"]`；选"题注 + 页码"提示
+  `域指令：{ PAGEREF _Ref10 \h }`，确定后域落在光标处（`正文一` 变成 `[域]正文一`）；切"书签文字"提示变
+  `{ REF _Ref10 \h }，当前内容为「1」`；切"以上或下方 + 纯文字"并把目标换成目录条目时提示 `{ REF _Toc1 \p }`，
+  缓存结果写 `以上`（光标在标题之后，实测）。
+- **点对话框里的分段按钮一度会把对话框关掉**：`CrossRefDialog` 漏了既有约定——`.modal` 上要挂
+  `onClick={(e) => e.stopPropagation()}`，否则点击冒泡到 `modal-backdrop` 的关闭处理（实测第二次打开后
+  「确定」按钮已经不在 DOM 里）。补上后连点三档对话框仍在。**这是本次探针才暴露出来的，⑤.1 没踩到**：
+  那次的探针用 JS 直接写 input 值，没触发过段按钮的真实点击。
+- 保存后读回 `word/document.xml`：`w:instrText` 五条
+  `[" PAGEREF _Ref10 \\h "," REF _Toc1 \\p "," REF _Ref10 \\h "," SEQ 图 \\* ARABIC "," PAGEREF _Ref10 \\h "]`，
+  指令没有落进任何 `w:t`，`_Toc1`/`_Ref10` 两个 `w:bookmarkStart` 配对还在；Word 那条的缓存页码从 2 被本地
+  分页刷成 1（`fieldPageNumberRefresh` 的既定行为）。`<w:sectPr>` 依旧在保存 payload 里消失——与 ⑤.1 同一条
+  既有缺陷（排名 7 ①），再次复现，未夹进本次提交。
+- 撤销：一次「撤销」把三条引用一起退掉（芯片 5→2，`正文一` 回到没有域的样子，题注与 Word 那条不受牵连）——
+  三次插入落在 ProseMirror 历史的同一个分组里（`newGroupDelay` 默认 500ms，脚本往返之间没跨过窗口），
+  不是撤销粒度出错；逐条粒度由 `crossrefs.test.ts`、`docEdit.test.ts` 与 `docBlocks.live.test.ts` 的真实
+  schema 用例背书。**再退一步会越过"打开文件"这一步、整篇换回欢迎页**：`App.tsx` 用
+  `editor.commands.setContent` 装载文档，这一步进了 ProseMirror 的撤销栈。属既有缺陷（任何一次插入都踩得到，
+  与交叉引用无关），未夹进本次提交，登记为排名 3 的收尾项：装载文档应发一条
+  `setMeta("addToHistory", false)` 的整篇替换事务。
 - **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
 
 ## 四、排名 4：批注 / 修订跟踪
