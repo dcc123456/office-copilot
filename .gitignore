@@ -11,5 +11,5 @@ apps/server/data/*.sqlite-journal
 coverage
 .vite
 apps/desktop/release/
+apps/desktop/dist-electron/
 apps/task-pane/vite.config.ts.timestamp-*.mjs
-apps/desktop/release/
