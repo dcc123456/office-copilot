@@ -2,6 +2,9 @@ import { dialog, type IpcMain, type BrowserWindow } from "electron";
 import fs from "node:fs/promises";
 import {
   DocxFile,
+  type FootnoteBodies,
+  type FootnoteKind,
+  type FootnoteStore,
   type LinkStyle,
   type PaneStyle,
   type ResolvedStyle,
@@ -9,6 +12,9 @@ import {
   type StyleEdit,
 } from "@office-copilot/docx-io";
 import type { PMDoc } from "@office-copilot/docx-io/src/pm-schema.js";
+
+/** 两种部件的固定遍历顺序：脚注在前，与 Word 窗格里的排布一致。 */
+const FOOTNOTE_KINDS: readonly FootnoteKind[] = ["footnote", "endnote"];
 
 /** Default geometry for a brand-new document (A4, 1-inch margins). */
 export const DEFAULT_SECTION: SectionGeometry = {
@@ -35,6 +41,11 @@ export interface HeaderFooterPayload {
    * styles.xml。空数组与不带这个字段都表示"这次保存不动样式表"。
    */
   styles?: StyleEdit[];
+  /**
+   * 脚注窗格里的正文。只带 id 与 PM 正文：部件的原始 XML、`separator` 那两条版式件
+   * 与未建模属性都不跨界，渲染层改得动正文，也不该看见其余那些。
+   */
+  footnotes?: FootnoteBodies;
 }
 
 /** 渲染层经 preload 送进来的保存请求：正文 + 需要落地的各项文档级设置。 */
@@ -73,6 +84,11 @@ export type OpenResult =
        * 空数组 = 这份文档没有 styles.xml（新建文档就是这种），渲染层因此什么都不加。
        */
       styleFormats: ResolvedStyle[];
+      /**
+       * 脚注与尾注的正文，按部件分组、按部件里的条目顺序排。
+       * 空对象 = 这份文档没有脚注；正文里没有引用点的条目（版式件）不会出现在这里。
+       */
+      footnotes: FootnoteBodies;
     }
   | { ok: false; canceled: true }
   | { ok: false; message: string };
@@ -103,6 +119,8 @@ export function registerFileHandlers(
       // 新建文档的空白模板里没有 styles.xml，样式窗格因此是空的。
       styles: [],
       styleFormats: [],
+      // 空白模板也没有脚注部件。
+      footnotes: {},
     };
   });
 
@@ -213,7 +231,7 @@ async function openDocx(filePath: string): Promise<OpenResult> {
   try {
     const bytes = await fs.readFile(filePath);
     const docx = await DocxFile.fromBytes(bytes);
-    const { doc, warnings, headers, section, styles, styleFormats } =
+    const { doc, warnings, headers, section, styles, styleFormats, footnotes } =
       await docx.toProseMirror();
     return {
       ok: true,
@@ -225,6 +243,7 @@ async function openDocx(filePath: string): Promise<OpenResult> {
       section,
       styles,
       styleFormats,
+      footnotes: footnoteBodiesOf(footnotes),
     };
   } catch (err) {
     return {
@@ -233,6 +252,27 @@ async function openDocx(filePath: string): Promise<OpenResult> {
     };
   }
 }
+
+/**
+ * 把脚注 store 收成跨界用的形状：只留正常条目的 id 与正文。
+ *
+ * `separator` / `continuationSeparator` 是脚注区的版式件，用户改不了也不该看见；
+ * `unmodeled` 的部件由主进程整段透传，所以这里的条目缺了就缺了，写回时不会被覆盖。
+ *
+ * @param store `toProseMirror()` 带回来的脚注与尾注条目。
+ * @returns 按部件分组的正文；某一种部件没有正常条目时这个键不出现。
+ */
+function footnoteBodiesOf(store: FootnoteStore): FootnoteBodies {
+  const out: FootnoteBodies = {};
+  for (const kind of FOOTNOTE_KINDS) {
+    const bodies = store[kind]
+      .filter((entry) => !entry.role)
+      .map((entry) => ({ id: entry.id, doc: entry.pm }));
+    if (bodies.length) out[kind] = bodies;
+  }
+  return out;
+}
+
 async function saveDocx(
   filePath: string,
   pmDoc: PMDoc,
@@ -244,6 +284,11 @@ async function saveDocx(
     if (hf.footer) docx.setHeaderFooter("footer", hf.footer);
     if (hf.section) docx.setSectionGeometry(hf.section);
     if (hf.link) docx.setDocStyle({ link: hf.link });
+    for (const kind of FOOTNOTE_KINDS) {
+      const bodies = hf.footnotes?.[kind];
+      if (bodies)
+        docx.setFootnoteBodies(kind, bodies);
+    }
     // 样式表要先落地：正文里的 w:pStyle 引用的是 styles.xml 声明的 id，
     // 换了新 id 却还没写进样式表，Word 会当成未声明样式退回默认格式。
     if (hf.styles?.length) await docx.applyStyleEdits(hf.styles);

@@ -32,6 +32,8 @@ interface OfficeCopilotAPI {
     styles?: unknown;
     /** 样式链合并后的可见格式，结构见 docx-io 的 ResolvedStyle。 */
     styleFormats?: unknown;
+    /** 脚注与尾注的正文，按部件分组，结构见 docx-io 的 FootnoteBodies。 */
+    footnotes?: unknown;
     warnings?: string[];
   }>;
   saveFile: (payload: {
@@ -43,6 +45,8 @@ interface OfficeCopilotAPI {
     link?: unknown;
     /** 待落进 styles.xml 的样式编辑，结构见 docx-io 的 StyleEdit。 */
     styles?: unknown;
+    /** 脚注窗格里改过的正文，结构见 docx-io 的 FootnoteBodies。 */
+    footnotes?: unknown;
   }) => Promise<any>;
   saveFileAs: (payload: {
     doc: unknown;
@@ -52,6 +56,7 @@ interface OfficeCopilotAPI {
     section?: unknown;
     link?: unknown;
     styles?: unknown;
+    footnotes?: unknown;
   }) => Promise<any>;
   readDocx: (filePath: string) => Promise<any>;
   pathForFile: (file: File) => string;

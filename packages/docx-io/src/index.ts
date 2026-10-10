@@ -30,7 +30,14 @@ export {
 export { mergeStylesXml, nextStyleId } from "./style-edit.js";
 export type { StyleEdit } from "./style-edit.js";
 export type { ResolvedStyle, ResolvedStyleFormat } from "./style-format.js";
-export type { FootnoteEntry, FootnoteKind, FootnoteStore } from "./footnotes.js";
+export { nextFootnoteId } from "./footnotes.js";
+export type {
+  FootnoteBodies,
+  FootnoteBody,
+  FootnoteEntry,
+  FootnoteKind,
+  FootnoteStore,
+} from "./footnotes.js";
 export type {
   StyleDefinition,
   StyleType,

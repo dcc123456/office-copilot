@@ -28,10 +28,12 @@ import {
   FOOTNOTE_CONTENT_TYPE,
   FOOTNOTE_PART,
   FOOTNOTE_REL_TYPE,
+  applyFootnoteBodies,
   collectFootnoteRefs,
   loadFootnotes,
   serializeFootnotePart,
   syncFootnoteIds,
+  type FootnoteBody,
   type FootnoteKind,
   type FootnoteStore,
 } from "./footnotes.js";
@@ -294,6 +296,20 @@ export class DocxFile {
 
   getHeaderFooter(type: "header" | "footer"): PMDoc | null {
     return this.headers.entries[type]?.pm ?? null;
+  }
+
+  /**
+   * 收下脚注/尾注窗格改过的正文，下一次保存写进对应部件。
+   *
+   * 只并正文：没被列出的条目（包括 `separator` 那两条版式件）保持原样透传，
+   * 被标成 `unmodeled` 的部件一个字节都不动。正文删掉的引用点不在此处处理，
+   * 由保存时的 `syncFootnoteIds` 按正文对齐。
+   *
+   * @param kind 脚注还是尾注。
+   * @param bodies 编辑器交回的正文，`id` 与正文里的引用点一致。
+   */
+  setFootnoteBodies(kind: FootnoteKind, bodies: readonly FootnoteBody[]): void {
+    this.footnotes = applyFootnoteBodies(this.footnotes, kind, bodies);
   }
 
   /**

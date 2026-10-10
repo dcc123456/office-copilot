@@ -31,6 +31,7 @@ import {
   Minus,
   Settings2,
   SwatchBook,
+  Superscript,
   Pilcrow,
   Wand2,
   RotateCcw,
@@ -57,6 +58,8 @@ interface ToolbarProps {
   canRevert?: boolean;
   /** 样式窗格是否已打开，决定「样式」按钮的高亮。 */
   stylesOpen?: boolean;
+  /** 脚注窗格是否开着，用来让按钮亮起来。 */
+  footnotesOpen?: boolean;
 }
 
 export type ToolbarAction =
@@ -69,6 +72,7 @@ export type ToolbarAction =
   | "page-setup"
   | "insert-toc"
   | "styles"
+  | "footnotes"
   | "beautify"
   | "revert-beautify";
 
@@ -113,6 +117,7 @@ export function Toolbar({
   dirty,
   canRevert,
   stylesOpen,
+  footnotesOpen,
 }: ToolbarProps) {
   const setLink = () => void promptSetLink(editor);
 
@@ -367,6 +372,13 @@ export function Toolbar({
         </Btn>
         <Btn title="插入目录" onClick={() => onAction("insert-toc")}>
           <TableOfContents size={16} />
+        </Btn>
+        <Btn
+          title="脚注与尾注窗格"
+          active={footnotesOpen}
+          onClick={() => onAction("footnotes")}
+        >
+          <Superscript size={16} />
         </Btn>
         <Btn
           title="分割线"

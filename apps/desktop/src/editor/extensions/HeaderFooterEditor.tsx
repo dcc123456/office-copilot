@@ -1,22 +1,7 @@
 import { useEffect, type ReactNode } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
-import StarterKit from "@tiptap/starter-kit";
-import Underline from "@tiptap/extension-underline";
-import TextAlign from "@tiptap/extension-text-align";
-import Link from "@tiptap/extension-link";
-import { TextStyle, TextStyleCommands } from "./TextStyle.js";
-import { Field } from "./Field.js";
 import { Hash, Calendar, AlignLeft, AlignCenter, AlignRight } from "lucide-react";
-
-const EXTENSIONS = [
-  StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5, 6] } }),
-  Underline,
-  TextAlign.configure({ types: ["heading", "paragraph"] }),
-  TextStyle,
-  TextStyleCommands,
-  Field,
-  Link.configure({ openOnClick: false }),
-];
+import { NESTED_EXTENSIONS } from "./nestedExtensions.js";
 
 /**
  * Compact TipTap editor for header/footer content. Same schema as the
@@ -39,7 +24,7 @@ export function HeaderFooterEditor({
   toolbarExtras?: ReactNode;
 }) {
   const editor = useEditor({
-    extensions: EXTENSIONS,
+    extensions: NESTED_EXTENSIONS,
     content: (initialDoc as never) ?? {
       type: "doc",
       content: [{ type: "paragraph" }],

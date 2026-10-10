@@ -5,6 +5,7 @@ import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
+import { footnoteRefKey, indexFootnoteRefs } from "./extensions/FootnoteRef.js";
 import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
 import { blocksOf, executeOps } from "./docBlocks.js";
 import { planEdit, revert, addressOf, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
@@ -660,6 +661,31 @@ describe("脚注与尾注的引用点（真实 schema）", () => {
     expect(doc.firstChild!.child(1).attrs.id).toBe("3");
     expect(doc.firstChild!.child(3).attrs.id).toBe("4");
     expect(doc.textContent).toBe("前中后");
+  });
+
+  it("编号按正文出现顺序现算，脚注与尾注各数各的", () => {
+    const doc = harness([
+      para([text("正文甲"), fn("7")]),
+      para([text("正文乙"), en("9"), text("续"), fn("4")]),
+    ]).state.doc;
+    const index = indexFootnoteRefs(doc);
+    expect(index[footnoteRefKey("footnote", "7")]?.number).toBe(1);
+    // id 是内部键，不是版面上的号：正文里后出现的 "4" 显示为 2。
+    expect(index[footnoteRefKey("footnote", "4")]?.number).toBe(2);
+    expect(index[footnoteRefKey("endnote", "9")]?.number).toBe(1);
+  });
+
+  it("重复引用同一个 id 得到同一个号，pos 记第一次出现的位置", () => {
+    const doc = harness([para([text("前"), fn("1")]), para([text("后"), fn("1")])]).state.doc;
+    const index = indexFootnoteRefs(doc);
+    const key = footnoteRefKey("footnote", "1");
+    expect(index[key]).toEqual({ number: 1, pos: 2 });
+    expect(doc.nodeAt(2)!.attrs.id).toBe("1");
+  });
+
+  it("id 是空串的引用点不进表，芯片回落到部件字样", () => {
+    const doc = harness([para([text("正文"), fn("")])]).state.doc;
+    expect(indexFootnoteRefs(doc)).toEqual({});
   });
 });
 

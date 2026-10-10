@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import JSZip from "jszip";
 import { DocxFile } from "./docx.js";
+import { nextFootnoteId, type FootnoteBody, type FootnoteEntry } from "./footnotes.js";
 import type { PMDoc } from "./pm-schema.js";
 
 async function makeDocx(
@@ -730,5 +731,129 @@ describe("脚注与尾注部件往返", () => {
       ["正文甲", "footnoteReference"],
       ["正文乙", "endnoteReference"],
     ]);
+  });
+
+  /**
+   * ④.2：窗格改正文的落盘路径。
+   *
+   * 顺序照桌面保存路径来：先 `setFootnoteBodies` 并正文，再 `replaceProseMirror`
+   * （它内部按引用点做 `syncFootnoteIds`），最后序列化。
+   */
+
+  /** 把一条正文整段换成给定文字，模拟窗格里的输入。 */
+  function reword(body: FootnoteBody, text: string): FootnoteBody {
+    return {
+      id: body.id,
+      doc: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text }] }] },
+    };
+  }
+
+  /** store 条目 → 窗格交回的正文（版式件不在内）。 */
+  const normalBodies = (entries: readonly FootnoteEntry[]): FootnoteBody[] =>
+    entries.filter((e) => !e.role).map((e) => ({ id: e.id, doc: e.pm }));
+
+  it("改过的脚注正文写回部件，编号记号与分隔符都还在", async () => {
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setFootnoteBodies(
+      "footnote",
+      normalBodies(loaded.footnotes.footnote).map((b) => reword(b, "改过的脚注正文。")),
+    );
+    await docx.replaceProseMirror(loaded.doc);
+    const fn = await part(await docx.toBytes(), "word/footnotes.xml");
+    expect(fn).toContain("改过的脚注正文。");
+    expect(fn).not.toContain("参见《民法典》");
+    // 重新序列化也必须补回编号记号，否则 Word 排出一条没有编号的脚注。
+    expect(fn).toContain("<w:footnoteRef/>");
+    expect(fn).toContain('<w:footnote w:type="separator" w:id="-1">');
+  });
+
+  it("文字没动的条目继续按原始 XML 透传，不因为窗格过一遍就重写", async () => {
+    const baseline = await savedOnce(await footnotedDocx());
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setFootnoteBodies("footnote", normalBodies(loaded.footnotes.footnote));
+    await docx.replaceProseMirror(loaded.doc);
+    expect(await part(await docx.toBytes(), "word/footnotes.xml")).toBe(
+      await part(baseline, "word/footnotes.xml"),
+    );
+  });
+
+  it("给分隔符条目塞正文也不生效，版式件永远原样带走", async () => {
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    docx.setFootnoteBodies("footnote", [
+      reword({ id: "-1", doc: loaded.footnotes.footnote[0]!.pm }, "篡改分隔符"),
+    ]);
+    await docx.replaceProseMirror(loaded.doc);
+    const fn = await part(await docx.toBytes(), "word/footnotes.xml");
+    expect(fn).not.toContain("篡改分隔符");
+    expect(fn).toContain("<w:separator/>");
+    expect(fn).toContain("参见《民法典》第五百零九条。");
+  });
+
+  it("没能建模的部件无视窗格送来的正文", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx([], {
+        rawParagraphs: [REF_PARAGRAPHS[0]!],
+        documentRels: FN_REL,
+        parts: {
+          "word/footnotes.xml": FOOTNOTES_XML.replace('w:id="1"', 'w:id="not-a-number"'),
+        },
+      }),
+    );
+    const loaded = await docx.toProseMirror();
+    expect(loaded.footnotes.unmodeled).toEqual(["footnote"]);
+    docx.setFootnoteBodies("footnote", [reword({ id: "1", doc: loaded.footnotes.footnote[0]!.pm }, "篡改")]);
+    await docx.replaceProseMirror(loaded.doc);
+    const fn = await part(await docx.toBytes(), "word/footnotes.xml");
+    expect(fn).not.toContain("篡改");
+    expect(fn).toContain('w:id="not-a-number"');
+  });
+
+  it("新插入的脚注按引用点补条目，窗格随后填的正文能落进去", async () => {
+    const docx = await DocxFile.fromBytes(await footnotedDocx());
+    const loaded = await docx.toProseMirror();
+    const withNewRef: PMDoc = {
+      ...loaded.doc,
+      content: [
+        ...loaded.doc.content,
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: "新脚注" },
+            { type: "footnoteReference", attrs: { id: "2" } },
+          ],
+        },
+      ],
+    };
+    // 窗格给新 id 填正文时，store 里还没有这条（正文的引用点尚未写回）。
+    docx.setFootnoteBodies("footnote", [
+      ...normalBodies(loaded.footnotes.footnote),
+      reword({ id: "2", doc: { type: "doc", content: [{ type: "paragraph" }] } }, "新脚注正文。"),
+    ]);
+    await docx.replaceProseMirror(withNewRef);
+    const fn = await part(await docx.toBytes(), "word/footnotes.xml");
+    expect(fn).toContain('<w:footnote w:id="2">');
+    expect(fn).toContain("新脚注正文。");
+    expect(await part(await docx.toBytes(), "word/document.xml")).toContain('<w:footnoteReference w:id="2"/>');
+  });
+});
+
+describe("脚注 id 分配", () => {
+  it("取正常条目里最大的数字 id 加一，版式件不参与", () => {
+    expect(
+      nextFootnoteId([
+        { id: "-1", role: "separator" },
+        { id: "0", role: "continuationSeparator" },
+        { id: "3" },
+        { id: "12" },
+      ]),
+    ).toBe("13");
+  });
+
+  it("没有正常条目时从 1 开始", () => {
+    expect(nextFootnoteId([])).toBe("1");
+    expect(nextFootnoteId([{ id: "-1", role: "separator" }])).toBe("1");
   });
 });

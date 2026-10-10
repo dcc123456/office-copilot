@@ -53,4 +53,11 @@ describe("脚注引用点的 DOM 读写", () => {
     expect(tags(FootnoteReference)).toEqual(['span[data-footnote-ref="footnote"]']);
     expect(tags(EndnoteReference)).toEqual(['span[data-footnote-ref="endnote"]']);
   });
+
+  it("算出号以后芯片显示数字，没号时退回部件字样", () => {
+    const [, , numbered] = render(FootnoteReference, { id: "1", number: 3 });
+    expect(numbered).toBe("3");
+    const [, , fallback] = render(EndnoteReference, { id: "1" });
+    expect(fallback).toBe("尾");
+  });
 });

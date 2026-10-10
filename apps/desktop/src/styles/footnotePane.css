@@ -1,0 +1,127 @@
+/* 脚注与尾注窗格（排名 3 ④.2）。槽位沿用 .sidebar，比样式窗格宽一些：
+   下面还要放一个嵌套编辑器，太窄就只能看到一两个字。 */
+.sidebar.footnote-pane {
+  width: 300px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow: hidden;
+}
+
+.footnote-pane .panel-header {
+  flex: 0 0 auto;
+}
+
+.fn-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-1);
+}
+
+.fn-action {
+  appearance: none;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.fn-action:hover {
+  background: var(--accent-tint);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.fn-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.fn-group-title {
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 6px;
+}
+
+.fn-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  padding: 2px 6px;
+}
+
+.fn-item {
+  appearance: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 6px;
+  text-align: left;
+}
+
+.fn-item:hover {
+  background: var(--bg-muted);
+}
+
+.fn-item.active {
+  background: var(--accent-tint);
+  color: var(--accent);
+}
+
+/* 正文里已经没有引用的条目：点不动，保存时会被清掉，所以提前说清楚。 */
+.fn-item.orphan {
+  color: var(--text-faint);
+  cursor: default;
+  font-style: italic;
+}
+
+.fn-number {
+  flex: 0 0 auto;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.fn-item.orphan .fn-number {
+  color: var(--text-faint);
+}
+
+.fn-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fn-editor {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.fn-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}

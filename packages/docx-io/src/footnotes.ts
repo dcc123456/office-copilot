@@ -44,6 +44,23 @@ export interface FootnoteStore {
   unmodeled: FootnoteKind[];
 }
 
+/** 一条脚注/尾注的正文，跨界用的形状：只有 id 与 PM 正文，不带部件里的原始 XML。 */
+export interface FootnoteBody {
+  /** `w:id`，与正文里的引用点同一个字符串。 */
+  id: string;
+  /** 条目正文。 */
+  doc: PMDoc;
+}
+
+/** 两种部件的正文，按部件分组；没有正文的那种部件可以整个缺省。 */
+export type FootnoteBodies = Partial<Record<FootnoteKind, FootnoteBody[]>>;
+
+/** 引用点的一个实例，按正文出现顺序排列。 */
+interface FootnoteRefOccurrence {
+  kind: FootnoteKind;
+  id: string;
+}
+
 export const FOOTNOTE_PART: Record<FootnoteKind, string> = {
   footnote: "word/footnotes.xml",
   endnote: "word/endnotes.xml",
@@ -151,18 +168,104 @@ export function collectFootnoteRefs(doc: PMDoc): {
   endnote: Set<string>;
 } {
   const out = { footnote: new Set<string>(), endnote: new Set<string>() };
+  for (const ref of footnoteRefOccurrences(doc)) out[ref.kind].add(ref.id);
+  return out;
+}
+
+/**
+ * 按正文顺序列出所有引用点。
+ *
+ * 对齐条目要的是这份顺序，遍历因此只写这一处。id 不合 `ST_DecimalNumber` 的引用点被跳过——那种引用在部件里
+ * 没有条目可读，读侧已把整个部件标成 `unmodeled`。
+ *
+ * @param doc 正文 PM doc。
+ * @returns 引用点列表；同一 id 被引用两次就有两条。
+ */
+function footnoteRefOccurrences(doc: PMDoc): FootnoteRefOccurrence[] {
+  const out: FootnoteRefOccurrence[] = [];
   const walk = (nodes: readonly PMNode[]): void => {
     for (const n of nodes) {
       if (n.type === "footnoteReference" || n.type === "endnoteReference") {
         const id = String(n.attrs.id ?? "");
         if (FOOTNOTE_ID.test(id))
-          out[n.type === "footnoteReference" ? "footnote" : "endnote"].add(id);
+          out.push({ kind: n.type === "footnoteReference" ? "footnote" : "endnote", id });
       }
       if ("content" in n) walk((n.content ?? []) as PMNode[]);
     }
   };
   walk(doc.content ?? []);
   return out;
+}
+
+/**
+ * 给新插入的脚注/尾注分一个 id。
+ *
+ * 取现有正常条目里最大数字 id 加一。`separator`（负数）与 `continuationSeparator`（0）
+ * 是版式件，不参与取最大值；一个正常条目都没有时从 1 起，与 Word 新建文档的结果一致。
+ *
+ * @param entries 该部件的现有条目（只要 `id` 与 `role`，正文不必参与）。
+ * @returns 可以用的 id（字符串）。
+ */
+export function nextFootnoteId(
+  entries: readonly { id: string; role?: string }[],
+): string {
+  let max = 0;
+  for (const entry of entries) {
+    if (entry.role) continue;
+    const value = Number(entry.id);
+    if (Number.isFinite(value) && value > max) max = value;
+  }
+  return String(max + 1);
+}
+
+/**
+ * 把编辑器改过的正文并回 store。
+ *
+ * 认不出的 id 也照样收下（作为新条目）：正文里的引用点是刚插的，部件里还没有条目，
+ * 下一次保存 `syncFootnoteIds` 会按引用对齐。分隔符条目不接受编辑。
+ *
+ * @param store 当前条目（原地不改）。
+ * @param kind 脚注还是尾注。
+ * @param bodies 编辑器交回来的正文，按 id 对应。
+ * @returns 并好正文的新 store；被标为 `unmodeled` 的部件原样返回，一个字节都不动。
+ */
+export function applyFootnoteBodies(
+  store: FootnoteStore,
+  kind: FootnoteKind,
+  bodies: readonly FootnoteBody[],
+): FootnoteStore {
+  if (store.unmodeled.includes(kind)) return store;
+  const byId = new Map(bodies.map((body) => [body.id, body]));
+  const known = new Set(store[kind].map((entry) => entry.id));
+  const merged: FootnoteEntry[] = store[kind].map((entry) => {
+    const body = entry.role ? undefined : byId.get(entry.id);
+    if (!body) return entry;
+    // 文字没变就不标 dirty：下次保存继续按原始 XML 字节透传，保住未建模的属性。
+    if (sameFragment(entry.pm, body.doc)) return entry;
+    return { ...entry, pm: body.doc, dirty: true };
+  });
+  for (const body of bodies) {
+    if (known.has(body.id)) continue;
+    merged.push({ id: body.id, pm: body.doc, rawXml: "", dirty: true });
+  }
+  const out: FootnoteStore = {
+    footnote: store.footnote,
+    endnote: store.endnote,
+    unmodeled: store.unmodeled,
+  };
+  out[kind] = merged;
+  return out;
+}
+
+/**
+ * 两份正文片段序列化结果是否一致，用来判断"用户真的改过这条脚注吗"。
+ *
+ * @param a 原正文。
+ * @param b 编辑器交回的正文。
+ * @returns 一致则 true，此时条目保持透传路径。
+ */
+function sameFragment(a: PMDoc, b: PMDoc): boolean {
+  return pmToOoxmlFragment(a, {}) === pmToOoxmlFragment(b, {});
 }
 
 /**

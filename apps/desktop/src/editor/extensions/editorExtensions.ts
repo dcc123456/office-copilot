@@ -17,7 +17,7 @@ import { FloatBox, FloatGroup, FloatingTextLayout } from "./FloatingTextBox.js";
 import { Field } from "./Field.js";
 import { FieldBegin, FieldEnd } from "./FieldBoundary.js";
 import { BookmarkEnd, BookmarkStart } from "./Bookmark.js";
-import { EndnoteReference, FootnoteReference } from "./FootnoteRef.js";
+import { FootnoteRefs } from "./FootnoteRef.js";
 import { ParagraphFormatting } from "./ParagraphFormatting.js";
 import { TableColumnResize } from "./TableColumnResize.js";
 import { FormatPainter } from "./FormatPainter.js";
@@ -44,8 +44,7 @@ export const EDITOR_EXTENSIONS: Extensions = [
   FieldEnd,
   BookmarkStart,
   BookmarkEnd,
-  FootnoteReference,
-  EndnoteReference,
+  ...FootnoteRefs,
   ParagraphFormatting,
   TableColumnResize,
   FormatPainter,
