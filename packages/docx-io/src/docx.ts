@@ -11,7 +11,12 @@ import {
   val,
   type Element,
 } from "./xml.js";
-import { ooxmlToPm, pmToOoxml } from "./ooxml-pm.js";
+import {
+  colorVal,
+  cssColorToOoxmlHex,
+  ooxmlToPm,
+  pmToOoxml,
+} from "./ooxml-pm.js";
 import type { LinkStyle } from "./ooxml-pm.js";
 import type { PMDoc, PMNode } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
@@ -160,6 +165,13 @@ export interface SectionGeometry {
    * twips 换算只发生在本包的进出口（AGENTS §2.1）。
    */
   columns?: SectionColumns;
+  /**
+   * 页面边框（`w:pgBorders`）。`undefined` 是"这次保存不涉及边框"，原元素一动不动；
+   * `null` 是"用户关掉了边框"，保存时把这个元素删掉。
+   */
+  pageBorders?: SectionPageBorders | null;
+  /** 行号（`w:lnNumType`），`undefined`/`null` 的语义同 `pageBorders`。 */
+  lineNumbers?: SectionLineNumbers | null;
 }
 
 /**
@@ -179,6 +191,55 @@ export interface SectionColumns {
   equalWidth: boolean;
   /** 每栏宽度，`w:col w:w`，CSS px；等宽且 Word 没写子元素时为空数组。 */
   widths: number[];
+}
+
+/**
+ * 页面边框的一条边，即 `w:pgBorders` 下的 `w:top`/`w:left`/`w:bottom`/`w:right`。
+ *
+ * 单位跟着 OOXML 的原生量纲留在模型里：`w:sz` 是 1/8 磅、`w:space` 是磅
+ * （ECMA-376 §17.3.4 的 CT_Border），所以这里一律存 pt，换算只发生在写 XML 那一刻
+ * （AGENTS §2.1）。
+ */
+export interface PageBorderSide {
+  /** 线型 `w:val`，ST_Border 的字面值（`single`/`double`/`dashed`…）。 */
+  style: string;
+  /** 线宽，pt（写出去是 `w:sz`，1/8 磅）。 */
+  sizePt: number;
+  /** 边框到页边/正文的间距，pt（`w:space` 本身就是磅，不换算 twips）。 */
+  spacePt: number;
+  /** 颜色，CSS 写法 `#rrggbb`；null 是 Word 的 `auto`。 */
+  color: string | null;
+}
+
+/**
+ * `w:pgBorders` 的建模：四条边各自可选，null 表示那条边不画。
+ *
+ * 四条边都是 null 时不写这个元素——空 `w:pgBorders` 和没有它一样是不画边框。
+ * 元素上没建模的属性（`w:display`、`w:zOrder`）与边上没建模的 `w:shadow`/`w:frame`/
+ * 主题色，靠 `placeOrClear` 的"值等价就整段不重建"原样留着。
+ */
+export interface SectionPageBorders {
+  /** `w:offsetFrom`：`page` 量到页边、`text` 量到正文（规范正文只出现这两个）。 */
+  offsetFrom: string;
+  top: PageBorderSide | null;
+  left: PageBorderSide | null;
+  bottom: PageBorderSide | null;
+  right: PageBorderSide | null;
+}
+
+/**
+ * `w:lnNumType` 的建模（行号）。
+ *
+ * `distance` 是 CSS px（`w:distance` 是 twips，换算在本包进出口）；`start` 只有不等于
+ * Word 缺省的 1 才写出去。`w:restart`（每页/每节/连续）还没建模，值没变时整段原样保留。
+ */
+export interface SectionLineNumbers {
+  /** 每几行标一个号，`w:countBy`；0 或负数表示不标行号。 */
+  countBy: number;
+  /** 行号与正文的距离，CSS px。 */
+  distance: number;
+  /** 起始号，`w:start`。 */
+  start: number;
 }
 
 /** Document-wide decorations a template owns, applied at save time. */
@@ -999,38 +1060,49 @@ const DEFAULT_MARGINS = {
   footer: 720,
 };
 
+/** Word 行号对话框里"距正文"的缺省值 0.25 英寸。本机没装 Word，这是推断，不是实测。 */
+const DEFAULT_LN_DISTANCE_TWIP = 360;
+
+/**
+ * 把 OOXML 属性值收成数字，读不懂（缺省、非数字）就用兜底值。
+ *
+ * @param v 属性原文，可能是 undefined。
+ * @param fallback 兜底值，语义是"这个属性缺省时 Word 怎么理解"。
+ * @returns 有限数字或兜底值。
+ */
+function toNum(v: string | undefined, fallback: number): number {
+  if (v === undefined) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 function readSectionGeometry(body: Element): SectionGeometry {
   const sectPr = firstChild(body, "w:sectPr");
   const pgSz = sectPr && firstChild(sectPr, "w:pgSz");
   const pgMar = sectPr && firstChild(sectPr, "w:pgMar");
-  const num = (v: string | undefined, fallback: number): number => {
-    if (v === undefined) return fallback;
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  };
-  const w = num(pgSz?.attributes?.["w:w"] as string | undefined, DEFAULT_A4.w);
-  const h = num(pgSz?.attributes?.["w:h"] as string | undefined, DEFAULT_A4.h);
-  const marginTop = num(
+  const w = toNum(pgSz?.attributes?.["w:w"] as string | undefined, DEFAULT_A4.w);
+  const h = toNum(pgSz?.attributes?.["w:h"] as string | undefined, DEFAULT_A4.h);
+  const marginTop = toNum(
     pgMar?.attributes?.["w:top"] as string | undefined,
     DEFAULT_MARGINS.top,
   );
-  const marginRight = num(
+  const marginRight = toNum(
     pgMar?.attributes?.["w:right"] as string | undefined,
     DEFAULT_MARGINS.right,
   );
-  const marginBottom = num(
+  const marginBottom = toNum(
     pgMar?.attributes?.["w:bottom"] as string | undefined,
     DEFAULT_MARGINS.bottom,
   );
-  const marginLeft = num(
+  const marginLeft = toNum(
     pgMar?.attributes?.["w:left"] as string | undefined,
     DEFAULT_MARGINS.left,
   );
-  const header = num(
+  const header = toNum(
     pgMar?.attributes?.["w:header"] as string | undefined,
     DEFAULT_MARGINS.header,
   );
-  const footer = num(
+  const footer = toNum(
     pgMar?.attributes?.["w:footer"] as string | undefined,
     DEFAULT_MARGINS.footer,
   );
@@ -1045,7 +1117,7 @@ function readSectionGeometry(body: Element): SectionGeometry {
   // `w:linePitch` is the grid step; only a grid of type lines/both snaps text.
   const grid = sectPr && firstChild(sectPr, "w:docGrid");
   const gridType = grid?.attributes?.["w:type"] as string | undefined;
-  const pitch = num(grid?.attributes?.["w:linePitch"] as string | undefined, 0);
+  const pitch = toNum(grid?.attributes?.["w:linePitch"] as string | undefined, 0);
   const linePitch =
     gridType === "lines" || gridType === "both" ? pitch * TWIP_TO_PX : 0;
   return {
@@ -1060,7 +1132,9 @@ function readSectionGeometry(body: Element): SectionGeometry {
     contentWidth: pageWidth - ml - mr,
     contentHeight: pageHeight - mt - mb,
     linePitch: linePitch || undefined,
-    columns: readColumns(sectPr && firstChild(sectPr, "w:cols"), num),
+    columns: readColumns(sectPr && firstChild(sectPr, "w:cols")),
+    pageBorders: readPageBorders(sectPr && firstChild(sectPr, "w:pgBorders")),
+    lineNumbers: readLineNumbers(sectPr && firstChild(sectPr, "w:lnNumType")),
   };
 }
 
@@ -1068,26 +1142,98 @@ function readSectionGeometry(body: Element): SectionGeometry {
  * 读 `w:cols`：栏数、栏间距、等宽标记与每栏宽度。
  *
  * @param el body 末尾（或分节符里）那个 `w:cols`；没有就是单栏，返回 undefined。
- * @param num 把属性值收成数字，非数字用兜底值（和节属性的其它字段同一套判据）。
  * @returns 建模后的分栏；`w:cols` 缺席时 undefined，绝不拿 `count: 1` 冒充"设过分栏"。
  */
 function readColumns(
   el: Element | undefined | null,
-  num: (v: string | undefined, fallback: number) => number,
 ): SectionColumns | undefined {
   if (!el) return undefined;
   const attrs = el.attributes ?? {};
   const widths = children(el)
     .filter((c) => c.name === "w:col")
-    .map((c) => num(c.attributes?.["w:w"] as string | undefined, 0) * TWIP_TO_PX);
+    .map((c) => toNum(c.attributes?.["w:w"] as string | undefined, 0) * TWIP_TO_PX);
   // Word 写 `w:equalWidth="0"` 表示不等宽；缺省（没这个属性）按等宽。
   const equalFlag = attrs["w:equalWidth"] as string | undefined;
   return {
-    count: num(attrs["w:num"] as string | undefined, widths.length || 1),
-    gap: num(attrs["w:space"] as string | undefined, 0) * TWIP_TO_PX,
+    count: toNum(attrs["w:num"] as string | undefined, widths.length || 1),
+    gap: toNum(attrs["w:space"] as string | undefined, 0) * TWIP_TO_PX,
     equalWidth: equalFlag !== "0" && equalFlag !== "false",
     widths,
   };
+}
+
+/** 边框四条边的固定次序，写出去也按这个次序（规范里 pgBorders 的例子就是它）。 */
+const BORDER_SIDES = ["top", "left", "bottom", "right"] as const;
+type BorderSide = (typeof BORDER_SIDES)[number];
+
+/**
+ * 读 `w:pgBorders`：测量基准加四条边。
+ *
+ * @param el 节里的 `w:pgBorders`；缺席就是没设过边框。
+ * @returns 建模后的边框；`el` 不在时 undefined，不冒充"设过无边框"。
+ *          边上的 `w:val="none"`/`"nil"` 收成 null，即"这条边不画"。
+ */
+function readPageBorders(
+  el: Element | undefined | null,
+): SectionPageBorders | undefined {
+  if (!el) return undefined;
+  const borders = el;
+  const side = (name: BorderSide): PageBorderSide | null => {
+    const kid = firstChild(borders, `w:${name}`);
+    if (!kid) return null;
+    const attrs = kid.attributes ?? {};
+    const style = (attrs["w:val"] as string | undefined) ?? "none";
+    if (style === "none" || style === "nil") return null;
+    // Word 的 `auto` 收成 null，写回时再还原成 `auto`，这样"用户没动颜色"两边对得上。
+    const color = colorVal(attrs["w:color"] as string | undefined);
+    return {
+      style,
+      // `w:sz` 是 1/8 磅，`w:space` 是磅（ECMA-376 §17.3.4）。
+      sizePt: toNum(attrs["w:sz"] as string | undefined, 0) / 8,
+      spacePt: toNum(attrs["w:space"] as string | undefined, 0),
+      color: color?.toLowerCase() === "auto" ? null : color,
+    };
+  };
+  return {
+    offsetFrom:
+      (borders.attributes?.["w:offsetFrom"] as string | undefined) ?? "page",
+    top: side("top"),
+    left: side("left"),
+    bottom: side("bottom"),
+    right: side("right"),
+  };
+}
+
+/**
+ * 读 `w:lnNumType`。
+ *
+ * @param el 节里的 `w:lnNumType`；缺席就是没开行号。
+ * @returns 建模后的行号，`distance` 是 CSS px；`el` 不在时 undefined。
+ */
+function readLineNumbers(
+  el: Element | undefined | null,
+): SectionLineNumbers | undefined {
+  if (!el) return undefined;
+  const attrs = el.attributes ?? {};
+  return {
+    countBy: toNum(attrs["w:countBy"] as string | undefined, 0),
+    distance:
+      toNum(attrs["w:distance"] as string | undefined, DEFAULT_LN_DISTANCE_TWIP) *
+      TWIP_TO_PX,
+    start: toNum(attrs["w:start"] as string | undefined, 1),
+  };
+}
+
+/**
+ * 数值等价判断。属性经过单位往返（px↔twips、pt↔1/8 磅）会有取整误差，
+ * 容差按各自的最小单位给，否则"用户什么都没动"也会被当成改动而重建元素。
+ *
+ * @param x 从文件读出来的值。
+ * @param y 保存载荷里的值。
+ * @param tolerance 允许差多少（与 x/y 同单位）。
+ */
+function near(x: number, y: number, tolerance: number): boolean {
+  return Math.abs(x - y) <= tolerance;
 }
 
 /**
@@ -1101,13 +1247,45 @@ function readColumns(
  * @returns 等价则为 true。
  */
 function sameColumns(a: SectionColumns, b: SectionColumns): boolean {
-  const near = (x: number, y: number) => Math.abs(x - y) < 0.5;
   return (
     a.count === b.count &&
     a.equalWidth === b.equalWidth &&
     a.widths.length === b.widths.length &&
-    near(a.gap, b.gap) &&
-    a.widths.every((w, i) => near(w, b.widths[i]!))
+    near(a.gap, b.gap, 0.5) &&
+    a.widths.every((w, i) => near(w, b.widths[i]!, 0.5))
+  );
+}
+
+/**
+ * 两份页面边框是否等价。线宽经过 pt↔1/8 磅取整，容差给 1/16 磅；
+ * 间距经过整数取整，容差半磅。
+ */
+function samePageBorders(a: SectionPageBorders, b: SectionPageBorders): boolean {
+  const sameSide = (x: PageBorderSide | null, y: PageBorderSide | null): boolean => {
+    if (!x || !y) return x === y;
+    return (
+      x.style === y.style &&
+      near(x.sizePt, y.sizePt, 1 / 16) &&
+      near(x.spacePt, y.spacePt, 0.5) &&
+      // 文件里是 `FF0000`，`<input type=color>` 交回来是 `#ff0000`：大小写不算改动。
+      x.color?.toLowerCase() === y.color?.toLowerCase()
+    );
+  };
+  return (
+    a.offsetFrom === b.offsetFrom &&
+    sameSide(a.top, b.top) &&
+    sameSide(a.left, b.left) &&
+    sameSide(a.bottom, b.bottom) &&
+    sameSide(a.right, b.right)
+  );
+}
+
+/** 两份行号设置是否等价；`distance` 是 px↔twips 往返，容差 0.5px。 */
+function sameLineNumbers(a: SectionLineNumbers, b: SectionLineNumbers): boolean {
+  return (
+    a.countBy === b.countBy &&
+    a.start === b.start &&
+    near(a.distance, b.distance, 0.5)
   );
 }
 
@@ -1161,15 +1339,62 @@ function placeInSection(arr: Element[], name: string, el: Element): void {
   else arr.push(el);
 }
 
+/**
+ * 从节属性里删掉某个子元素（用户关掉了这项设置）。
+ *
+ * @param arr 节属性的子元素数组，原地修改。
+ * @param name 要删的元素名。
+ */
+function removeInSection(arr: Element[], name: string): void {
+  const at = arr.findIndex((c) => c.name === name);
+  if (at >= 0) arr.splice(at, 1);
+}
+
+/**
+ * 只有建模值真的变了才重建节属性里的某个子元素。
+ *
+ * 读进来的元素上常有我们没建模的属性（`w:cols` 的 `w:sep`、`w:lnNumType` 的
+ * `w:restart`、`w:pgBorders` 的 `w:display`），值等价就整段原样留着；值变了才按建模
+ * 结果重写。
+ *
+ * @param arr 节属性的子元素数组，原地修改。
+ * @param name 子元素名，如 `w:pgBorders`。
+ * @param wanted 保存载荷里的值：`undefined` 不碰，`null` 表示关掉（删元素）。
+ * @param parse 把已有的元素读回建模值（元素不在就返回 undefined）。
+ * @param same 两份建模值是否等价。
+ * @param build 按建模值写出元素；返回 null 表示这项设置等价于"没有这个元素"。
+ */
+function placeOrClear<T>(
+  arr: Element[],
+  name: string,
+  wanted: T | null | undefined,
+  parse: (el: Element | undefined) => T | undefined,
+  same: (a: T, b: T) => boolean,
+  build: (value: T) => Element | null,
+): void {
+  if (wanted === undefined) return;
+  if (wanted === null) {
+    removeInSection(arr, name);
+    return;
+  }
+  const existingEl = arr.find((c) => c.name === name);
+  const parsed = parse(existingEl);
+  if (existingEl && parsed && same(parsed, wanted)) return;
+  const built = build(wanted);
+  if (built) placeInSection(arr, name, built);
+  else removeInSection(arr, name);
+}
+
 // ---------- XML element factories ----------
 
 const TWIP_PER_PX = 1440 / 96; // 15
 const PX_TO_TWIP = (px: number) => Math.round(px * TWIP_PER_PX);
 
 /**
- * Build or update a <w:sectPr> with the given geometry. We preserve
- * any other children the source had (header/footer references,
- * docGrid, cols, titlePg) and only replace pgSz/pgMar.
+ * Build or update a <w:sectPr> with the given geometry. pgSz/pgMar are always
+ * rewritten from the model; cols/pgBorders/lnNumType are rebuilt only when the
+ * model actually differs from what was read, so unmodelled attributes
+ * (titlePg, docGrid, headerReference, w:sep, w:restart, …) survive untouched.
  */
 function buildSectPr(
   existing: Element | null,
@@ -1211,40 +1436,38 @@ function buildSectPr(
     children: [],
   } as unknown as Element;
 
-  if (!existing) {
-    const fromScratch: Element[] = [];
-    placeInSection(fromScratch, "w:pgSz", newPgSz);
-    placeInSection(fromScratch, "w:pgMar", newPgMar);
-    if (g.columns) placeInSection(fromScratch, "w:cols", colsXml(g.columns));
-    return {
-      type: "element",
-      name: "w:sectPr",
-      attributes: {},
-      children: fromScratch,
-    } as unknown as Element;
-  }
-
-  const childrenArr = [...(existing.children as unknown as Element[])];
+  // 从空数组开始，和从已有节属性开始走同一条路径：已有的子元素留在数组里，
+  // 我们只按 CT_SectPr 的次序放自己的那几项。
+  const childrenArr: Element[] = existing
+    ? [...(existing.children as unknown as Element[])]
+    : [];
   placeInSection(childrenArr, "w:pgSz", newPgSz);
   placeInSection(childrenArr, "w:pgMar", newPgMar);
-  // 分栏：只有值真的变了才重建。读进来的 `w:cols` 里可能有 `w:sep`（栏间分隔线）这类
-  // 我们没建模的属性，值等价就整段原样留着；值变了才按建模结果重写，分隔线随之消失
-  // ——和 Word 一致，改栏数会重排整条 cols。
-  if (g.columns) {
-    const existingCols = childrenArr.find((c) => c.name === "w:cols");
-    const parsedCols = readColumns(existingCols, (v, fallback) => {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : fallback;
-    });
-    if (!existingCols || !parsedCols || !sameColumns(parsedCols, g.columns))
-      placeInSection(childrenArr, "w:cols", colsXml(g.columns));
-  }
+  // 分栏/页面边框/行号：只有值真的变了才重建，否则整段原样留着，
+  // 免得把 `w:sep`、`w:restart`、`w:display` 这类没建模的属性洗掉（AGENTS §2.7）。
+  placeOrClear(childrenArr, "w:cols", g.columns, readColumns, sameColumns, colsXml);
+  placeOrClear(
+    childrenArr,
+    "w:pgBorders",
+    g.pageBorders,
+    readPageBorders,
+    samePageBorders,
+    pgBordersXml,
+  );
+  placeOrClear(
+    childrenArr,
+    "w:lnNumType",
+    g.lineNumbers,
+    readLineNumbers,
+    sameLineNumbers,
+    lnNumTypeXml,
+  );
   // 必须显式写 `type`/`name`：`parseDocument` 出来的节点只有原型上带 `type`，
   // 展开运算符拿不到，`serialize` 认它不是元素就返回空串——整块 sectPr 静默消失。
   return {
     type: "element",
     name: "w:sectPr",
-    attributes: existing.attributes ?? {},
+    attributes: existing?.attributes ?? {},
     children: childrenArr,
   } as unknown as Element;
 }
@@ -1278,6 +1501,61 @@ function colsXml(c: SectionColumns): Element {
     name: "w:cols",
     attributes: attrs,
     children: kids,
+  } as unknown as Element;
+}
+
+/**
+ * 把建模后的页面边框写成 `w:pgBorders`，四条边按 top→left→bottom→right 排。
+ *
+ * @param b 边框设置。
+ * @returns 可放进 `w:sectPr` 的元素；四条边都不画时返回 null，语义是"删掉这个元素"。
+ */
+function pgBordersXml(b: SectionPageBorders): Element | null {
+  const kids = BORDER_SIDES.map((name) => ({ name, side: b[name] }))
+    .filter((e): e is { name: BorderSide; side: PageBorderSide } => e.side !== null)
+    .map(({ name, side }) => {
+      const attrs: Record<string, string> = {
+        "w:val": side.style,
+        "w:sz": String(Math.round(side.sizePt * 8)),
+        "w:space": String(Math.round(side.spacePt)),
+        // 读不懂的颜色宁可写成 auto，也不能把 `rgb(...)` 塞进 w:color（AGENTS §2.2）。
+        "w:color": cssColorToOoxmlHex(side.color) ?? "auto",
+      };
+      return {
+        type: "element",
+        name: `w:${name}`,
+        attributes: attrs,
+        children: [],
+      } as unknown as Element;
+    });
+  if (!kids.length) return null;
+  return {
+    type: "element",
+    name: "w:pgBorders",
+    attributes: { "w:offsetFrom": b.offsetFrom },
+    children: kids,
+  } as unknown as Element;
+}
+
+/**
+ * 把建模后的行号写成 `w:lnNumType`。
+ *
+ * @param v 行号设置；`w:start` 只在不是 Word 缺省的 1 时才写。
+ * @returns 可放进 `w:sectPr` 的元素；`countBy` 非正数时返回 null，即"删掉这个元素"，
+ *          没有 `w:lnNumType` 就是不标行号。
+ */
+function lnNumTypeXml(v: SectionLineNumbers): Element | null {
+  if (v.countBy <= 0) return null;
+  const attrs: Record<string, string> = {
+    "w:countBy": String(v.countBy),
+    "w:distance": String(PX_TO_TWIP(v.distance)),
+  };
+  if (v.start !== 1) attrs["w:start"] = String(v.start);
+  return {
+    type: "element",
+    name: "w:lnNumType",
+    attributes: attrs,
+    children: [],
   } as unknown as Element;
 }
 

@@ -220,7 +220,7 @@ export function canonColor(value: unknown): string | null {
 const PT_LINE_HEIGHT = /^pt:(\d+(?:\.\d+)?)$/;
 const AT_LEAST_LINE_HEIGHT = /^atLeast:(\d+(?:\.\d+)?)$/;
 /** OOXML writes colours as bare hex; `canonColor` wants the CSS form. */
-function colorVal(v: string | null | undefined): string | null {
+export function colorVal(v: string | null | undefined): string | null {
   if (!v) return null;
   const t = v.trim();
   if (!t) return null;

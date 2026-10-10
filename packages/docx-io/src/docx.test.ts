@@ -419,6 +419,127 @@ describe("DocxFile", () => {
     expect(once).not.toContain("<w:cols");
   });
 
+  it("reads w:pgBorders into the section geometry in points", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:pgBorders w:offsetFrom="text">` +
+          `<w:top w:val="single" w:sz="8" w:space="1" w:color="FF0000"/>` +
+          `<w:bottom w:val="dashed" w:sz="24" w:space="4" w:color="auto"/>` +
+          `</w:pgBorders>`,
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    // `w:sz` 是 1/8 磅、`w:space` 是磅（ECMA-376 §17.3.4），模型里都收成 pt；
+    // `w:color="auto"` 收成 null，写回时还原成 auto。
+    expect(section?.pageBorders).toEqual({
+      offsetFrom: "text",
+      top: { style: "single", sizePt: 1, spacePt: 1, color: "#FF0000" },
+      left: null,
+      bottom: { style: "dashed", sizePt: 3, spacePt: 4, color: null },
+      right: null,
+    });
+  });
+
+  it("leaves page borders and line numbers unset when the section has neither", async () => {
+    // 和 `w:cols` 同一条判据：不拿"全无边框"或"countBy: 0"去冒充用户设过。
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], { sectPr: `<w:pgSz w:w="11906" w:h="16838"/>` }),
+    );
+    const { section } = await docx.toProseMirror();
+    expect(section?.pageBorders).toBeUndefined();
+    expect(section?.lineNumbers).toBeUndefined();
+  });
+
+  it("reads w:lnNumType as CSS px and ignores the unmodelled w:restart", async () => {
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr: `<w:pgSz w:w="11906" w:h="16838"/><w:lnNumType w:countBy="2" w:distance="480" w:start="5" w:restart="newSection"/>`,
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    // 480 twips = 32px；`w:restart`（每页/每节/连续）还没建模，值等价时整段不会被重写。
+    expect(section?.lineNumbers).toEqual({ countBy: 2, distance: 32, start: 5 });
+  });
+
+  it("keeps an untouched w:pgBorders verbatim including w:display and w:shadow", async () => {
+    // `w:display`（只在前几页画框）与边上的 `w:shadow`（阴影）都没建模：用户没改边框
+    // 时整段原样留着，不能因为页面设置重新应用一次就把它们洗掉（AGENTS §2.7）。
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/>` +
+          `<w:pgBorders w:offsetFrom="page" w:display="firstPage"><w:top w:val="single" w:sz="6" w:space="1" w:color="FF0000" w:shadow="1"/></w:pgBorders>`,
+      },
+    );
+    expect(once).toContain('<w:pgBorders w:offsetFrom="page" w:display="firstPage">');
+    expect(once).toContain('w:color="FF0000" w:shadow="1"');
+    expect(twice).toBe(once);
+  });
+
+  it("rewrites w:pgBorders in top-left-bottom-right order when the user changes it", async () => {
+    // 1.25 磅 = 10 个 1/8 磅；`#0070c0` 写成 OOXML 的裸 hex；没画的边不写子元素。
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr: `<w:pgSz w:w="11906" w:h="16838"/>`,
+        editSection: (s) => ({
+          ...s,
+          pageBorders: {
+            offsetFrom: "page",
+            top: { style: "single", sizePt: 1.25, spacePt: 2, color: "#0070c0" },
+            left: null,
+            bottom: { style: "thick", sizePt: 3, spacePt: 0, color: null },
+            right: null,
+          },
+        }),
+      },
+    );
+    expect(once).toContain(
+      '<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="10" w:space="2" w:color="0070C0"/>' +
+        '<w:bottom w:val="thick" w:sz="24" w:space="0" w:color="auto"/></w:pgBorders>',
+    );
+    expect(once.indexOf("<w:pgMar")).toBeLessThan(once.indexOf("<w:pgBorders"));
+    expect(twice).toBe(once);
+  });
+
+  it("writes w:lnNumType between pgMar and cols and drops it when line numbers are off", async () => {
+    const { once } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: `<w:pgSz w:w="11906" w:h="16838"/><w:cols w:space="425" w:num="2"/>`,
+      editSection: (s) => ({ ...s, lineNumbers: { countBy: 1, distance: 24, start: 1 } }),
+    });
+    // 24px = 360 twips；起始号是 Word 缺省的 1 时不写 `w:start`。
+    expect(once).toContain('<w:lnNumType w:countBy="1" w:distance="360"/>');
+    expect(once.indexOf("<w:lnNumType")).toBeLessThan(once.indexOf("<w:cols"));
+    const off = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr: `<w:pgSz w:w="11906" w:h="16838"/><w:lnNumType w:countBy="1" w:distance="360"/>`,
+      editSection: (s) => ({ ...s, lineNumbers: null }),
+    });
+    // 关掉行号 = 删掉整个元素，Word 里"没有 w:lnNumType"就是不标行号。
+    expect(off.once).not.toContain("<w:lnNumType");
+    expect(off.twice).toBe(off.once);
+  });
+
+  it("removes w:pgBorders when every side is switched off", async () => {
+    const { once } = await saveTwice([`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`], {
+      applyPageSetup: true,
+      sectPr:
+        `<w:pgSz w:w="11906" w:h="16838"/>` +
+        `<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="8" w:space="1" w:color="auto"/></w:pgBorders>`,
+      editSection: (s) => ({
+        ...s,
+        pageBorders: { offsetFrom: "page", top: null, left: null, bottom: null, right: null },
+      }),
+    });
+    expect(once).not.toContain("<w:pgBorders");
+  });
+
   it("keeps a right tab stop with a dot leader through a real save", async () => {
     // 目录条目的"标题⇥页码"靠这条制表位对齐（排名 3 与排名 5 的共同前提）。
     // attrs 已经建模了它，第二次保存必须写出同一条，而不是从 rawPpr 再透传一份变成两条。

@@ -5,6 +5,9 @@ export type {
   Snapshot,
   SectionGeometry,
   SectionColumns,
+  SectionPageBorders,
+  SectionLineNumbers,
+  PageBorderSide,
   DocStyle,
   PmLoadResult,
 } from "./docx.js";
