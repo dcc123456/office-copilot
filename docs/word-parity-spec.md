@@ -450,6 +450,9 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
   接受一次段落标记删除 = 把本段并进**后一段**（本段 `pPr` 留下）
   （[wml_xsd 内容模型](https://schemas.liquid-technologies.com/officeopenxml/2006/wml_xsd.html)、
   [Accept all revisions](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-accept-all-revisions-in-a-word-processing-document)）。
+- `w:ins`/`w:del` 属于 `EG_RunLevelElts`，而 `EG_RunLevelElts` ⊂ `EG_PContent` ⊂ `CT_Hyperlink`，
+  所以 `<w:hyperlink><w:ins><w:r>` 这个方向有内容模型依据；**反方向（`w:hyperlink` 出现在 `w:ins` 里）
+  查不到一手来源**（ECMA-376 在线镜像对本机返回 403），因此写回一律取有依据的一侧。
 - 注解 id 是**整个文档共享的一个编号空间**（批注、书签、`customXmlInsRangeStart` 都用它），规范对流只有一条
   硬约束："同一个 id 出现多条批注时 Word 只加载一条，其余忽略"。`w:date` 缺失合法；重复 id 的容错行为**无文档可查**。
 - `w15:people` / `w15:commentEx`（已解决状态）/ `w16cid:commentId` 都是**微软扩展不是 ECMA**。Word 自己会生成，
@@ -476,12 +479,33 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
   （§3.3/§3.4：引擎层加一个 `comments.ts`，不新建包、不改保存主链路）。
 - **modlog 不是修订**（AGENTS §2.5 的本地历史不进文件）。两者互不干扰：`w:ins`/`w:del` 是文档内容，
   op 的逆操作要把标记一起撤销；"接受修订"是一次普通改动块，照样可撤销、照样进修改历史。
-- 修订的**读侧保真先于写侧**：现在 `w:ins`/`w:del`/`w:delText` 在正文遍历里根本没有分支，导入一份带修订的
+- 修订的**读侧保真先于写侧**：③ 之前 `w:ins`/`w:del`/`w:delText` 在正文遍历里根本没有分支，导入一份带修订的
   `.docx` 会把删除的文字整块丢掉或把插入的文字当普通文字——**这是既有缺陷**，比"能不能开修订"更严重，
   所以 ③ 排在呈现与命令之前。
 - 段落标记的 `w:ins`/`w:del` 在 `w:pPr/w:rPr` 里，**没有运行可走**，只遍历 `w:r` 的读侧一定会漏
-  （见上面"段落标记自己的增删"那条）。
-  本节按"标记留在段落 attrs 上透传"处理，不把它做成可见的段落分隔符。
+  （见上面"段落标记自己的增删"那条）。③ 的处理是**继续靠 `rawPpr` 原样透传**，不做成可见的段落分隔符，
+  也不给编辑器加"本段的段落标记是插入/删除的"这一层——但透传只活在 docx-io 层，**过了编辑器就没了**：
+  真实 app 探针里 `w:pPr/w:rPr/w:ins w:id="10"` 打开→保存一次后消失（`ooxml-pm.test.ts` 的同名往返用例
+  仍然绿，说明丢在编辑器边界而不是转换层）。文字内容不受影响，丢的是"这段的段落标记也是插进来的"，
+  后果局限在 Word 里**拒绝**那次修订时留下一个空段而不是并掉两段。
+- `rawPpr` 到编辑器就断是**一片独立的缺口**，不是修订特有的：Tiptap 的段落 schema 没有这个属性，
+  PM 建节点时不认识的就直接不保留，所以任何"靠透传保真"的段落内容都过不了"打开→保存"这一趟。
+  补法是把 `rawPpr` 注册成段落的非渲染全局属性，但它会同时改变排名 1 / 5 / 7 各条的透传结局，
+  按 §1.4 单独成片，不夹进修订的提交里。
+- **修订建模成标记而不是节点**：一次修订只覆盖段落里的一段文字，文字必须留在原位；做成 `ins`/`del`
+  节点会把段落劈开，还得重新定义跨块语义。标记形状 `{kind, id, author, date}` 进 `PMMark` 联合（§5.3），
+  四者都 `rendered: false`——归属信息不是 DOM 契约，靠 `editor.getJSON()` 落盘。
+  `parseHTML` 返回空数组：粘贴进来的内容不该带着别人的修订归属。
+- **一次修订 = 一个 `w:ins`/`w:del` 元素**：Word 常把一次修订拆成几个 run（不同 `w:rPr`），写回时按
+  attrs 全等的相邻分组并回同一个元素、内部留多个 `w:r`。不并的话同一份文档里会出现两个同 `w:id` 的
+  元素，而重复 id 下 Word 的"接受此修订"会不会只清掉一半**无文档可查**（见上面"注解 id 共享编号空间"那条），
+  这里按"不制造重复 id"保守处理。
+- **嵌套取外层**：`del` 里套 `ins` 只留外层（外层是后发生的操作），内层归属丢弃、层级不建模；
+  两档同时挂在一个字上，OOXML 的这一层无处表达。
+- **`w:author`/`w:date`/`w:id` 读进来原样带走，一个都不编**：文档没写作者就只显示"插入"两个字，
+  不补一个名字；`w:id` 保持字符串，不在这里做数字换算（§2.1）。
+- **接受 / 拒绝按整个文档的修订区间生效**：一次修订可能被 Word 按段落拆开，只处理选区那一段的话，
+  接受完还剩半条。选区没碰到任何修订时命令返回 `false`，菜单据此置灰。
 
 提交切分（实现顺序，逐条落地后回填提交号）：
 
@@ -489,10 +513,24 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 | --- | --- | --- |
 | ① | docx-io：`word/comments.xml` 透明部件（按 id 存、没动过原样带走）+ 正文三个锚点元素读写往返 | `5b32ea8` |
 | ② | desktop：三个批注节点注册进 `EDITOR_EXTENSIONS`（区间端点画〔〕、引用记号画"批"字芯片），live 用例 | `52b66da` |
-| ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读侧保真（含 `pPr/w:rPr` 里段落标记的增删），不再丢删除的文字 | 待做 |
-| ④ | desktop：修订呈现（插入下划线 / 删除删除线）+ 接受 / 拒绝命令（右键菜单入口） | 待做 |
+| ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读成一个 `revision` 标记、写回按修订区间合并成单元素；段落标记的增删仍靠 `rawPpr` | `5197192` |
+| ④a | desktop：标记注册进 `EDITOR_EXTENSIONS`（插入下划线 / 删除删除线 + 作者与时间）+ 接受 / 拒绝命令 | `bee11e4` |
+| ④b | desktop：接受 / 拒绝的右键菜单入口 | 待做 |
 | ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
 | ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
+
+③④a 的实测（同一套 CDP 探针，独立 `--user-data-dir`）：一份含一次插入（内部两个 run，一个带 `w:b`）
+与两处删除的 `.docx` 让 app 打开后，编辑器里 4 个 `span[data-revision]` 全在位——
+插入是绿色下划线、删除是红色删除线，`title` 分别写着"插入：张三（2026-01-02T03:04:05Z）"和
+"删除：李四（2026-01-03T00:00:00Z）"；点保存后 `document.xml` 里 `<w:ins w:id="1" …>` 与
+`<w:del w:id="2" …>` 各回来一条、被删的字仍是 `w:delText`、插入那条内部两个 `w:r`（`<w:b/>` 那位没被
+拆散），`w:id="1"` 只出现一次（没有重复 id）。第二段那条 `<w:del w:id="2">` 与第一段同 id 是** fixture
+故意造的"一处修订被 Word 按段落拆开"**，同 id 才让"接受一次全清"成立，不是合并漏了。
+**唯一丢的是段落标记那条 `w:pPr/w:rPr/w:ins w:id="10"`**，原因与影响见上面"段落标记"那条判据。
+用 Word / WPS 打开验证：本机没装，**BLOCKED**。
+
+③④a 之后仍然没建模的：移动类修订（`w:moveFrom`/`w:moveTo`/`w:moveFromRangeStart`）读侧没有分支，
+移动过的文字按普通文字收下、写回不再带移动标记——真要补是给同一个标记加一个 `kind` 值，不新开机制。
 
 ①② 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP）：打一份含两条批注（其中一条区间跨段、
 一条正文里有 `w:br`）的 `.docx` 让 app 打开，编辑器里 6 个锚点全在位（`〔文字〕批` 跨两段各一组），
@@ -726,6 +764,32 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   docx-io 142 / desktop 136 / word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、
   `apps/task-pane` 仍无测试文件。
 - 提交：`26e5783` `3a9a79b` 已推送，`git ls-remote origin main` = `3a9a79b`。
+
+### 8.4 排名 4 ③④a（修订跟踪读写保真 + 编辑器标记与接受/拒绝）验收记录（`5197192` `bee11e4`）
+
+- 往返用例：`ooxml-pm.test.ts` 的"修订跟踪（`w:ins` / `w:del` / `w:delText`）"8 条——读成标记且
+  id/author/date 逐字带走、写回逐字节相同且二次写出一致、一次修订并成一个元素内部两个 `w:r`、
+  `del` 套 `ins` 只留外层且不产出 `<w:ins`、超链接在外修订在内、段落标记的 `w:pPr/w:rPr/w:ins` 透传、
+  文档没作者时不编名字、被删的制表符留在同一条删除里；再加 `DocxFile` 的
+  "keeps tracked insertions and deletions across open → save"。
+- live 用例：`docBlocks.live.test.ts` 的"修订跟踪（真实 schema）"5 条——docx-io 的产出进真实
+  `EDITOR_EXTENSIONS` 不被丢、写回仍是 `w:ins`/`w:delText`、部分改色不拍平同段的加粗与红字、
+  接受/拒绝四种结局各一条、一处修订被按段落拆开时接受一次全清、选区没碰到修订时返回 `false`。
+  呈现另有 `extensions/Revision.test.ts` 3 条（`data-revision` 与 `title`、缺作者时不编名、
+  `parseHTML` 返回空）。
+- 局部格式：标记合并只按 `type` 与 attrs 分组，不重建 `w:rPr`，同段其它字符格式原样留在自己的 run 里。
+- 撤销：接受 / 拒绝是**一个事务**（所有区间按位置倒序攒在同一个 `tr` 上），所以 ⌘Z 一次回到改动前；
+  本节没有新增 op 类型，modlog 与 AI 改动块的逆操作机制不受影响。命令目前还没有 UI 入口（④b），
+  等接到右键菜单时再按 §2.5 检查是否要进修改历史。
+- 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`，8 个包）；`pnpm test` EXIT=0，逐包
+  docx-io 249 / desktop 262（24 个文件）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、
+  `packages/shared`、`apps/task-pane` 仍无测试文件。
+  **踩到的坑要记下来**：`apps/desktop` 解析 `@office-copilot/docx-io` 走的是 `dist/`，改了 docx-io
+  源码不重新构建的话，桌面测试看到的还是旧转换器（症状是插入的文字被并回普通 run、`delText` 直接消失）。
+- UI：真实 app 探针（见上面"③④a 的实测"）——4 个 `span[data-revision]` 的配色与 `title` 正确，
+  保存后 `w:ins`/`w:del`/`w:delText` 回来且无重复 id；段落标记那条修订经编辑器丢失，已记为缺口。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。
+- 提交：`5197192` `bee11e4` 已推送，`git ls-remote origin main` = `bee11e4`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
