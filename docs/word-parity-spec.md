@@ -238,7 +238,8 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ③.1 | 跨段域的边界模型：段落内 begin 而本段无 end 时吐 `fieldBegin`/`fieldEnd` 一对节点（`fldCharTypes`/`closesInParagraph` 预扫判定），begin 后域深度归零让条目里的 `PAGEREF` 继续结构化；写侧 `fieldBoundaryXml` 还原 begin+instrText+separate 三件套；编辑器两个行内 atom | `bc06382` |
 | ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | `2dadd0a` |
 | ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | `e9f2806` |
-| ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
+| ④.1 | 脚注/尾注部件保真（`footnotes.xml`/`endnotes.xml` + Content_Types + rels）+ 正文引用点的行内 atom | `013d8ca` |
+| ④.2 | 脚注正文的编辑与编号：在编辑器里改脚注内容、插入/删除脚注时重排 `w:id` 与 Word 的显示编号 | 待做 |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
 
 ③.2 的取舍（都是刻意的，不要当成待修项）：
@@ -261,6 +262,27 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
   它的正确性目前只有 `tocPageNumberRefresh` 的单测背书。
 - **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，`.docx` 只做到读回一致。
 - 前导符在编辑器里依旧不可见（见上面 ③.2 的取舍），排名 5 ② 一并关掉。
+
+④.1 的做法（脚注/尾注部件）：这一项修的是一个**既有缺陷**——正文里的 `w:footnoteReference` 运行块
+在写侧根本没有对应分支，保存时整段被丢，用户的脚注引用凭空消失。取**透明部件**策略：正文只留一个引用
+原子，条目本身按 id 存在 `FootnoteStore` 侧表里，没改过的条目整段 `rawXml` 原样带走（连 `w:footnote`
+自己身上那些没建模的属性一起），只有 `dirty` 条目才用 PM⇄OOXML 片段转换重建；`separator` 与
+`continuationSeparator`（负数与 0 号 id）是排版家具，**永不因为正文没引用它们而被删**；部件里一旦出现
+非数字 id，整个部件标记为 `unmodeled` 且一次都不重写，宁可放弃功能也不静默丢内容。登记复用
+`ensurePartReference`（Content_Types Override + rels，幂等），表头页脚则迁到共享的片段转换入口，
+不再各自留一份实现（§3.2）。编辑器侧 `FootnoteReference`/`EndnoteReference` 两个行内 atom 注册进
+`EDITOR_EXTENSIONS`；芯片显示"注/尾"而不是 Word 的编号，因为 `renderHTML` 拿不到节点在文档里的位置——
+编号与脚注正文的编辑都是 ④.2。
+
+④.1 的验收与差距：
+
+- 真实 app 实测（构建产物 + CDP 驱动，独立 `--user-data-dir`，不碰用户在跑的实例）：含脚注与尾注各一条的
+  样例打开后，芯片是蓝色上标（`verticalAlign: "super"`，文字"注"/"尾"），无白屏；点保存后读回部件，
+  8 项结构判定全过（引用点带上标 `rPr`、正文条目与 `separator` 家具齐备、Content_Types 有 Override、
+  rels 未重复）。
+- **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
+- 差距：脚注正文在编辑器里**只读**（侧表不进 doc，改了也不会写回），Word 的显示编号没有回写；
+  `w:customMarkFollows` 标过的引用刻意不读；脚注正文里的图片不解析关系，整段原样透传。
 
 ②的已知差距：一个 `field` 节点只表示**同一段内**的 begin/end 配对，Word 生成的多段目录从第二段起读成纯文本
 ——已由 ③.1 解决。缓存结果里的嵌套域指令（如目录条目的 `PAGEREF`）②只保留文本，③.1 起改由边界节点之间的
