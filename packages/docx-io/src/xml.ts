@@ -93,6 +93,26 @@ export function escapeAttr(s: string): string {
 }
 
 /**
+ * 读 OOXML 的开关型属性（CT_OnOff，如 `w:keepNext` / `w:hidden` / `w:default`）。
+ *
+ * `styles.ts` 与 `ooxml-pm.ts` 都要读它，所以放在这个最底层的模块里，
+ * 避免出现第二份"裸元素算 true"的判断。
+ *
+ * @param el 承载开关的元素；元素不存在时传 undefined/null。
+ * @returns 裸元素（`<w:keepNext/>`）为 true，`w:val` 是 0/false/off 为 false；
+ *   元素缺失或值读不懂时返回 undefined，含义是"这里没建模过它"，
+ *   调用方不得替 Word 补一个它没写过的值。
+ */
+export function onOffValue(el: Element | null | undefined): boolean | undefined {
+  if (!el) return undefined;
+  const raw = el.attributes?.["w:val"];
+  if (raw === undefined) return true;
+  const v = String(raw).toLowerCase();
+  if (v === "0" || v === "false" || v === "off") return false;
+  return v === "1" || v === "true" || v === "on" ? true : undefined;
+}
+
+/**
  * Parse a standalone XML fragment (multiple top-level elements allowed) and
  * return them as Element nodes. Wraps the fragment in a synthetic root.
  */

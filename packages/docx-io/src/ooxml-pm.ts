@@ -3,6 +3,7 @@ import {
   collectDescendants,
   firstChild,
   isElement,
+  onOffValue,
   parseDocument,
   parseFragment,
   serialize,
@@ -453,24 +454,7 @@ function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
 }
 
 /**
- * 读 OOXML 的开关型段落属性（CT_OnOff，如 `w:keepNext` / `w:widowControl`）。
- *
- * @param el `<w:pPr>` 里的子元素；不存在时传 undefined/null。
- * @returns 裸元素（`<w:keepNext/>`）为 true，`w:val` 是 0/false/off 为 false；
- *   元素缺失或值读不懂时返回 undefined，含义是"这一段没建模过它"，
- *   写回时让 rawPpr 里的原样透传，而不是替 Word 补一个它没写过的值。
- */
-function onOffValue(el: Element | null | undefined): boolean | undefined {
-  if (!el) return undefined;
-  const raw = el.attributes?.["w:val"];
-  if (raw === undefined) return true;
-  const v = String(raw).toLowerCase();
-  if (v === "0" || v === "false" || v === "off") return false;
-  return v === "1" || v === "true" || v === "on" ? true : undefined;
-}
-
-/**
- * 写 OOXML 的开关型段落属性，是 `onOffValue` 的逆运算。
+ * 写 OOXML 的开关型段落属性，是 `onOffValue`（`xml.ts`）的逆运算。
  *
  * @param tag 元素名（含前缀），如 "w:keepNext"。
  * @param value 段落 attrs 里的建模值；undefined 时不产出元素。
