@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { EditorContent, useEditor, type Editor } from "@tiptap/react";
 import {
+  emptyPmDoc,
   nextFootnoteId,
   type FootnoteBodies,
   type FootnoteKind,
@@ -9,13 +10,11 @@ import {
 import { X } from "lucide-react";
 import { FOOTNOTE_REF_KEY, footnoteRefKey } from "../editor/extensions/FootnoteRef.js";
 import { NESTED_EXTENSIONS } from "../editor/extensions/nestedExtensions.js";
+import { bodyPreview } from "../editor/docBlocks.js";
 import "../styles/footnotePane.css";
 
 /** 两种部件的界面名。 */
 const KIND_LABEL: Record<FootnoteKind, string> = { footnote: "脚注", endnote: "尾注" };
-
-/** 新建的脚注还没有正文时空着，与 docx-io 写部件时的空条目一致。 */
-const EMPTY_BODY: PMDoc = { type: "doc", content: [{ type: "paragraph" }] };
 
 /** 一条条目在窗格里的位置：部件 + `w:id`。 */
 interface SelectedRef {
@@ -76,7 +75,7 @@ export function FootnotePane({
         attrs: { id },
       })
       .run();
-    onBodies({ ...bodies, [kind]: [...(bodies[kind] ?? []), { id, doc: EMPTY_BODY }] });
+    onBodies({ ...bodies, [kind]: [...(bodies[kind] ?? []), { id, doc: emptyPmDoc() }] });
     setSelected({ kind, id });
   };
 
@@ -110,7 +109,7 @@ export function FootnotePane({
       ? selected
       : null;
   const currentDoc = current
-    ? (bodies[current.kind] ?? []).find((e) => e.id === current.id)?.doc ?? EMPTY_BODY
+    ? (bodies[current.kind] ?? []).find((e) => e.id === current.id)?.doc ?? emptyPmDoc()
     : null;
 
   return (
@@ -149,7 +148,7 @@ export function FootnotePane({
                   }}
                 >
                   <sup className="fn-number">{info?.number ?? "?"}</sup>
-                  <span className="fn-preview">{previewOf(entry.doc)}</span>
+                  <span className="fn-preview">{bodyPreview(entry.doc)}</span>
                 </button>
               );
             })}
@@ -220,18 +219,4 @@ function FootnoteBodyEditor({
   );
   if (!editor) return null;
   return <EditorContent editor={editor} />;
-}
-
-/**
- * 列表上一行显示的那句正文。
- *
- * @param doc 这条脚注的正文。
- * @returns 第一个非空块的纯文本；新建的脚注还没有字，就是空串。
- */
-function previewOf(doc: PMDoc): string {
-  for (const block of (doc.content ?? []) as { content?: { text?: string }[] }[]) {
-    const text = (block.content ?? []).map((inline) => inline.text ?? "").join("");
-    if (text) return text;
-  }
-  return "";
 }

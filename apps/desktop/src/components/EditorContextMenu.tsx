@@ -69,7 +69,14 @@ interface Panel {
   y: number;
 }
 
-export function EditorContextMenu({ editor }: { editor: Editor }) {
+export function EditorContextMenu({
+  editor,
+  onAddComment,
+}: {
+  editor: Editor;
+  /** 「新建批注」：条目表与侧栏的开关都在上层 state 里，菜单只把动作交出去。 */
+  onAddComment?: () => void;
+}) {
   const [open, setOpen] = useState<OpenMenu | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [sub, setSub] = useState<{ id: CtxItemId; top: number } | null>(null);
@@ -165,6 +172,10 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
     setOpen(null);
     setPanel(null);
     setSub(null);
+    if (id === "comment-add") {
+      onAddComment?.();
+      return;
+    }
     void applyAction(editor, id, anchor);
   };
 

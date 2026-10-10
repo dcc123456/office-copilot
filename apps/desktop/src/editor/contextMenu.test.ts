@@ -103,6 +103,11 @@ describe("buildContextMenu", () => {
     expect(find(onRevision, "revision-reject").disabled).toBe(false);
   });
 
+  it("新建批注按选区置灰：光标没拉出要批的文字就点不动", () => {
+    expect(find(rows(facts()), "comment-add").disabled).toBe(false);
+    expect(find(rows(facts({ hasSelection: false })), "comment-add").disabled).toBe(true);
+  });
+
   it("图片菜单给剪切/复制/文字环绕/删除，文字环绕勾当前值", () => {
     const image = rows(facts({ target: "image", hasSelection: true, imageWrap: "tight" }));
     expect(image.some((r) => "id" in r && r.id === "font-dialog")).toBe(false);

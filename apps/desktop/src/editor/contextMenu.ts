@@ -59,6 +59,7 @@ export type CtxItemId =
   | "link-remove"
   | "revision-accept"
   | "revision-reject"
+  | "comment-add"
   | "delete-object"
   | `block:${string}`
   | `wrap:${string}`
@@ -186,6 +187,8 @@ export function buildContextMenu(facts: CtxFacts): CtxRow[] | null {
   // Word 也按落点给这两条：没落在修订上就置灰，不藏起来（本菜单一贯"不可用看得见"）。
   rows.push({ id: "revision-accept", label: "接受修订", disabled: !facts.hasRevision });
   rows.push({ id: "revision-reject", label: "拒绝修订", disabled: !facts.hasRevision });
+  // Word 的"新建批注"要选中文字才有对象，光标没拉选区时置灰（同一条判据：canEdit）。
+  rows.push({ id: "comment-add", label: "新建批注", disabled: !canEdit });
   rows.push({ separator: true });
   rows.push({ id: "ai:polish", label: "AI：润色", disabled: !canEdit });
   rows.push({ id: "ai:expand", label: "AI：扩写", disabled: !canEdit });

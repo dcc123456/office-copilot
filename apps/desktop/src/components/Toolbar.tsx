@@ -38,6 +38,7 @@ import {
   Pilcrow,
   Wand2,
   RotateCcw,
+  MessageSquareQuote,
 } from "lucide-react";
 
 import { ParagraphPopover } from "./ParagraphPopover.js";
@@ -63,6 +64,8 @@ interface ToolbarProps {
   stylesOpen?: boolean;
   /** 脚注窗格是否开着，用来让按钮亮起来。 */
   footnotesOpen?: boolean;
+  /** 批注侧栏是否开着，同一个作用。 */
+  commentsOpen?: boolean;
 }
 
 export type ToolbarAction =
@@ -78,6 +81,7 @@ export type ToolbarAction =
   | "insert-crossref"
   | "styles"
   | "footnotes"
+  | "comments"
   | "beautify"
   | "revert-beautify";
 
@@ -123,6 +127,7 @@ export function Toolbar({
   canRevert,
   stylesOpen,
   footnotesOpen,
+  commentsOpen,
 }: ToolbarProps) {
   const setLink = () => void promptSetLink(editor);
 
@@ -404,6 +409,9 @@ export function Toolbar({
           onClick={() => onAction("footnotes")}
         >
           <Superscript size={16} />
+        </Btn>
+        <Btn title="批注侧栏" active={commentsOpen} onClick={() => onAction("comments")}>
+          <MessageSquareQuote size={16} />
         </Btn>
         <Btn
           title="分割线"

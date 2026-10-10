@@ -325,6 +325,7 @@ async function saveDocx(
     }
     // 批注正文必须在 replaceProseMirror 之前收下：写部件时按正文里的锚点对齐条目，
     // 先换正文就会把这次保存当成"锚点都没了"，把侧栏刚写好的条目一起删掉。
+    // 空数组不必收下：删掉的锚点由写部件那一步按正文清条目，最后一个删光时连部件一起摘。
     if (hf.comments?.length) docx.setCommentBodies(hf.comments);
     // 样式表要先落地：正文里的 w:pStyle 引用的是 styles.xml 声明的 id，
     // 换了新 id 却还没写进样式表，Word 会当成未声明样式退回默认格式。

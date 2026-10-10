@@ -343,6 +343,20 @@ export function jsonContentText(json: JsonNode): string {
   return out;
 }
 
+/**
+ * 透明部件条目（脚注、批注）在侧栏里显示的那一句正文。
+ *
+ * @param doc 条目的正文 JSON（`PMDoc` 形状，段落级）。
+ * @returns 第一个带字的块的纯文本；新建的条目还没写字时是空串。
+ */
+export function bodyPreview(doc: JsonNode): string {
+  for (const block of (doc.content ?? []) as JsonNode[]) {
+    const blockText = jsonContentText(block);
+    if (blockText) return blockText;
+  }
+  return "";
+}
+
 function marksOf(node: PMNode | null) {
   const first = node ? texts(node)[0] : undefined;
   return first?.marks?.length ? first.marks : undefined;

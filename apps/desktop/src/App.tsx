@@ -23,6 +23,7 @@ import {
   type CrossRefReject,
 } from "./editor/crossrefs.js";
 import type {
+  CommentBody,
   FootnoteBodies,
   LinkStyle,
   PaneStyle,
@@ -33,6 +34,8 @@ import type {
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
+import { CommentPane } from "./components/CommentPane.js";
+import { insertCommentOnSelection } from "./editor/comments.js";
 import { AIPanel } from "./ai/AIPanel.js";
 import { StatusBar } from "./components/StatusBar.js";
 import { FindBar } from "./components/FindBar.js";
@@ -112,6 +115,10 @@ export function App() {
   // 脚注窗格：正文与各部件条目的对应关系跟着文档走，换文档就整份换掉。
   const [footnotePaneOpen, setFootnotePaneOpen] = useState(false);
   const [footnoteBodies, setFootnoteBodies] = useState<FootnoteBodies>({});
+  // 批注侧栏：正文只装锚点，批注文字跟着文档走，换文档就整份换掉（同脚注那条）。
+  const [commentPaneOpen, setCommentPaneOpen] = useState(false);
+  const [commentBodies, setCommentBodies] = useState<CommentBody[]>([]);
+  const [commentSelectedId, setCommentSelectedId] = useState<string | null>(null);
   // 样式窗格的数据随文档走：打开 / 新建时从主进程带回来的 styles.xml 清单换一次。
   const [docStyles, setDocStyles] = useState<PaneStyle[]>([]);
   // 同一份 styles.xml 的另一面：每条样式合并出来的可见格式，拼成文档作用域的样式表。
@@ -211,6 +218,8 @@ export function App() {
     setDocStyles([]);
     setDocStyleFormats([]);
     setFootnoteBodies({});
+    setCommentBodies([]);
+    setCommentSelectedId(null);
     // 换文档 = 攒下的样式编辑作废：它们指向的是上一份文档的 styles.xml。
     styleEditsRef.current = [];
     setFilePath(null);
@@ -233,6 +242,8 @@ export function App() {
     setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
     setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
     setFootnoteBodies((r.footnotes as FootnoteBodies | undefined) ?? {});
+    setCommentBodies((r.comments as CommentBody[] | undefined) ?? []);
+    setCommentSelectedId(null);
     styleEditsRef.current = [];
     setFilePath(r.path ?? null);
     setDirty(false);
@@ -266,6 +277,8 @@ export function App() {
       setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
       setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
       setFootnoteBodies((r.footnotes as FootnoteBodies | undefined) ?? {});
+      setCommentBodies((r.comments as CommentBody[] | undefined) ?? []);
+      setCommentSelectedId(null);
       styleEditsRef.current = [];
       setFilePath(r.path ?? p);
       setDirty(false);
@@ -352,6 +365,7 @@ export function App() {
       link: linkStyle as never,
       styles: styleEditsRef.current,
       footnotes: footnoteBodies,
+      comments: commentBodies,
     });
     if (r.ok && r.path) {
       setFilePath(r.path);
@@ -360,7 +374,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies]);
+  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies]);
 
   const handleSaveAs = useCallback(async () => {
     if (!editor) return;
@@ -377,6 +391,7 @@ export function App() {
       link: linkStyle as never,
       styles: styleEditsRef.current,
       footnotes: footnoteBodies,
+      comments: commentBodies,
     });
     if (r.ok && r.path) {
       setFilePath(r.path);
@@ -385,7 +400,26 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies]);
+  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies]);
+
+  /**
+   * 给当前选区新建一条批注，并把侧栏开到那条上。
+   *
+   * 署名每次现读设置：改完名字不用重启也不用重新打开文档，下一条批注就跟着变。
+   */
+  const addComment = useCallback(async () => {
+    if (!editor) return;
+    const settings = await window.officeCopilot.getSettings();
+    const created = insertCommentOnSelection(editor, commentBodies, settings.authorName);
+    if (!created.ok) {
+      toast("先选中要批注的文字，再新建批注。", "error");
+      return;
+    }
+    setCommentBodies(created.bodies);
+    setCommentSelectedId(created.id);
+    setCommentPaneOpen(true);
+    setDirty(true);
+  }, [editor, commentBodies]);
 
   const handlePrint = useCallback(async () => {
     if (!editor) return;
@@ -565,6 +599,9 @@ export function App() {
           break;
         case "footnotes":
           setFootnotePaneOpen((v) => !v);
+          break;
+        case "comments":
+          setCommentPaneOpen((v) => !v);
           break;
         case "beautify":
           setTemplateOpen(true);
@@ -912,6 +949,19 @@ export function App() {
             onClose={() => setFootnotePaneOpen(false)}
           />
         )}
+        {commentPaneOpen && editor && (
+          <CommentPane
+            editor={editor}
+            bodies={commentBodies}
+            onBodies={(next) => {
+              setCommentBodies(next);
+              setDirty(true);
+            }}
+            selectedId={commentSelectedId}
+            onSelect={setCommentSelectedId}
+            onClose={() => setCommentPaneOpen(false)}
+          />
+        )}
         <div className="editor-area">
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
           {docStyleCss ? <style>{docStyleCss}</style> : null}
@@ -924,6 +974,7 @@ export function App() {
               canRevert={canRevert}
               stylesOpen={stylePaneOpen}
               footnotesOpen={footnotePaneOpen}
+              commentsOpen={commentPaneOpen}
               dirty={dirty}
             />
           ) : null}
@@ -1038,7 +1089,7 @@ export function App() {
       />
       {/* 右键菜单挂在页面之外：.page-stage 上有 zoom 的 transform，
           放进舞台里 position: fixed 会以缩放后的容器为基准，菜单就跑到鼠标外。 */}
-      <EditorContextMenu editor={editor} />
+      <EditorContextMenu editor={editor} onAddComment={() => void addComment()} />
       <TableContextMenu editor={editor} />
       <DialogHost />
       <ToastHost />
