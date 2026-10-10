@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { getSchema, type CommandProps } from "@tiptap/core";
-import { ptToCssLetterSpacing } from "@office-copilot/docx-io";
+import { ptToCssLetterSpacing, ooxmlToPm, pmToOoxml } from "@office-copilot/docx-io";
+import type { PMDoc } from "@office-copilot/docx-io";
 import type { Editor } from "@tiptap/react";
 import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
 import { footnoteRefKey, indexFootnoteRefs } from "./extensions/FootnoteRef.js";
 import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
+import { Revision } from "./extensions/Revision.js";
 import { blocksOf, executeOps } from "./docBlocks.js";
 import { planEdit, revert, addressOf, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
 import { templateProposal, typographyProposal } from "./formatDocument.js";
@@ -156,7 +158,11 @@ function runFormatCommand(
       string,
       (...args: unknown[]) => (props: CommandProps) => boolean
     >
-  ).call({ options: {} });
+  ).call({
+    options: {},
+    // 标记类命令实现里读 `this.name`（Tiptap 装配时把扩展自身当上下文），手搓 ctx 要给它。
+    name: (source as unknown as { name?: string }).name,
+  });
   const command = commands[name];
   if (!command) throw new Error(`扩展里没有命令 ${name}`);
   return command(...args)({
@@ -830,6 +836,130 @@ describe("批注锚点（真实 schema）", () => {
     ]).state.doc;
     expect(doc.firstChild!.childCount).toBe(5);
     expect(doc.textContent).toBe("正文");
+  });
+});
+
+describe("修订跟踪（真实 schema）", () => {
+  const ins = {
+    type: "revision",
+    attrs: { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" },
+  };
+  const del = { type: "revision", attrs: { kind: "del", id: "2", author: "李四", date: null } };
+
+  /** Word 写修订的形状：`w:ins`/`w:del` 与 `w:r` 平级，被删的文字写成 `w:delText`。 */
+  const TRACKED =
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:body><w:p><w:r><w:t>正文</w:t></w:r>` +
+    `<w:ins w:id="1" w:author="张三" w:date="2026-01-02T03:04:05Z"><w:r><w:t>插入的字</w:t></w:r></w:ins>` +
+    `<w:del w:id="2" w:author="李四"><w:r><w:delText>删掉的字</w:delText></w:r></w:del></w:p>` +
+    `<w:sectPr/></w:body></w:document>`;
+
+  /**
+   * 文档里每个修订标记的属性，按出现顺序。
+   *
+   * @param doc 编辑器当前文档。
+   * @returns `revision` 标记的 attrs 快照（PM 会把缺省属性补齐，所以 `date` 是 null 而不是缺失）。
+   */
+  function revisions(doc: PMNode): unknown[] {
+    const out: unknown[] = [];
+    doc.descendants((n) => {
+      if (n.isText) for (const m of n.marks) if (m.type.name === "revision") out.push(m.attrs);
+      return true;
+    });
+    return out;
+  }
+
+  /**
+   * 跑修订命令。
+   *
+   * @param editor harness 出来的编辑器。
+   * @param name `acceptRevision` 或 `rejectRevision`。
+   * @param words 光标/选区要落在哪些文字上。
+   * @returns 命令有没有碰到修订。
+   */
+  const runRevision = (
+    editor: Editor,
+    name: "acceptRevision" | "rejectRevision",
+    words: string[],
+  ): boolean =>
+    runFormatCommand(
+      editor,
+      name,
+      [],
+      words,
+      Revision as unknown as { config: { addCommands?: () => Record<string, unknown> } },
+    );
+
+  it("docx-io 读出的修订进得了真实 schema，写回还是 ins/del 加 delText", () => {
+    const editor = harness(ooxmlToPm(TRACKED).content);
+    // 被删的文字必须在树上：它在 Word 里是可见的（删除线），一次存盘不能把它弄没。
+    expect(editor.state.doc.textContent).toBe("正文插入的字删掉的字");
+    expect(revisions(editor.state.doc)).toEqual([
+      { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" },
+      { kind: "del", id: "2", author: "李四", date: null },
+    ]);
+    const xml = pmToOoxml(editor.state.doc.toJSON() as PMDoc);
+    expect(xml).toContain(`<w:ins w:id="1" w:author="张三" w:date="2026-01-02T03:04:05Z">`);
+    expect(xml).toContain(`<w:delText xml:space="preserve">删掉的字</w:delText>`);
+    expect(xml).not.toContain(`<w:t xml:space="preserve">删掉的字</w:t>`);
+  });
+
+  it("整段刷正文色不把修订抹掉（§2.3：局部格式不许拍平）", () => {
+    const editor = harness([para([text("正文"), text("插入的字", [ins])])]);
+    applyStyles(editor, [{ index: 0, style: { color: "#000000" } }]);
+    expect(revisions(editor.state.doc)).toEqual([
+      { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" },
+    ]);
+    expect(run(editor, "插入的字").attrs.color).toBe("#000000");
+  });
+
+  it("接受：插入的字留下、删掉的字走；拒绝正好反过来", () => {
+    const doc = () =>
+      harness([para([text("正文"), text("插入的字", [ins]), text("删掉的字", [del])])]);
+
+    const keepInsertion = doc();
+    expect(runRevision(keepInsertion, "acceptRevision", ["插入的字"])).toBe(true);
+    expect(keepInsertion.state.doc.textContent).toBe("正文插入的字删掉的字");
+    // 只处理选区碰到的那条：另一条修订原样留着。
+    expect(revisions(keepInsertion.state.doc)).toEqual([
+      { kind: "del", id: "2", author: "李四", date: null },
+    ]);
+
+    const confirmDeletion = doc();
+    expect(runRevision(confirmDeletion, "acceptRevision", ["删掉的字"])).toBe(true);
+    expect(confirmDeletion.state.doc.textContent).toBe("正文插入的字");
+    expect(revisions(confirmDeletion.state.doc)).toEqual([
+      { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" },
+    ]);
+
+    const dropInsertion = doc();
+    expect(runRevision(dropInsertion, "rejectRevision", ["插入的字"])).toBe(true);
+    expect(dropInsertion.state.doc.textContent).toBe("正文删掉的字");
+
+    const restoreDeletion = doc();
+    expect(runRevision(restoreDeletion, "rejectRevision", ["删掉的字"])).toBe(true);
+    expect(restoreDeletion.state.doc.textContent).toBe("正文插入的字删掉的字");
+    expect(revisions(restoreDeletion.state.doc)).toEqual([
+      { kind: "ins", id: "1", author: "张三", date: "2026-01-02T03:04:05Z" },
+    ]);
+  });
+
+  it("一次修订被 Word 按段落拆开时，接受一次全清", () => {
+    // Word 给跨段的一次插入写的是同一个 `w:id` 的两条 `w:ins`；用户只点在第一段里，
+    // 接受的也应该是整条修订，而不是那一段。
+    const editor = harness([
+      para([text("正文"), text("甲段插入", [ins])]),
+      para([text("乙段插入", [ins])]),
+    ]);
+    expect(runRevision(editor, "acceptRevision", ["甲段插入"])).toBe(true);
+    expect(editor.state.doc.textContent).toBe("正文甲段插入乙段插入");
+    expect(revisions(editor.state.doc)).toEqual([]);
+  });
+
+  it("选区没碰到修订时命令返回 false（菜单项据此置灰）", () => {
+    const editor = harness([para([text("正文"), text("插入的字", [ins])])]);
+    expect(runRevision(editor, "acceptRevision", ["正文"])).toBe(false);
   });
 });
 
