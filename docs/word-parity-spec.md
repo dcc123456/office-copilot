@@ -123,8 +123,38 @@ run 通过 `<w:rStyle>`。**样式链**（`w:basedOn`）与 `w:next`、`w/link`�
 
 依赖：`StyleMap` 已有的能力边界（见 §附录 A 盘点）。
 
-提交切分：① 读侧样式清单结构化 + 往返；② 编辑器 `styleId` 属性 + 应用/清除命令；
-③ 样式窗格 UI；④ 写侧 styles.xml 合并生成。
+提交切分（实际落地顺序与提交号）：
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| ① | 读侧样式清单结构化（`StyleMap` 解析 `w:name`/`w:type`/`w:basedOn`/`w:default` + 往返） | `21cb2e9` `aeed0be` |
+| ② | 写侧把 `attrs.styleId` 写成 `<w:pStyle>`（string=套用、null=删引用、缺失=沿用源文档写法） | `58220ff` |
+| ③ | 编辑器 `styleId` 全局属性（默认值只能是 `undefined`，否则导入文档的引用会被整批删掉） | `91131d0` |
+| ③.5 | 写侧按样式表复核引用：改了级别就换成这一级声明的那条，标题转正文就删引用 | `aa0d848` |
+| ④ | 样式窗格：引擎半（`paneStyles()` + 唯一的对齐规则 `fitStyleId`）`7cb35b5`；UI 半（清单经 IPC 进渲染层、`applyNamedStyle` 命令、窗格）`481c4ec` | `7cb35b5` `481c4ec` |
+| ⑤ | 样式链解析成可见格式（文档作用域生成的样式表，换算仍只在 `docx-io`） | 待做 |
+| ⑥ | 新建样式 / 修改样式（从选区抓格式） | 待做 |
+| ⑦ | 写侧 `styles.xml` 合并生成（splice-and-keep，保住 `docDefaults`/`latentStyles`）+ 真实保存往返 | 待做 |
+
+窗格这一版的取舍（都是按 Word 的行为定的，不是省事）：
+
+- **只写引用，不解析样式链**。Word 里套样式不会把样式定义盖到段落上，直接格式永远赢；
+  解析成段落属性等于毁掉用户的红字、加粗和手工缩进。
+- **清除样式 = 不写引用**（Word 里等同该文档的默认段落样式），且标题节点退回 `paragraph`——
+  留着 heading 却没有标题样式引用，重新导入时这段会被读成正文，级别白丢。
+- **新建文档的窗格是空的**。`fileHandlers.ts` 的空白模板根本不写 `styles.xml`，硬塞一份 Word
+  预置样式清单会写出文档没声明的 `styleId`，Word 照正文排版——正是早期 `HorizontalRule` 犯过的错。
+- 窗格高亮与写侧共用 `fitStyleId`，因此不会出现"窗格显示标题 1、Word 排成标题 2"。
+
+`481c4ec` 顺带修掉的一个真实缺陷：`setParagraphFormat` 原先逐块各发一个基于旧 `doc` 的事务，
+选中多段时第二段起 ProseMirror 抛 `Applying a mismatched transaction`，只有第一段改得上
+（实测：`docBlocks.live.test.ts` 跨段用例在旧实现下必失败）。现在两条段落命令共用
+`mapFormatBlocks`，一次操作攒成一个事务。
+
+排名 2 的遗留（不在本排名的验收范围内）：编辑器里多块一起改标题级别时，Tiptap 的
+`setNode`/`setHeading` 只在 `$anchor.sameParent($head)` 时才复制原块属性，跨块会丢 `styleId`
+（一手依据：`@tiptap/core/dist/index.js:3307-3331`）；`fitStyleId` 改为"没建模过的标题先问样式表"
+之后，真实文档里这个丢失不再改变导出结果，故记为遗留不单独修。
 
 ## 三、排名 3：目录 / 题注 / 交叉引用 / 脚注尾注
 
@@ -225,10 +255,34 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
   新面板未实跑走一遍；仅有真实 schema 的 live 测试作为替代证据。
 - Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。
 
+### 8.2 排名 2（窗格部分）验收记录（`21cb2e9` `aeed0be` `58220ff` `91131d0` `aa0d848` `7cb35b5` `481c4ec`）
+
+- 往返用例：`docx.test.ts` 的"hands the style pane the paragraph styles this document declares"
+  （有 `styles.xml` → 过滤 character/hidden/semiHidden、按 `uiPriority` 排、带上 `headingLevel` 与
+  `isDefault`；没有 → `[]`）；`ooxml-pm.test.ts` 的"编辑器里新建的标题也先问样式表，别写本文档没声明的
+  `Heading2`"；`styles.test.ts` 的 `paneStyles()` 4 条 + `fitStyleId` 换级/转正文/无样式表三种结局。
+- live 用例：`docBlocks.live.test.ts` 的"具名样式引用 styleId（真实 schema）"6 条——三态往返、
+  只补引用不牵连缩进/分页开关/红字、套标题样式（正文→heading + level，红字与加粗原样）、
+  清除样式（标题退回正文、`level` 不残留）、跨段一次改完、列表项不被改坏结构。
+- 局部格式：`applyNamedStyle` 只改块级属性与节点类型，run 上的 mark 一个都不碰（用例逐条断言）。
+- 撤销：窗格是编辑器命令，撤销走 Tiptap 的事务历史（⌘Z），不产生 `setStyle` op。`styleId`
+  **刻意没有**进 `STYLE_KEYS`（`ai/docEdit.ts`）：样式引用是给结构用的（目录、交叉引用认它），
+  不该让模型按"这段落看起来像标题"去猜着改。
+- 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包
+  docx-io 132 / desktop 127 / word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`
+  仍无测试文件。
+- UI：`[!] BLOCKED`——本仓没有 Electron 的 CDP harness，样式窗格未实跑走一遍。样式表样式**不会**
+  在编辑器里渲染成最终外观（样式链解析是 ⑤），这是刻意的：解析会把样式定义盖成直接格式，
+  与 Word 的优先级相反。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS；写侧结论来自 OOXML 与往返用例，不是打开验证。
+- 提交：`481c4ec` 已推送，`git ls-remote origin main` 复核一致。
+
 ## 附录 A：现状盘点（`path:line` 为证）
 
-- 段落格式属性与命令：`apps/desktop/src/editor/extensions/ParagraphFormatting.ts:34-133`
-  （`setParagraphFormat` 逐块 `setNodeMarkup`）。
+- 段落格式属性与命令：`apps/desktop/src/editor/extensions/ParagraphFormatting.ts`——段落属性表在
+  `addGlobalAttributes`，两条命令都经 `mapFormatBlocks`（`function mapFormatBlocks:56`）攒成一个事务
+  落地；`applyNamedStyle` 在 `addCommands` 里。样式窗格：`components/StylePane.tsx`
+  （清单来自 `fileHandlers.ts` 的 `OpenResult.styles`）。
 - 段落面板：`apps/desktop/src/components/ParagraphPopover.tsx`（`ParagraphFields` 被工具栏与
   右键「段落(P)…」共用）；字体面板 `components/FontFields.tsx`；
   菜单模型 `apps/desktop/src/editor/contextMenu.ts`。
