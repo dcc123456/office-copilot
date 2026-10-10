@@ -238,6 +238,16 @@ describe("DocxFile", () => {
     expect(twice).toBe(once);
   });
 
+  it("keeps the named style a paragraph already carries through two real saves", async () => {
+    const { once, twice } = await saveTwice([
+      `<w:p><w:pPr><w:pStyle w:val="af3"/><w:ind w:left="300" w:right="200"/></w:pPr><w:r><w:t>公文正文</w:t></w:r></w:p>`,
+    ]);
+    // 只能有一条 pStyle，而且必须还是源文档那条：写侧不许把它换成推断的样式名。
+    expect(once.match(/<w:pStyle\b[^>]*>/g)).toEqual([`<w:pStyle w:val="af3"/>`]);
+    expect(once).toContain('w:right="200"');
+    expect(twice).toBe(once);
+  });
+
   /**
    * 编辑器里插入的分隔线必须落成段落底部边框：本仓不写 styles.xml，
    * 旧实现引用的 HorizontalRule 样式在文档里不存在，Word 只会排出空段落。

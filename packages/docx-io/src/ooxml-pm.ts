@@ -1,6 +1,7 @@
 import {
   children,
   collectDescendants,
+  escapeAttr,
   firstChild,
   isElement,
   onOffValue,
@@ -379,13 +380,16 @@ function paragraphFromXml(
 }
 
 /**
- * Read <w:spacing> and <w:ind> values into PM attrs (in points / CSS
- * ratio). All unit conversions happen here so the UI can stay in
+ * Read a `<w:pPr>` into PM attrs: 具名样式 id、`<w:spacing>`、`<w:ind>` 与分页开关
+ * (points / CSS ratio)。All unit conversions happen here so the UI can stay in
  * familiar points.
  */
 function readParagraphFormat(pPr: Element | null | undefined): PPrAttrs {
   const out: PPrAttrs = {};
   if (!pPr) return out;
+  // 样式 id 原样带走，不与样式名互换：id↔名称的对应只有 styles.xml 知道。
+  const styleId = val(firstChild(pPr, "w:pStyle"));
+  if (styleId) out.styleId = styleId;
   const keepNext = onOffValue(firstChild(pPr, "w:keepNext"));
   if (keepNext !== undefined) out.keepWithNext = keepNext;
   const keepLines = onOffValue(firstChild(pPr, "w:keepLines"));
@@ -1108,12 +1112,13 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
  *
  * 合并规则：attrs 建模过的元素顶替 rawPpr 里的同名元素——spacing/ind 内部还要
  * 逐个属性合并（见 `mergedElementXml`），因为源文档里可能有我们没建模的写法
- * （`w:*Chars`、`w:*Lines`、`w:start`/`w:end`）。其余元素原样保留并按 CT_PPr
+ * （`w:*Chars`、`w:*Lines`、`w:beforeLines`）。其余元素原样保留并按 CT_PPr
  * 顺序排回该在的位置，源文档带 `<w:rPr>`（段落标记的字符属性，Word 写得非常多）
  * 时不会再被挤到 spacing 前面。
  *
  * @param a 段落 attrs。
- * @param opts.pStyle 段落要套用的样式 id（标题、引用）；源文档已有 pStyle 时以源文档为准。
+ * @param opts.pStyle 从节点类型推断的样式 id（Heading1 / Quote / ListNumber）；
+ *   attrs 建模了具名样式、或源文档自己带 pStyle 时都不用它。
  * @param opts.numPr 列表段落重新分组后由我们给出的 numPr。
  * @param opts.rawPpr 源文档的 pPr 内部 XML。
  * @returns 完整 pPr 字符串；段落没有任何格式属性时返回空串。
@@ -1124,24 +1129,46 @@ function paragraphPprXml(
 ): string {
   const modeled = modeledPprParts(a, opts.rawPpr);
   const covered = new Set(modeled.map((part) => part.name));
-  const rawParts = (opts.rawPpr ? parseFragment(opts.rawPpr) : [])
+  const rawEls = opts.rawPpr ? parseFragment(opts.rawPpr) : [];
+  const rawStyle = rawEls.find((el) => el.name === "w:pStyle");
+  // pStyle 只由 pStylePart 决定，别让它从两个来源各进来一次——
+  // 同一份 pPr 里出现两个 w:pStyle 时 Word 取第一个，套哪个样式变得不可预测。
+  const rawParts = rawEls
     .map((el) => ({ name: el.name, xml: serialize(el) }))
-    .filter((part) => !covered.has(part.name));
-  // 样式引用以源文档为准：同一份 pPr 里出现两个 w:pStyle 时 Word 取第一个，
-  // 套用哪个样式就会变得不可预测，所以原文有 pStyle 就不再补我们推断的那个。
-  const keepOwnStyle =
-    !!opts.pStyle && !rawParts.some((part) => part.name === "w:pStyle");
+    .filter((part) => !covered.has(part.name) && part.name !== "w:pStyle");
   const parts: PprPart[] = [];
-  if (keepOwnStyle) {
-    parts.push({
-      name: "w:pStyle",
-      xml: `<w:pStyle w:val="${opts.pStyle}"/>`,
-    });
-  }
+  const style = pStylePart(a.styleId, rawStyle, opts.pStyle);
+  if (style) parts.push(style);
   parts.push(...rawParts);
   if (opts.numPr) parts.push({ name: "w:numPr", xml: opts.numPr });
   parts.push(...modeled);
   return pprFromParts(parts);
+}
+
+/**
+ * 决定这段落写出的 `<w:pStyle>`。
+ *
+ * @param styleId attrs 里的具名样式：字符串=套用它（用户在样式窗格里选的）；
+ *   null=用户"清除样式"，源文档那条必须删；undefined=没建模过，保留源文档写法。
+ * @param rawEl 源文档 pPr 里原来的 `w:pStyle` 元素，可能没有。
+ * @param inferred 从节点类型推断的 id，只在两侧都没有时用。
+ * @returns 要写出的 pPr 子元素；不该出现时返回 null。id 与源文档一致时按原元素
+ *   写回，避免一次无关的保存改动样式引用的写法。
+ */
+function pStylePart(
+  styleId: string | null | undefined,
+  rawEl: Element | undefined,
+  inferred?: string,
+): PprPart | null {
+  if (styleId === null) return null;
+  if (typeof styleId === "string") {
+    if (rawEl && String(rawEl.attributes?.["w:val"] ?? "") === styleId) {
+      return { name: "w:pStyle", xml: serialize(rawEl) };
+    }
+    return { name: "w:pStyle", xml: `<w:pStyle w:val="${escapeAttr(styleId)}"/>` };
+  }
+  if (rawEl) return { name: "w:pStyle", xml: serialize(rawEl) };
+  return inferred ? { name: "w:pStyle", xml: `<w:pStyle w:val="${inferred}"/>` } : null;
 }
 
 /** textAlign（left/center/right/justify）→ `<w:jc>`；两端对齐在 OOXML 里叫 both。 */

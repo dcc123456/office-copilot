@@ -54,6 +54,13 @@ export interface PMTextNode {
  */
 export type PPrAttrs = {
   textAlign?: string;
+  /**
+   * 这一段套用的具名样式 id（`w:pStyle`/@w:val），原样存 Word 写的那个值，
+   * 不做名称换算——styles.xml 里 id 与名称的对应关系只有源文档知道。
+   * undefined = 这一段没建模过样式（保留源文档里的 pStyle）；
+   * null = 用户在编辑器里主动"清除样式"，源文档那条 pStyle 必须删掉。
+   */
+  styleId?: string | null;
   /** 段前分页（w:pageBreakBefore）。 */
   pageBreakBefore?: boolean;
   /** 与下段同页（w:keepNext），Word 勾选项"段与下段同页"。 */

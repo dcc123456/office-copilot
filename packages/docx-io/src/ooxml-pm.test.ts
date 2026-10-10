@@ -852,6 +852,71 @@ describe("段落开关与大纲级别（Word 段落对话框的其余字段）",
   });
 });
 
+describe("具名样式引用（w:pStyle 走 attrs.styleId）", () => {
+  const WNS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+  const PARA = (pPr: string) =>
+    bodyXml(`<w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>x</w:t></w:r></w:p>`);
+  /** 直接构造编辑器状态的段落，用于测"用户刚刚改了样式"的写侧。 */
+  const paraDoc = (attrs: PPrAttrs): PMDoc => ({
+    type: "doc",
+    content: [
+      { type: "paragraph", attrs, content: [{ type: "text", text: "x", marks: [] }] },
+    ],
+  });
+  const styleRefs = (xml: string): string[] => xml.match(/<w:pStyle\b[^>]*>/g) ?? [];
+
+  it("源文档的样式 id 进 attrs，写回只有一条 pStyle 且二次保存不变", () => {
+    const pm = ooxmlToPm(PARA(`<w:pStyle w:val="af3"/><w:ind w:left="300"/>`));
+    expect(pm.content?.[0]).toMatchObject({ type: "paragraph", attrs: { styleId: "af3" } });
+    const out = pmToOoxml(pm);
+    expect(styleRefs(out)).toEqual([`<w:pStyle w:val="af3"/>`]);
+    expect(out).toContain('w:left="300"');
+    expect(pmToOoxml(ooxmlToPm(out))).toBe(out);
+  });
+
+  it("编辑器里换了样式时，新的 id 顶掉源文档那条而不是并排两条", () => {
+    // 同一份 pPr 里出现两个 w:pStyle 时 Word 取第一个，套哪个样式变得不可预测。
+    const imported = ooxmlToPm(PARA(`<w:pStyle w:val="af3"/><w:ind w:left="300"/>`));
+    const attrs = { ...(imported.content![0]!.attrs as PPrAttrs), styleId: "af9" };
+    const out = pmToOoxml(paraDoc(attrs));
+    expect(styleRefs(out)).toEqual([`<w:pStyle w:val="af9"/>`]);
+    expect(out).not.toContain("af3");
+    expect(out).toContain('w:left="300"');
+  });
+
+  it("styleId 为 null 是「清除样式」：引用删掉，其余段落属性一个都不动", () => {
+    const out = pmToOoxml(
+      paraDoc({ styleId: null, rawPpr: `<w:pStyle w:val="af3"/><w:ind w:left="300"/>` }),
+    );
+    expect(styleRefs(out)).toEqual([]);
+    expect(out).toContain('w:left="300"');
+  });
+
+  it("没建模样式的段落不写 pStyle，编辑器新建的标题仍写推断的 Heading 级别", () => {
+    expect(styleRefs(pmToOoxml(paraDoc({})))).toEqual([]);
+    const fresh: PMDoc = {
+      type: "doc",
+      content: [
+        {
+          type: "heading",
+          attrs: { level: 2 },
+          content: [{ type: "text", text: "小标题", marks: [] }],
+        },
+      ],
+    };
+    expect(styleRefs(pmToOoxml(fresh))).toEqual([`<w:pStyle w:val="Heading2"/>`]);
+  });
+
+  it("WPS 那种数字 id 的标题不再被换成文档里不存在的 Heading1", () => {
+    const styles = StyleMap.fromXml(
+      `<w:styles xmlns:w="${WNS}"><w:style w:type="paragraph" w:styleId="2"><w:name w:val="heading 1"/></w:style></w:styles>`,
+    );
+    const pm = ooxmlToPm(PARA(`<w:pStyle w:val="2"/>`), undefined, styles);
+    expect(pm.content?.[0]).toMatchObject({ type: "heading", attrs: { level: 1, styleId: "2" } });
+    expect(styleRefs(pmToOoxml(pm))).toEqual([`<w:pStyle w:val="2"/>`]);
+  });
+});
+
 describe("DocxFile toProseMirror / replaceProseMirror", () => {
   it("round-trips a minimal docx via zip", async () => {
     const zip = new JSZip();
