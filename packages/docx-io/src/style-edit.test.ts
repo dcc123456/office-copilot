@@ -69,6 +69,31 @@ describe("stylePropertiesXml", () => {
     expect(rPrInner).toBe('<w:b/><w:sz w:val="18"/><w:szCs w:val="18"/><w:lang w:val="zh-CN"/>');
   });
 
+  it("抓来的制表位顶替样式原有的那条，顺序仍按 CT_PPr", () => {
+    // 样式定义与段落共用同一批生成器，所以 w:tabs 的换算这里只有一份（§2.1）。
+    const { pPrInner } = stylePropertiesXml(
+      {
+        paragraph: {
+          tabStops: [{ positionPt: 415.3, alignment: "right", leader: "dot" }],
+          spacingBefore: 6,
+        },
+        marks: [],
+      },
+      { pPrInner: '<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs>' },
+    );
+    expect(pPrInner).toBe(
+      '<w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8306"/></w:tabs><w:spacing w:before="120"/>',
+    );
+  });
+
+  it("选区是「全部清除」时样式里那条 w:tabs 一起删掉，也不留空的 w:tabs", () => {
+    const { pPrInner } = stylePropertiesXml(
+      { paragraph: { tabStops: [] }, marks: [] },
+      { pPrInner: '<w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs><w:jc w:val="center"/>' },
+    );
+    expect(pPrInner).toBe('<w:jc w:val="center"/>');
+  });
+
   it("attrs 里的 styleId / rawPpr 不会被写进样式定义", () => {
     const { pPrInner } = stylePropertiesXml({
       paragraph: { styleId: "2", rawPpr: '<w:numPr><w:numId w:val="5"/></w:numPr>' },

@@ -150,6 +150,62 @@ describe("captureStyleFromSelection", () => {
     expect(result.edit).toEqual({ paragraph: { indent: 18 }, marks: [] });
   });
 
+  it("两段一样的制表位清单抓得出来，不会被当成冲突", () => {
+    // 制表位是对象数组，PM 里每个节点各持一份——按引用比的话"完全相同"也是冲突。
+    const stop = { positionPt: 56.7, alignment: "right", leader: "dot" };
+    const editor = harness(
+      [
+        paragraph({ tabStops: [stop] }, [{ type: "text", text: "甲" }]),
+        paragraph({ tabStops: [{ ...stop }] }, [{ type: "text", text: "乙" }]),
+      ],
+      wholeDoc,
+    );
+    const result = captureStyleFromSelection(editor);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.edit.paragraph.tabStops).toEqual([stop]);
+  });
+
+  it("清单不一样就拒绝，报的属性是 tabStops", () => {
+    const editor = harness(
+      [
+        paragraph({ tabStops: [{ positionPt: 56.7, alignment: "right", leader: "dot" }] }, [{ type: "text", text: "甲" }]),
+        paragraph({ tabStops: [{ positionPt: 415.3, alignment: "center" }] }, [{ type: "text", text: "乙" }]),
+      ],
+      wholeDoc,
+    );
+    expect(captureStyleFromSelection(editor)).toEqual({
+      ok: false,
+      code: "mixed-paragraph-format",
+      detail: "tabStops",
+    });
+  });
+
+  it("「全部清除」那一段也能抓：空清单原样交给样式定义", () => {
+    // 空清单是有意义的（样式里也不该留着制表位），不是"没写过"。
+    const editor = harness([paragraph({ tabStops: [] }, [{ type: "text", text: "甲" }])], (doc) =>
+      blockRange(doc, 0),
+    );
+    const result = captureStyleFromSelection(editor);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.edit.paragraph).toEqual({ tabStops: [] });
+  });
+
+  it("没建模过制表位的段落不参与 tabStops 的取值", () => {
+    const editor = harness(
+      [
+        paragraph({ tabStops: [{ positionPt: 56.7, alignment: "right" }] }, [{ type: "text", text: "甲" }]),
+        paragraph({}, [{ type: "text", text: "乙" }]),
+      ],
+      wholeDoc,
+    );
+    const result = captureStyleFromSelection(editor);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.edit.paragraph.tabStops).toEqual([{ positionPt: 56.7, alignment: "right" }]);
+  });
+
   it("抓下标要带档位：只留类型名会把它写成上标", () => {
     const editor = harness(
       [

@@ -30,6 +30,7 @@ const CAPTURABLE_PARAGRAPH_KEYS = [
   "indentRight",
   "indentFirst",
   "lineHeight",
+  "tabStops",
 ] as const satisfies readonly (keyof PPrAttrs)[];
 
 /** 无属性的开关标记；`link` 不在这里——超链接是内容，Word 也不把它长在段落样式上。 */
@@ -174,6 +175,20 @@ function collectMarks(editor: Editor): { marks?: PMMark[]; conflict?: string } {
 }
 
 /**
+ * 两处段落属性的取值算不算同一个。
+ *
+ * 标量直接比值；制表位是对象数组，PM 每个节点各持一份，按引用比会把两条一模一样
+ * 的清单判成冲突，所以数组按内容比。
+ *
+ * @param first 已抓到的值。
+ * @param second 当前这个块在同一键上的值。
+ * @returns 是否一致（不一致就要拒绝并报告是哪个属性）。
+ */
+function sameFormatValue(first: unknown, second: unknown): boolean {
+  return first === second || JSON.stringify(first) === JSON.stringify(second);
+}
+
+/**
  * 从选区抓出一份可以写成样式定义的格式。
  *
  * @param editor 装配了 `EDITOR_EXTENSIONS` 的编辑器实例；选区决定作用范围。
@@ -198,7 +213,7 @@ export function captureStyleFromSelection(editor: Editor): CaptureResult {
   const merged: Record<string, unknown> = {};
   for (const node of blocks) {
     for (const [key, value] of Object.entries(paragraphFormatOf(node))) {
-      if (merged[key] !== undefined && merged[key] !== value) {
+      if (merged[key] !== undefined && !sameFormatValue(merged[key], value)) {
         return { ok: false, code: "mixed-paragraph-format", detail: key };
       }
       merged[key] = value;
