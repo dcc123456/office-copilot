@@ -493,8 +493,9 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
   补法是把 `rawPpr` 注册成段落的非渲染全局属性，但它会同时改变排名 1 / 5 / 7 各条的透传结局，
   按 §1.4 单独成片，不夹进修订的提交里。
   **（这片已经做掉：④ 的 `d30939a` 把 `rawPpr` 注册成隐式段落属性，见 §7 的 ④ 判据与 §8.8。
-  段落标记自己的 `w:ins`/`w:del` 现在也跟着 rawPpr 活过编辑器，但那条场景没有单测覆盖，
-  等 ⑤⑥ 再补。）**
+  段落标记自己的 `w:ins`/`w:del` 现在也跟着 rawPpr 活过编辑器，但那条场景没有单测覆盖：
+  ⑤ 是侧栏、碰不到段落标记，⑥ 的开关明确不记结构步骤（见下面 ⑥ 的判据），所以这条要等真给
+  段落标记建模修订时一起补。）**
 - **修订建模成标记而不是节点**：一次修订只覆盖段落里的一段文字，文字必须留在原位；做成 `ins`/`del`
   节点会把段落劈开，还得重新定义跨块语义。标记形状 `{kind, id, author, date}` 进 `PMMark` 联合（§5.3），
   四者都 `rendered: false`——归属信息不是 DOM 契约，靠 `editor.getJSON()` 落盘。
@@ -539,6 +540,48 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
   （`emptyPmDoc` 从 docx-io 包口出去、`bodyPreview` 加在 `docBlocks.ts` 里给脚注与批注两个窗格共用），
   不再各写一份（§3.1/§3.2）。
 
+⑥ 的判据（修订开关，实现时定下来的）：
+
+- **拦截点选 `appendTransaction` 而不是输入通道**：Word 的"修订"对所有编辑通道生效——打字、退格、删除、
+  粘贴、拖拽、格式化命令。在 `handleTextInput` 上拦要每个通道写一遍，而且**拿不到被删的文字**（输入处理器
+  只看到新字）。`appendTransaction` 看到的是已经算好的 steps，删掉的内容从 `tr.docs[i]`（该步骤**之前**那份
+  文档，prosemirror-transform 的 `Transform` 逐步存）里取，一份实现覆盖全部通道。
+- **必须跳过历史事务**：撤销/重做本身不是"一次新修订"，否则按一次 ⌘Z 就多出一条 `w:ins`。判据取
+  prosemirror-history@1.5.0 的 `isHistoryTransaction`——它是**单参数**版本，实质就是 `tr.getMeta(historyKey) != null`，
+  这里直接读 meta，不依赖那个导出（社区实现里踩过两参签名的版本，`apply(tr, old, new)` 那套是旧版）。
+- **只认 `ReplaceStep`，格式与结构改动明确不记**：加/摘标记（改粗体、改字号）在 Word 里是 `w:rPrChange`、
+  回车与变列表改的是段落结构（段落标记的 `w:ins`/`w:del` 在 `w:pPr/w:rPr` 里），这两类本仓都没有建模，
+  所以整批不记。**宁可少记，不许记错**——记成 `w:ins`/`w:del` 的语义是"这段文字是新来的/被删的"，
+  把格式改动写成文字修订会让用户在 Word 里拒绝一次修订时丢掉正文。
+- **坐标要按步骤映射，jobs 按位置降序落地**：每一步的区间经 `new Mapping(maps.slice(index + 1))` 才落到
+  最终文档上（后面的步骤会把坐标推走）；同位置先做"还原被删文字"再做"加插入标记"，
+  落出来才是 Word 的 `<w:del>旧</w:del><w:ins>新</w:ins>` 顺序。
+- **开关命令只 `setMeta`，绝不调 `dispatch`**（实测 `@tiptap/core/dist/index.js` 的 `buildProps` 与
+  `CommandManager.commands`）：命令拿到的 `dispatch` 是 `() => undefined`，只用来告诉命令"这次会落地"，
+  真正派发的是 CommandManager 在命令返回 true 以后的 `view.dispatch(tr)`。自己再调一次就是把同一份事务
+  派两遍。**这条也解释了手搓测试 harness 的写法**：断言前必须自己 `dispatch(tr)`。
+- **`w:author` 留空是可以的，不复用批注那个兜底名**：`CT_TrackChange` 的 `w:author`/`w:date` 是**可选**属性
+  （`CT_Comment` 才把 `w:author` 收成必填，见上面 `CT_Comment` 那条），所以设置里没填署名就写空，
+  不像批注那样兜底成 `Office Copilot`——给一条修订编个不存在的作者，比留空更糟。
+- **连打五个字是一条 `w:ins` 而不是五条**：ProseMirror 会把标记相同的相邻文字节点合并，同一批 `revision`
+  attrs 落进同一个 run，写回就是一个 `<w:ins w:id="1">`，与 Word 的行为一致。
+- **一次撤销覆盖"用户编辑 + 我们补的标记"**：`appendTransaction` 挂出来的事务带 `appendedTransaction` meta，
+  prosemirror-history 据此把 `newGroup` 判为 false，两步落进同一个撤销组；撤销事务自己带 `historyKey`，
+  又被上面第一条挡掉，所以 ⌘Z 之后既不多出一条修订、也不会留下半条。
+- **光标只在"还原被删文字"造成位移时重摆**：`TextSelection.near` 只在有 restore job 且其位置不晚于光标时才发，
+  纯打字的场合不动光标——输入法组合期间挪光标会打断候选窗。
+- **记不了的三类就地放弃**：原子节点（图片、引用点）上没有地方放标记，删图片记不出 `w:del`；选区跨段的删除
+  整批不记（`w:del` 是 run 级的，跨块要拆成段落标记修订，见上面"不记结构改动"）；别的插件在同一个事务里
+  append 出来的 `ReplaceStep` 会被当成用户编辑记下来——目前 `EDITOR_EXTENSIONS` 里没有这种插件，
+  真出现时按 `tr.getMeta` 白名单挡，不再加一层通用判定。
+- **编号复用 `nextAnnotationId`（docx-io）**：修订与批注/脚注同一套"命名空间内最大值 +1"，`w:id` 从 1 起，
+  不新开计数器（§3.2；四处并五处的整理在 `d281eb3` 单独成片）。标记形状直接复用 ③ 的 `revision`
+  （`kind`/`id`/`author`/`date`），所以 §5.3 不需要新的 docx-io 往返用例——写侧形状与 ③ 完全同一条路径。
+- **换文档前必须关开关**（`App.tsx` 的 `stopTracking()`）：开关是插件状态、不随文档走，开着时
+  `setContent` 会把整份新文档的每个字都记成"本次插入"。新建 / 打开 / 拖入 / 最近文件四条路径都调它。
+- **`Fragment` 不可迭代**：prosemirror-model 的 `Fragment` 没有 `Symbol.iterator`，遍历 slice 内容只能
+  `childCount` + `child(i)`（第一版直接 `[...slice.content]` 报 `not iterable`）。
+
 提交切分（实现顺序，逐条落地后回填提交号）：
 
 | # | 内容 | 提交 |
@@ -549,7 +592,7 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 | ④a | desktop：标记注册进 `EDITOR_EXTENSIONS`（插入下划线 / 删除删除线 + 作者与时间）+ 接受 / 拒绝命令 | `bee11e4` |
 | ④b | desktop：接受 / 拒绝的右键菜单入口 | `ced2499` |
 | ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | `3a0a771` `9dafc61` `1588561` `aa589be` |
-| ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
+| ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del`；前置整理 `d281eb3`（四处 max+1 编号器收进 `nextAnnotationId`） | `d281eb3` `27169f2` |
 
 ③④a 的实测（同一套 CDP 探针，独立 `--user-data-dir`）：一份含一次插入（内部两个 run，一个带 `w:b`）
 与两处删除的 `.docx` 让 app 打开后，编辑器里 4 个 `span[data-revision]` 全在位——
@@ -575,6 +618,22 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 点保存后 `word/comments.xml` **逐字节等于原部件**，正文里 6 个锚点元素重写回来，`[Content_Types].xml`
 补上 `comments+xml` 登记。用 Word / WPS 打开验证：本机没装，**BLOCKED**。
 
+
+⑥ 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP，`tmp/track-app-probe.mjs`）：打开一份
+**没有任何修订**的两段 `.docx`，设置里署名写"修订者甲"。点工具栏「修订」后按钮 `active` 亮起；在第一段句末
+用真实输入通道打五个字，编辑器里出现 1 个 `span[data-revision="ins"]`，`title` 写着
+"插入：修订者甲（2026-10-10T23:01:15Z）"；拖选第二段里的"几个字"按 Backspace，出现第二个芯片
+`kind="del"`，**被删的字仍在树里**（`TEXT_IN_EDITOR` 两段文字一字不少）。存盘后 `document.xml` 里
+`<w:ins w:id="1" w:author="修订者甲" w:date="…"><w:r><w:t>补了五个字</w:t></w:r></w:ins>` 与
+`<w:del w:id="2" …><w:r><w:delText>几个字</w:delText></w:r></w:del>` 各一条——连打五个字只有**一个** id，
+删除走的是 `w:delText`。⌘Z 一次：del 芯片消失、文字回来、ins 那条不受牵连（撤销没被记成新修订）。
+再点按钮关掉（`active` 归 false）打六个字，芯片数量不变、二次存盘 `w:id` 只有 `1` 那一条，
+新打的字是**裸 `<w:t>`**（`SECOND_PARA_PLAIN` 为真）。右击落在插入的字上，菜单里"接受修订/拒绝修订"都可用，
+点接受后芯片清空、文字留着，三次存盘后 `<w:ins>`/`<w:del>` 一条不剩、正文四句完整。
+截图 `tmp/track-changes.png`：插入是绿色下划线、删除是红色删除线。用 Word / WPS 打开验证：本机没装，**BLOCKED**。
+
+⑥ 之后仍然没建模的（都是上面判据里点明的取舍，不是漏项）：格式修订（`w:rPrChange`/`w:pPrChange`）、
+段落标记修订（回车/合并段落）、图片等原子节点的删除、跨段删除、移动类修订（`w:moveFrom`/`w:moveTo`）。
 
 ## 五、排名 5：制表位 + 前导符
 
@@ -1150,6 +1209,51 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   ⑤ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定）。
 - 提交：`3a0a771` + `9dafc61` + `1588561` + `aa589be` 已推送，
   `git ls-remote origin main` = `aa589be6081797196d42189391e86bb4d3123213`。
+
+### 8.10 排名 4 ⑥（修订开关）验收记录（`d281eb3` `27169f2`）
+
+- 往返用例（§5.3）：**不新增** docx-io 用例——开关产出的就是 ③ 那条 `revision` 标记，
+  写回走 `<w:ins>`/`<w:del>`/`w:delText` 的既有路径（③ 的往返用例覆盖）。⑥ 的落盘形状改在
+  桌面侧断言：`TrackChanges.test.ts` 末条用真实 `EDITOR_EXTENSIONS` schema 建文档、
+  `pmToOoxml(docJSON)` 里断言 `<w:ins`/`<w:del`/`<w:delText` 与 `w:author="张三"` 都在。
+- 引擎层单测：`apps/desktop/src/editor/extensions/TrackChanges.test.ts`（新）14 条——开关关着时
+  什么都不记；开着打字记 `ins` 并带上署名与时间；连打三个字符只有一条 run、一个 `w:id="1"`；
+  删除走"还原原节点 + 挂 `del`"并把光标停在还原段之后；选区替换落成 `del(id=2)+ins(id=1)` 的
+  Word 顺序；刚插入的字再删掉自我抵消（不留 `ins` 也不留 `del`）；别人的 `ins` 被我们删掉时
+  外层套 `del`；撤销事务不记成新修订；改粗体不记；回车合并段落不记；关掉以后再打字不记；
+  文档里已有 `w:id="5"` 时新 id 取 6；署名为空白时 `w:author` 留 `null`；以及上面那条 `pmToOoxml`。
+  全部用 `getSchema(EDITOR_EXTENSIONS)` + `EditorState.create({plugins:[history(), trackChangesPlugin()]})`
+  的真 schema harness，不是临时扩展数组（§5.3）。
+- 局部格式：不涉及——开关只加/摘 `revision` 标记，不碰 `w:rPr`，也没有整段覆盖字符样式的路径（§2.3）。
+  格式改动**故意不记**（`w:rPrChange` 未建模），所以不存在"把别人的红色字拍平"的可能。
+- 撤销：一次 ⌘Z 撤销的是"编辑 + 标记"这一整组（`appendedTransaction` meta 让 history 不开新组），
+  撤销事务被 `historyKey` 挡掉不会二次记账；没有新增 CoreOp，保存仍走 `.tmp` → `rename`（§2.4）。
+  `userData/modlog` 与这条无关（它记的是 AI/格式 op，§上面 8.9 那条同样适用）。
+- 单位与颜色：不涉及（不产生长度、颜色属性，§2.1/§2.2 无新换算点；`w:id` 保持字符串不做数字转换）。
+- 复用（§3.1/§3.2）：`revision` 标记直接复用 ③/④a 那一份（含呈现与接受/拒绝命令，开关与它们天然闭环）；
+  编号复用 docx-io 的 `nextAnnotationId`——为此先把四处并列的 max+1 计数器收成一处（`d281eb3`，
+  按 §1.4 单独成片，不夹进功能提交）。无新增 schema 元素、无新增依赖、无第二套编号器。
+- 类型 + 测试：`pnpm build` EXIT=0（`grep -c "error TS"` = 0）；`pnpm test` EXIT=0，逐包 docx-io **274**
+  （7 个文件）/ desktop **326**（29 个文件，+14 全在 `TrackChanges.test.ts`）/ word-client 8 /
+  word-tools 6 / server 2；`apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- UI：真实 app 探针（`tmp/track-app-probe.mjs`，独立 `--user-data-dir` + CDP，一份**没有**修订的
+  `.docx`），实跑读回的数记在 §四 的"⑥ 的实测"那段：按钮 `active` 双向切换、`ins`/`del` 芯片的
+  `title` 带署名与时间、存盘后 `<w:ins w:id="1" …>` 与 `<w:del w:id="2" …><w:delText>` 各一条、
+  ⌘Z 以后只剩 `ins` 且文字回来、关掉开关再打字不记（二次存盘 `IDS2` 仍只有 `w:id="1"`，
+  新字是裸 `<w:t>`）、右击落在插入文字上"接受修订/拒绝修订"都可用、接受以后三次存盘
+  `<w:ins>`/`<w:del>` 归零而四句正文完整。截图 `tmp/track-changes.png`。
+  探针第一次跑出来的一处**探针自身缺陷**记下来防误判：`selectInParagraph` 按节点序号取文字节点，
+  芯片把段落拆成多个文字节点之后偏移越界（`IndexSizeError: offset 12 > 10`），改成按内容找节点。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。`w:ins`/`w:del` 的包 run 形状、`CT_TrackChange`
+  的 `w:author`/`w:date` 可选性按 ECMA-376 类页与 ③ 已核对过的写出样例推断，不是本机实测。
+- 遗留（写清楚，不算本片做完）：① 格式修订（`w:rPrChange`/`w:pPrChange`）与段落标记修订（回车、
+  合并段落）不记，见 §四 ⑥ 的判据；② 原子节点（图片、引用点）上的删除记不了；③ 跨段删除整批不记；
+  ④ 移动类修订（`w:moveFrom`/`w:moveTo`）读侧仍没有分支（③ 那一片就写明了）；
+  ⑤ 开关状态不进文档也不跨会话（Word 的"修订"是文档级状态，我们的是会话级，重开文档要重新按）；
+  ⑥ 别的插件若在同一事务里 append `ReplaceStep` 会被当成用户编辑记账（当前无此插件）；
+  ⑦ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定，与 8.9 同一条）。
+- 提交：`d281eb3`（前置整理）+ `27169f2`（本片）+ 本条 docs 记录一起推送；推送后 `git ls-remote origin main`
+  与本仓 `git rev-parse HEAD` 一致才声称已推送。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
