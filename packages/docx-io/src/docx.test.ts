@@ -198,10 +198,15 @@ describe("DocxFile", () => {
    * （toProseMirror / replaceProseMirror / toBytes）→ 重开读 document.xml。
    *
    * @param paragraphs 带 pPr 的原始 <w:p> 片段。
+   * @param opts.sectPr 覆盖 body 末尾的节属性内容；默认给一个最小 A4 尺寸。
+   * @param opts.applyPageSetup 是否复刻桌面 app 的保存：把打开时读到的页面设置再
+   *   `setSectionGeometry` 回去。app 每次保存都会带上它，所以这条路径和纯 `replaceProseMirror`
+   *   是两回事——节属性重建就在这一步。
    * @returns 保存一次与保存两次后的 document.xml 文本。
    */
   async function saveTwice(
     paragraphs: string[],
+    opts: { sectPr?: string; applyPageSetup?: boolean } = {},
   ): Promise<{ once: string; twice: string }> {
     const readBody = async (bytes: Uint8Array) => {
       const zip = await JSZip.loadAsync(bytes);
@@ -210,10 +215,14 @@ describe("DocxFile", () => {
     const reopen = async (bytes: Uint8Array): Promise<Uint8Array> => {
       const docx = await DocxFile.fromBytes(bytes);
       const loaded = await docx.toProseMirror();
+      if (opts.applyPageSetup && loaded.section) docx.setSectionGeometry(loaded.section);
       await docx.replaceProseMirror(loaded.doc);
       return docx.toBytes();
     };
-    const source = await makeDocx([], { rawParagraphs: paragraphs });
+    const source = await makeDocx([], {
+      rawParagraphs: paragraphs,
+      sectPr: opts.sectPr,
+    });
     const onceBytes = await reopen(source);
     return {
       once: await readBody(onceBytes),
@@ -246,6 +255,55 @@ describe("DocxFile", () => {
     // 段落标记自己的字符属性排在最后，否则 CT_PPr 顺序不合法。
     expect(once.indexOf("<w:rPr")).toBeGreaterThan(once.indexOf("<w:spacing"));
     expect(twice).toBe(once);
+  });
+
+  it("keeps every child of sectPr when the app re-applies its page setup", async () => {
+    // 桌面 app 每次保存都会把打开时读到的页面设置 setSectionGeometry 回去（fileHandlers.saveDocx），
+    // 那条路径要重建 pgSz/pgMar——曾经把整块 sectPr 写成空串，分栏/行号/页面边框一起没了。
+    const { once, twice } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="851" w:footer="992" w:gutter="0"/>` +
+          `<w:pgBorders w:offsetFrom="page"><w:top w:val="single" w:sz="6" w:space="1" w:color="FF0000"/></w:pgBorders>` +
+          `<w:lnNumType w:countBy="1" w:distance="480"/>` +
+          `<w:cols w:space="425" w:num="2"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="312"/>`,
+      },
+    );
+    expect(once).toContain("<w:sectPr>");
+    // 建模过的两项由页面设置重写，数值必须还是自己那一份（11906 twips = 793.73px）。
+    expect(once).toContain('<w:pgSz w:w="11906" w:h="16838"/>');
+    expect(once).toContain('w:top="1440"');
+    // 没建模的一律原样留着，顺序也不许动。
+    expect(once).toContain('<w:cols w:space="425" w:num="2"/>');
+    expect(once).toContain('<w:lnNumType w:countBy="1" w:distance="480"/>');
+    expect(once).toContain('<w:docGrid w:type="lines" w:linePitch="312"/>');
+    expect(once).toContain('<w:pgBorders w:offsetFrom="page">');
+    expect(once.indexOf("<w:pgMar")).toBeLessThan(once.indexOf("<w:pgBorders"));
+    expect(once.indexOf("<w:pgBorders")).toBeLessThan(once.indexOf("<w:lnNumType"));
+    expect(once.indexOf("<w:lnNumType")).toBeLessThan(once.indexOf("<w:cols"));
+    expect(twice).toBe(once);
+  });
+
+  it("inserts w:pgMar right after w:pgSz when the source section has no margins", async () => {
+    // 少一份页边距的节属性是真实存在的（Word 会省略默认值），补的时候只能插在 pgSz 后面：
+    // CT_SectPr 的顺序里 pgMar 在 cols/docGrid 之前，插错位置 Word 判定文档结构不合法。
+    const { once } = await saveTwice(
+      [`<w:p><w:r><w:t>正文。</w:t></w:r></w:p>`],
+      {
+        applyPageSetup: true,
+        sectPr:
+          `<w:pgSz w:w="11906" w:h="16838"/>` +
+          `<w:cols w:space="425" w:num="2"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="312"/>`,
+      },
+    );
+    expect(once.indexOf("<w:pgSz")).toBeLessThan(once.indexOf("<w:pgMar"));
+    expect(once.indexOf("<w:pgMar")).toBeLessThan(once.indexOf("<w:cols"));
+    expect(once).toContain('<w:cols w:space="425" w:num="2"/>');
   });
 
   it("keeps a right tab stop with a dot leader through a real save", async () => {

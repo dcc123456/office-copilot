@@ -1098,22 +1098,24 @@ function buildSectPr(
   }
 
   const childrenArr = [...(existing.children as unknown as Element[])];
-  const replaceOrInsert = (
-    name: string,
-    el: Element,
-    atStart: boolean,
-  ): void => {
-    const i = childrenArr.findIndex((c) => c.name === name);
-    if (i >= 0) childrenArr[i] = el;
-    else if (atStart) childrenArr.unshift(el);
-    else childrenArr.push(el);
-  };
-  replaceOrInsert("w:pgSz", newPgSz, true);
-  replaceOrInsert("w:pgMar", newPgMar, false);
+  const indexOf = (name: string): number =>
+    childrenArr.findIndex((c) => c.name === name);
+  const pgSzAt = indexOf("w:pgSz");
+  if (pgSzAt >= 0) childrenArr[pgSzAt] = newPgSz;
+  else childrenArr.unshift(newPgSz);
+  // pgMar 必须紧跟 pgSz（ECMA-376 的 CT_SectPr 顺序），往后追加会排到
+  // w:cols / w:pgBorders / w:docGrid 之后，Word 判定顺序不合法。
+  const pgMarAt = indexOf("w:pgMar");
+  if (pgMarAt >= 0) childrenArr[pgMarAt] = newPgMar;
+  else childrenArr.splice(indexOf("w:pgSz") + 1, 0, newPgMar);
+  // 必须显式写 `type`/`name`：`parseDocument` 出来的节点只有原型上带 `type`，
+  // 展开运算符拿不到，`serialize` 认它不是元素就返回空串——整块 sectPr 静默消失。
   return {
-    ...existing,
-    children: childrenArr as unknown as Element["children"],
-  } as Element;
+    type: "element",
+    name: "w:sectPr",
+    attributes: existing.attributes ?? {},
+    children: childrenArr,
+  } as unknown as Element;
 }
 
 const PLACEHOLDER_PNG =
