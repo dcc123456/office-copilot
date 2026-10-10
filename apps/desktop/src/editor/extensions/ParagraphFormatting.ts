@@ -1,6 +1,6 @@
 import { Extension, type CommandProps } from "@tiptap/core";
 import type { Node as PMNode, NodeType } from "@tiptap/pm/model";
-import type { TabStop } from "@office-copilot/docx-io";
+import type { DropCap, TabStop } from "@office-copilot/docx-io";
 
 /**
  * Adds paragraph/heading formatting commands and global attributes:
@@ -12,6 +12,8 @@ import type { TabStop } from "@office-copilot/docx-io";
  *   - outlineLevel (raw `w:outlineLvl`，0–8 = 一级～八级，9 = 正文文本)
  *   - styleId (段落套的具名样式 id，即 `<w:pStyle>` 的原值)
  *   - tabStops (`<w:tabs>` 的制表位清单，位置是 pt)
+ *   - dropCap (首字下沉，`<w:pPr><w:framePr>` 的 `w:dropCap` + `w:lines`)
+ *   - rawPpr (源文档 `w:pPr` 里没建模的部分，跟着属性走但不进 DOM)
  *
  * These are surfaced to the user via ParagraphPopover and round-tripped
  * by docx-io: the OOXML converter emits <w:spacing w:before/after=...
@@ -41,6 +43,11 @@ interface ParagraphFormatAttrs {
    * 缺失 = 这一段没建模过，导出沿用源文档写法。
    */
   tabStops?: TabStop[];
+  /**
+   * 首字下沉（`<w:framePr>`）。null = 用户显式选了"无"，undefined = 这一段没建模过，
+   * 默认值只能是后者，否则导入文档带着的 `w:framePr` 会被当成"关掉"而改掉。
+   */
+  dropCap?: DropCap | null;
 }
 
 declare module "@tiptap/core" {
@@ -257,6 +264,34 @@ export const ParagraphFormatting = Extension.create({
                 ? { "data-tab-stops": JSON.stringify(attrs.tabStops) }
                 : {},
           },
+          rawPpr: {
+            // 源文档 `w:pPr` 里没被建模的那半截 XML（`w:framePr` 的边距、`w:pBdr`、段内分节符…）。
+            // docx-io 的合并写回要靠它才不会被编辑器洗掉，所以它必须能待在段落属性里；
+            // 反过来它绝不进 DOM——HTML 是给用户看的，塞一段 OOXML 会让粘贴带出垃圾。
+            // parseHTML 恒为 undefined 正是这个意思：HTML 里没有原文可复原。
+            default: undefined,
+            parseHTML: () => undefined,
+            renderHTML: () => ({}),
+          },
+          dropCap: {
+            // 还是同一条理由：默认必须是 undefined，docx-io 的 null 是"用户点了无"。
+            default: undefined,
+            parseHTML: (el) =>
+              parseDropCap((el as HTMLElement).getAttribute("data-drop-cap")),
+            renderHTML: (attrs) => {
+              const cap = attrs.dropCap as DropCap | null | undefined;
+              if (cap === undefined) return {};
+              // 关掉的不挂类：`.oc-drop-cap::first-letter` 有缺省行数，留着类首字又会被撑大。
+              if (cap === null) return { "data-drop-cap": "" };
+              return {
+                class: "oc-drop-cap",
+                "data-drop-cap": JSON.stringify(cap),
+                // 行数走 CSS 变量：`initial-letter` 不继承也不能写行内，只有变量能传进
+                // 那条 ::first-letter 规则（见 styles/dropCap.css）。
+                style: `--oc-drop-cap: ${dropCapInitialLetter(cap)}`,
+              };
+            },
+          },
         },
       },
     ];
@@ -445,6 +480,45 @@ function parseTabStops(raw: string | null): TabStop[] | undefined {
     );
   };
   return parsed.every(isStop) ? (parsed as TabStop[]) : undefined;
+}
+
+/** Word「首字下沉」没给行数时的缺省，和它对话框里显示的那个数一致。 */
+export const DEFAULT_DROP_CAP_LINES = 3;
+
+/**
+ * 把首字下沉翻成 `initial-letter` 的取值。
+ *
+ * @param cap 位置 + 行数；`lines` 缺失（源文档没写 `w:lines`）时按 Word 的 3 行显示。
+ * @returns CSS 值串：`drop`（下沉）是行数本身，`margin`（首字突出到页边距外）是
+ *   `"行数 1"`——跨那么高但只下沉一行，字就悬在正文之上。Chromium 128 实测负值写法不支持。
+ */
+export function dropCapInitialLetter(cap: DropCap): string {
+  const lines = cap.lines ?? DEFAULT_DROP_CAP_LINES;
+  return cap.position === "margin" ? `${lines} 1` : String(lines);
+}
+
+/**
+ * 读 HTML 上的首字下沉（`data-drop-cap`，我们自己的 renderHTML 写的 JSON）。
+ *
+ * @param raw 属性值；元素上没有这个属性时是 null。
+ * @returns 位置 + 行数；空串是 null（用户显式选了"无"），读不出形状时返回 undefined，
+ *   含义是"这一段没建模过首字下沉"，导出因此原样透传源文档的 `w:framePr`。
+ */
+function parseDropCap(raw: string | null): DropCap | null | undefined {
+  if (raw === null) return undefined;
+  if (raw === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const { position, lines } = (parsed ?? {}) as Partial<DropCap>;
+  if (position !== "drop" && position !== "margin") return undefined;
+  const cap: DropCap = { position };
+  // 行数只认正整数：docx-io 的 `w:lines` 就是这个形状，别的写法当作没建模过。
+  if (typeof lines === "number" && Number.isInteger(lines) && lines >= 1) cap.lines = lines;
+  return cap;
 }
 
 /**

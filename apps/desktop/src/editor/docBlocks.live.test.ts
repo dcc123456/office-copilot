@@ -345,6 +345,8 @@ describe("段落对话框补齐的字段（真实 schema）", () => {
     // tabStops 同一条理由只能是 undefined：[] 在 docx-io 里是"制表位全部清除"，
     // 拿它当默认值会把导入文档每个段落的 w:tabs 都删掉。
     expect(p.attrs.tabStops).toBeUndefined();
+    // dropCap 也一样：null 是"用户点了无"，默认成它会把源文档的 w:framePr 全删。
+    expect(p.attrs.dropCap).toBeUndefined();
   });
 
   it("制表位清单活过 doc JSON 往返，位置仍是 pt", () => {
@@ -417,6 +419,89 @@ describe("制表位命令（真实 schema）", () => {
       runFormatCommand(editor, "setTabStop", [rightDot], ["签名行"], undefined, "cursor"),
     ).toBe(true);
     expect(editor.state.doc.child(0).attrs.tabStops).toEqual([rightDot]);
+  });
+});
+
+describe("首字下沉 dropCap（真实 schema 与 docx 往返）", () => {
+  /** Word 写首字下沉的形状：`w:pPr/w:framePr` 带 `w:dropCap` 与 `w:lines`。 */
+  const dropCapDoc = (pPr: string) =>
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:body><w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>正文</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`;
+
+  it("有值 / 显式关掉 / 没建模过三种状态都活过 doc JSON 往返", () => {
+    const applied = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: { dropCap: { position: "drop", lines: 3 } },
+      content: [text("下沉段")],
+    })!;
+    expect(applied.attrs.dropCap).toEqual({ position: "drop", lines: 3 });
+    expect(() => schema.nodeFromJSON(applied.toJSON()).check()).not.toThrow();
+
+    const cleared = schema.nodeFromJSON({
+      type: "paragraph",
+      attrs: { dropCap: null },
+      content: [text("原来下沉")],
+    })!;
+    // null 必须真的留在 JSON 里：丢了它，"关掉下沉"会被读成"没建模过"而把框架又写回去。
+    expect(JSON.stringify(cleared.toJSON())).toContain('"dropCap":null');
+
+    const untouched = schema.nodeFromJSON({ type: "paragraph", content: [text("普通段")] })!;
+    expect(untouched.attrs.dropCap).toBeUndefined();
+  });
+
+  it("源文档的下沉进真实 schema，一个没动过的段落写回还是那一句", () => {
+    const editor = harness(ooxmlToPm(dropCapDoc(`<w:framePr w:dropCap="drop" w:lines="3"/>`)).content);
+    expect(editor.state.doc.child(0).attrs.dropCap).toEqual({ position: "drop", lines: 3 });
+    // 默认补齐的其它段落属性不能牵连这条框架：透传回来还是同一个元素、同一对属性。
+    expect(pmToOoxml(editor.state.doc.toJSON() as PMDoc)).toContain(
+      '<w:framePr w:dropCap="drop" w:lines="3"/>',
+    );
+  });
+
+  it("面板改成突出页边距外、四行：写回换掉 dropCap 与 lines，别的属性不牵动", () => {
+    const editor = harness(
+      ooxmlToPm(
+        dropCapDoc(`<w:ind w:left="300"/><w:framePr w:dropCap="drop" w:lines="2" w:hSpace="180"/>`),
+      ).content,
+    );
+    expect(
+      runFormatCommand(
+        editor,
+        "setParagraphFormat",
+        [{ dropCap: { position: "margin", lines: 4 } }],
+        ["正文"],
+      ),
+    ).toBe(true);
+    const xml = pmToOoxml(editor.state.doc.toJSON() as PMDoc);
+    expect(xml).toContain('<w:framePr w:dropCap="margin" w:lines="4" w:hSpace="180"/>');
+    // 段落自己的缩进（Word 写在 framePr 之后）与这条框架各归各的。
+    expect(xml).toContain('<w:ind w:left="300"/>');
+  });
+
+  it("选「无」删掉整条纯下沉框架：留下空的 w:framePr 会把正文变成匿名文本框", () => {
+    const editor = harness(
+      ooxmlToPm(dropCapDoc(`<w:framePr w:dropCap="drop" w:lines="3"/>`)).content,
+    );
+    expect(
+      runFormatCommand(editor, "setParagraphFormat", [{ dropCap: null }], ["正文"]),
+    ).toBe(true);
+    expect(pmToOoxml(editor.state.doc.toJSON() as PMDoc)).not.toContain("framePr");
+  });
+
+  it("没建模的段落属性跟着 rawPpr 走过编辑器：真文本框的框架一个字都不动", () => {
+    // 这条框架没有 dropCap，docx-io 读成"没建模过"；它必须原样活着，否则经编辑器存一次
+    // 就把用户的文本框洗成正文（同一段落上的 w:pBdr 是同一个道理）。
+    const frame =
+      `<w:framePr w:w="2191" w:h="811" w:hRule="exact" w:wrap="around" ` +
+      `w:vAnchor="margin" w:hAnchor="page" w:x="2970" w:y="1" w:anchorLock="1"/>`;
+    const editor = harness(
+      ooxmlToPm(dropCapDoc(`<w:pBdr><w:bottom w:val="single" w:sz="6"/></w:pBdr>${frame}`)).content,
+    );
+    expect(editor.state.doc.child(0).attrs.dropCap).toBeUndefined();
+    const xml = pmToOoxml(editor.state.doc.toJSON() as PMDoc);
+    expect(xml).toContain(frame);
+    expect(xml).toContain('<w:pBdr><w:bottom w:val="single" w:sz="6"/></w:pBdr>');
   });
 });
 

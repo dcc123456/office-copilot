@@ -64,3 +64,11 @@ describe("打印 / PDF 导出的页面边框", () => {
     ).not.toContain('class="pgb"');
   });
 });
+
+describe("打印 / PDF 导出的首字下沉", () => {
+  it("纸上是画布那一条 ::first-letter 规则，不是第二份实现", () => {
+    const html = buildPrintHtml(base);
+    expect(html).toContain(".oc-drop-cap::first-letter");
+    expect(html).toContain("initial-letter: var(--oc-drop-cap");
+  });
+});

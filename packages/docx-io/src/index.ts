@@ -59,4 +59,6 @@ export type {
   TabStop,
   TabStopAlignment,
   TabStopLeader,
+  DropCap,
+  DropCapPosition,
 } from "./pm-schema.js";

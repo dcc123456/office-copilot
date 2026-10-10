@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { Editor } from "@tiptap/react";
 import type {
+  DropCap,
+  DropCapPosition,
   TabStop,
   TabStopAlignment,
   TabStopLeader,
@@ -14,7 +16,10 @@ import {
   alignmentLabelOf,
   stopLabelOf,
 } from "../editor/tabStopOptions.js";
-import { sameTabStopPosition } from "../editor/extensions/ParagraphFormatting.js";
+import {
+  DEFAULT_DROP_CAP_LINES,
+  sameTabStopPosition,
+} from "../editor/extensions/ParagraphFormatting.js";
 import "../styles/tabStops.css";
 
 /**
@@ -23,6 +28,7 @@ import "../styles/tabStops.css";
  *   - 缩进：左/右缩进 (pt)、「特殊格式 + 磅值」（首行缩进 / 悬挂缩进）
  *   - 间距：段前 / 段后 (pt)、行距 (single / 1.15 / 1.5 / double / fixed)
  *   - 分页与换行：孤行控制、与下段同页、段中不分页、段前分页、对齐到网格
+ *   - 首字下沉：位置（无 / 下沉 / 首字突出到页边距外）+ 行数
  *   - 制表位：清单 + 位置/对齐/前导符 + 设置/清除/全部清除（Word 的"制表位…"按钮）
  *
  * 数值经自定义命令 `setParagraphFormat` 写进当前选中的段落/标题，落在
@@ -46,6 +52,7 @@ interface Attrs {
   snapToGrid?: boolean;
   pageBreakBefore?: boolean;
   tabStops?: TabStop[];
+  dropCap?: DropCap | null;
 }
 
 /** Word 段落对话框「特殊格式」的三个取值。 */
@@ -105,6 +112,42 @@ export function indentFirstFor(
   if (kind === "none") return undefined;
   const pt = magnitude && magnitude > 0 ? magnitude : DEFAULT_SPECIAL_PT;
   return kind === "hanging" ? -pt : pt;
+}
+
+/** Word「首字下沉」对话框的三个位置，取值直接沿用 `w:dropCap`。 */
+type DropCapOption = "none" | DropCapPosition;
+
+const DROP_CAP_OPTIONS: { value: DropCapOption; label: string }[] = [
+  { value: "none", label: "无" },
+  { value: "drop", label: "下沉" },
+  { value: "margin", label: "突出到页边距外" },
+];
+
+/**
+ * 把段落属性读成下拉的当前项。
+ *
+ * @param cap 首字下沉属性；undefined 是"这一段没建模过"，null 是用户选了"无"。
+ * @returns 下拉的取值。两种"没有下沉"都显示成"无"，界面不需要再分一层。
+ */
+export function dropCapOptionOf(cap: DropCap | null | undefined): DropCapOption {
+  return cap == null ? "none" : cap.position;
+}
+
+/**
+ * 把「位置 + 行数」这对控件的值写回段落属性。
+ *
+ * @param option 下拉选中的位置。
+ * @param lines 行数输入框（≥1 的整数）；空或小于 1 时按 Word 的缺省 3 行。
+ * @returns 存进段落属性的值："无"是 null（导出删掉那条纯下沉的 `w:framePr`），
+ *   另外两个一定带显式行数——`w:lines` 的 Schema 缺省是 1 行，留空会让 Word 摆一个一行的首字。
+ */
+export function dropCapFor(
+  option: DropCapOption,
+  lines: number | undefined,
+): DropCap | null {
+  if (option === "none") return null;
+  const rows = lines && lines >= 1 ? Math.floor(lines) : DEFAULT_DROP_CAP_LINES;
+  return { position: option, lines: rows };
 }
 
 const LINE_OPTIONS = new Set([
@@ -204,6 +247,7 @@ export function ParagraphFields({
         snapToGrid: a.snapToGrid,
         pageBreakBefore: a.pageBreakBefore,
         tabStops: a.tabStops,
+        dropCap: a.dropCap,
       });
     };
     read();
@@ -229,6 +273,7 @@ export function ParagraphFields({
 
   const special = specialFormatOf(attrs.indentFirst);
   const magnitude = attrs.indentFirst == null ? undefined : Math.abs(attrs.indentFirst);
+  const dropCapOption = dropCapOptionOf(attrs.dropCap);
 
   return (
     <div>
@@ -374,6 +419,37 @@ export function ParagraphFields({
         </select>
       </Row>
 
+      <div className="pp-hint">首字下沉</div>
+      <div className="pp-grid">
+        <Row label="位置">
+          <select
+            value={dropCapOption}
+            onChange={(e) =>
+              apply({
+                dropCap: dropCapFor(
+                  e.target.value as DropCapOption,
+                  attrs.dropCap?.lines,
+                ),
+              })
+            }
+          >
+            {DROP_CAP_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </Row>
+        <Row label="行数">
+          <Num
+            value={attrs.dropCap?.lines}
+            placeholder={String(DEFAULT_DROP_CAP_LINES)}
+            disabled={dropCapOption === "none"}
+            onChange={(v) => apply({ dropCap: dropCapFor(dropCapOption, v) })}
+          />
+        </Row>
+      </div>
+
       <div className="pp-hint">分页与换行</div>
       <div className="pp-grid">
         {SWITCH_FIELDS.map((sw) => (
@@ -454,10 +530,13 @@ function SegBtn({
 function Num({
   value,
   placeholder,
+  disabled,
   onChange,
 }: {
   value: number | undefined;
   placeholder?: string;
+  /** Word 在"无"这一档把行数框置灰，面板保持同样的形状而不是把行藏掉。 */
+  disabled?: boolean;
   onChange: (v: number | undefined) => void;
 }) {
   return (
@@ -465,6 +544,7 @@ function Num({
       type="number"
       min={0}
       step={1}
+      disabled={disabled}
       value={value ?? ""}
       placeholder={placeholder}
       onChange={(e) => {

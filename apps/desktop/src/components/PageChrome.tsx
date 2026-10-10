@@ -8,6 +8,7 @@ import { borderLinesFor, borderSideToCss } from "../editor/pageBorders.js";
 import { useUiStore } from "../uiStore.js";
 import "../styles/pageColumns.css";
 import "../styles/pageBorders.css";
+import "../styles/dropCap.css";
 
 /**
  * Paginated editing stage that visually mirrors Microsoft Word:

@@ -11,6 +11,9 @@
 
 import type { LinkStyle, SectionPageBorders } from "@office-copilot/docx-io";
 import { borderLinesFor, borderSideToCss } from "./pageBorders.js";
+// 首字下沉那条 ::first-letter 规则只有全局一份才不会出现两份实现（§3.2）：纸上直接引
+// 画布用的同一份样式文本，而不是再抄一遍 initial-letter。
+import dropCapCss from "../styles/dropCap.css?raw";
 
 export function buildPrintHtml(opts: {
   bodyHtml: string;
@@ -134,6 +137,7 @@ export function buildPrintHtml(opts: {
     }
     /* The page-gap widgets from our editor shouldn't appear on paper. */
     .oc-page-gap { display: none !important; }
+    ${dropCapCss}
   `;
 
   return `<!doctype html>

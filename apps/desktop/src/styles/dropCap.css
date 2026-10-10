@@ -1,0 +1,10 @@
+/* 首字下沉（`w:framePr` 的 `w:dropCap` + `w:lines`）在浏览器里的对应物。`initial-letter`
+   不继承、也不认行内 style，所以整条规则只写这一遍，段落用 CSS 变量把行数传进来；
+   打印走 printHtml 的 ?raw 引用，画布与纸上因此是同一条声明。
+   已知差距：Chromium 128 只在正文行数够时才把下沉字占的行位撑出来，单行段落的首字会压到
+   下一段（实测 3 行下沉的短句仍 21px，4 行才 68px），Word 则按行数留空。 */
+.oc-drop-cap::first-letter {
+  /* Word 的"首字突出到页边距外"用两值语法 `3 1`（跨 3 行但只下沉 1 行）；Chromium 128
+     实测负值与 -webkit- 前缀都不支持。 */
+  initial-letter: var(--oc-drop-cap, 3);
+}

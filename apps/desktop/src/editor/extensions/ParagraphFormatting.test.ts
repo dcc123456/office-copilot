@@ -7,7 +7,7 @@ import {
 } from "./ParagraphFormatting.js";
 
 /**
- * 制表位属性的 DOM 读写规则。粘贴与 `getHTML/setContent(html)` 走的是 PM 的
+ * 段落属性（制表位、首字下沉）的 DOM 读写规则。粘贴与 `getHTML/setContent(html)` 走的是 PM 的
  * DOMSerializer / DOMParser，只认属性自己的 renderHTML / parseHTML——没有 parseHTML
  * 的属性在粘贴后一律回到 default，一段带点前导符的目录条目就会变成"没建模过"，
  * 导出时用户的 w:tabs 又透传回来，清掉的东西复活。
@@ -27,13 +27,66 @@ type AttrRule = {
 const rules = (
   ParagraphFormatting.config.addGlobalAttributes as unknown as () => {
     types: string[];
-    attributes: { tabStops: AttrRule };
+    attributes: { tabStops: AttrRule; dropCap: AttrRule };
   }[]
 )().find((group) => group.types.includes("paragraph"))!.attributes;
 
 /** 只实现 getAttribute 的元素替身：parseHTML 规则只用得到它。 */
 const elementWith = (values: Record<string, string>) => ({
   getAttribute: (name: string) => values[name] ?? null,
+});
+
+describe("首字下沉属性的 DOM 读写", () => {
+  it("默认值是 undefined：新建段落不该声明“这一段关掉了 w:framePr”", () => {
+    expect(rules.dropCap.default).toBeUndefined();
+  });
+
+  it("位置与行数原样进出，行数同时写成 CSS 变量", () => {
+    const html = rules.dropCap.renderHTML({ dropCap: { position: "drop", lines: 3 } });
+    expect(html["data-drop-cap"]).toBe('{"position":"drop","lines":3}');
+    expect(html.class).toBe("oc-drop-cap");
+    expect(html.style).toBe("--oc-drop-cap: 3");
+    expect(rules.dropCap.parseHTML(elementWith(html))).toEqual({ position: "drop", lines: 3 });
+  });
+
+  it("突出到页边距外是两值语法：跨几行但只下沉一行", () => {
+    expect(
+      rules.dropCap.renderHTML({ dropCap: { position: "margin", lines: 4 } }).style,
+    ).toBe("--oc-drop-cap: 4 1");
+  });
+
+  it("源文档没写行数时不凭空补一个：CSS 用 Word 的 3 行，data-* 里仍然没有 lines", () => {
+    const html = rules.dropCap.renderHTML({ dropCap: { position: "drop" } });
+    expect(html["data-drop-cap"]).toBe('{"position":"drop"}');
+    expect(html.style).toBe("--oc-drop-cap: 3");
+    expect(rules.dropCap.parseHTML(elementWith(html))).toEqual({ position: "drop" });
+  });
+
+  it("关掉只留空属性，不挂类：那条 ::first-letter 规则有缺省行数", () => {
+    expect(rules.dropCap.renderHTML({ dropCap: null })).toEqual({ "data-drop-cap": "" });
+    expect(rules.dropCap.parseHTML(elementWith({ "data-drop-cap": "" }))).toBeNull();
+  });
+
+  it("属性不在、JSON 读不懂、位置不是 Word 的取值，一律退回 undefined", () => {
+    for (const raw of [undefined, "not json", "null", "[]", '{"position":"raise"}']) {
+      const values: Record<string, string> = raw === undefined ? {} : { "data-drop-cap": raw };
+      expect(rules.dropCap.parseHTML(elementWith(values))).toBeUndefined();
+    }
+    // 没建模过时什么都不渲染，段落的 DOM 不会长出空属性。
+    expect(rules.dropCap.renderHTML({})).toEqual({});
+  });
+
+  it("行数坏掉只丢行数，不把整条下沉判成没建模过", () => {
+    // 面板据此显示"下沉"而不是"无"；行数交给 Word 的缺省 3 行，导出不会凭空写 w:lines。
+    for (const raw of ['{"position":"drop","lines":0}', '{"position":"drop","lines":2.5}', '{"position":"drop","lines":"3"}']) {
+      expect(rules.dropCap.parseHTML(elementWith({ "data-drop-cap": raw }))).toEqual({
+        position: "drop",
+      });
+    }
+    expect(
+      rules.dropCap.parseHTML(elementWith({ "data-drop-cap": '{"position":"drop","lines":1}' })),
+    ).toEqual({ position: "drop", lines: 1 });
+  });
 });
 
 describe("制表位属性的 DOM 读写", () => {
