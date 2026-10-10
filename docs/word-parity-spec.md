@@ -132,7 +132,7 @@ run 通过 `<w:rStyle>`。**样式链**（`w:basedOn`）与 `w:next`、`w/link`�
 | ③ | 编辑器 `styleId` 全局属性（默认值只能是 `undefined`，否则导入文档的引用会被整批删掉） | `91131d0` |
 | ③.5 | 写侧按样式表复核引用：改了级别就换成这一级声明的那条，标题转正文就删引用 | `aa0d848` |
 | ④ | 样式窗格：引擎半（`paneStyles()` + 唯一的对齐规则 `fitStyleId`）`7cb35b5`；UI 半（清单经 IPC 进渲染层、`applyNamedStyle` 命令、窗格）`481c4ec` | `7cb35b5` `481c4ec` |
-| ⑤ | 样式链解析成可见格式（文档作用域生成的样式表，换算仍只在 `docx-io`） | 待做 |
+| ⑤ | 样式链解析成可见格式（文档作用域生成的样式表，换算仍只在 `docx-io`）：引擎半 `26e5783`，渲染半 `3a9a79b`；前置整理 `5171dcb`（`@w:val` 读取收进 `xml.ts`，第四处副本） | `26e5783` `3a9a79b` |
 | ⑥ | 新建样式 / 修改样式（从选区抓格式） | 待做 |
 | ⑦ | 写侧 `styles.xml` 合并生成（splice-and-keep，保住 `docDefaults`/`latentStyles`）+ 真实保存往返 | 待做 |
 
@@ -145,6 +145,34 @@ run 通过 `<w:rStyle>`。**样式链**（`w:basedOn`）与 `w:next`、`w/link`�
 - **新建文档的窗格是空的**。`fileHandlers.ts` 的空白模板根本不写 `styles.xml`，硬塞一份 Word
   预置样式清单会写出文档没声明的 `styleId`，Word 照正文排版——正是早期 `HorizontalRule` 犯过的错。
 - 窗格高亮与写侧共用 `fitStyleId`，因此不会出现"窗格显示标题 1、Word 排成标题 2"。
+
+⑤（样式链解析 + 文档作用域样式表）这一版的取舍，一手依据是 ISO/IEC 29500-1 §17.7.2.5：
+`w:docDefaults` 的属性"applied first in the style hierarchy; therefore they are superseded by
+any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份 pPr/rPr。
+
+- **合并顺序 = docDefaults → `w:basedOn` 链（根在前）→ 这条样式自身**；直接格式不进这里，
+  它由段落的 attrs 出行内 `style`，CSS 的行内优先级正好停在 Word 的"直接格式最高"上。
+  否决方案"导入时把解析结果铺进段落 attrs"：那会把样式定义盖成用户从没做过的直接格式，
+  导出后再分不清哪部分属于用户（AGENTS §2.3）。
+- **引擎产出结构化数据、不产出 CSS，且用的是编辑器那套词汇**（pt / 倍数 / `pt:N` / `atLeast:N` /
+  CSS px / #rrggbb）。候选方案"引擎直接生成样式表文本"被否：行距与 pt→px 的映射在渲染层已经各有一份
+  （`ParagraphFormatting.ts`），引擎再生成一份就是第二套换算（§2.1）。
+- **`w:val="0"` 与"没提过"必须分开**：`readRunProperties` 的开关是三态，孙子样式用 `<w:b w:val="0"/>`
+  取消父样式的加粗要能取消；`w:pStyle` 引用了本文档没声明的 id 时退回默认段落样式而不是"无格式"
+  （真实简历里就有 `w:pStyle w:val="Heading1"` 而 styles.xml 声明的是 `1`）。
+- **主题字体不猜**：Word 写的 docDefaults 是 `w:asciiTheme`/`w:eastAsiaTheme`，没有 `theme1.xml`
+  就求不出字体名，读不出就不产出（WPS 写的是字面 `w:ascii`/`w:eastAsia`，能读）。
+- **样式定义里 `w:pPr/w:rPr` 那份"段落标记"格式不计入**：那是 Word 给段落标记本身的，不影响正文。
+- `w:hidden` 的样式**照旧解析**——那只管窗格列不列它；链上一个属性都没写过的样式不产出规则。
+- 特异度：`.ProseMirror [data-style-id="X"]`（0,2,0）> 基线 `.ProseMirror p`/`h1`（0,1,1）；
+  兜底规则用 `:not(:is(...))` 排除已声明的 id，`:is()` 取参数里最高的特异度所以与条数无关，
+  同为 0,2,0 时靠"兜底在前、具名在后"的源码顺序让具名样式获胜，同时未声明的引用也拿到了默认格式，
+  没有基于 Normal 的根样式也不会被兜底漏灌。
+- 样式表文本来自用户文件，按系统边界校验：`styleId` 只允许 `[A-Za-z0-9_-]{1,64}` 才进选择器，
+  字体名/颜色/长度按形状白名单，读不懂的按"这份文档没写过"丢弃（含 `<`、`}` 的值能把 `<style>`
+  里的规则截断）。
+- 已知差距（不修）：引用未声明 id 的**标题节点**仍带基线 `h1` 的粗体与外边距（Word 会整体按默认样式排）；
+  `buildPrintHtml` 是另一份 CSS，PDF/打印暂不含文档样式。
 
 `481c4ec` 顺带修掉的一个真实缺陷：`setParagraphFormat` 原先逐块各发一个基于旧 `doc` 的事务，
 选中多段时第二段起 ProseMirror 抛 `Applying a mismatched transaction`，只有第一段改得上
@@ -271,11 +299,46 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
 - 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包
   docx-io 132 / desktop 127 / word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`
   仍无测试文件。
-- UI：`[!] BLOCKED`——本仓没有 Electron 的 CDP harness，样式窗格未实跑走一遍。样式表样式**不会**
+- UI：`[!] BLOCKED`——本仓没有 Electron 的 CDP harness，样式窗格未实跑走一遍。当时样式表样式**不会**
   在编辑器里渲染成最终外观（样式链解析是 ⑤），这是刻意的：解析会把样式定义盖成直接格式，
-  与 Word 的优先级相反。
+  与 Word 的优先级相反。⑤ 之后编辑器里能看到样式效果，见 §8.3。
 - Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS；写侧结论来自 OOXML 与往返用例，不是打开验证。
 - 提交：`481c4ec` 已推送，`git ls-remote origin main` 复核一致。
+
+### 8.3 排名 2 ⑤（样式链解析 + 文档作用域样式表）验收记录（`5171dcb` `26e5783` `3a9a79b`）
+
+- 真实文件取证（两份本机 .docx）：`丁长长-高级前端开发2026.docx` 的 docDefaults 带
+  `w:rPrDefault/w:rPr/w:rFonts`（字面 `w:ascii`="Times New Roman"、`w:eastAsia`="宋体"）与
+  **空的 `<w:pPrDefault/>`**；Normal 是 `styleId="1" @w:default="1"`（`widowControl=0`、`jc=both`、`sz=21`），
+  标题 1 是 `styleId="2"` `basedOn=1`（`spacing before=340 after=330 line=576 lineRule=auto`、
+  `outlineLvl=0`、`b`、`sz=44`）。`self-introduction.docx` 只有主题字体（`w:asciiTheme`），
+  解析结果里就没有字体名——不猜。
+- 引擎用例：`packages/docx-io/src/style-format.test.ts` 9 条（默认条目在最前、标题 1 的链继承、
+  `<w:b w:val="0"/>`→false 与缺失→undefined、只有主题字体时不产出、无 styles.xml→`[]`、
+  字符样式不参与、`w:hidden` 仍解析、`w:basedOn` 成环在重复处截断、段落标记的 pPr/rPr 不计入）；
+  `docx.test.ts` 新增接线用例（`styleFormats` 三条：`null`/`"1"`/`"2"`，默认样式出现两次是刻意的，
+  真实文档会写 `<w:pStyle w:val="Normal"/>`；空白文档 `[]`）。
+- 渲染用例：`apps/desktop/src/editor/docStyleSheet.test.ts` 9 条（空输入不注入、兜底选择器、
+  pt/倍数→CSS、`font-weight: normal` 取消基线粗体、下划线+删除线合一条、不安全 styleId 整条跳过、
+  形状不认识的值逐条丢弃其余生效、未声明 id 由兜底接管且具名规则排在其后）。
+- Chromium 实测（**不是** Electron 窗口）：用真实 .docx 生成的 CSS + 应用原样的 `styles.css`
+  组成探针页，读 `getComputedStyle`：样式 2 的 `<h1>` 得 29.3px / 22.7px / 22px / 行距 70.32px
+  （= 2.4×29.3）/ 加粗，压过基线的 26px；`data-style-id="12"` 的正文首行缩进 28px（= 21pt）；
+  无引用、空串引用、未声明 `Heading1` 引用三种段落都落到默认样式（14px、两端对齐、
+  Times New Roman+宋体）；行内 `font-size: 20px` 的正文仍盖住样式的 14px（§2.3 的直接格式优先级）。
+- app 内实跑：`[!] BLOCKED`——没有 Electron 的 CDP harness，且 `Welcome` 的最近文件走的是
+  用户自己的 `userData`，不能拿第二个实例去动它。上面那条浏览器探针是本轮能看到的最直接证据。
+- 不变量自查：单位换算仍只在 `docx-io`（渲染层复用既有 `ptToPx`/`lineHeightCss`，未新增映射）；
+  颜色仍 #rrggbb（形状不符直接丢）；不拍平局部格式（不写 attrs，行内格式原样保留）；
+  不改文档内容，纯显示层；写侧一行未动，导出结果与本排名 ④ 时一致。
+- 复用：`@w:val` 读取收进 `xml.ts`（第四处副本，`5171dcb`）；字符属性表抽成
+  `readRunProperties` 供正文与样式定义共用；`runStyleDeclarations` 从 `TextStyle` 抽出，
+  标记渲染与样式表同一份。遗留：`components/TemplatePickerDialog.tsx:12` 还有一份私有 `ptToPx`
+  副本（第三处），留给单独的重构提交。
+- 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包
+  docx-io 142 / desktop 136 / word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、
+  `apps/task-pane` 仍无测试文件。
+- 提交：`26e5783` `3a9a79b` 已推送，`git ls-remote origin main` = `3a9a79b`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
@@ -286,13 +349,21 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
 - 段落面板：`apps/desktop/src/components/ParagraphPopover.tsx`（`ParagraphFields` 被工具栏与
   右键「段落(P)…」共用）；字体面板 `components/FontFields.tsx`；
   菜单模型 `apps/desktop/src/editor/contextMenu.ts`。
-- OOXML 读侧段落属性：`packages/docx-io/src/ooxml-pm.ts:307-383`（pPr 采集 + rawPpr 透传）、
-  `:385-`（`readParagraphFormat`：`w:ind` 含 left/right/start/end/firstLine/hanging、`w:spacing`
-  行距、`w:outlineLvl` 与 4 个 CT_OnOff 开关）。
-- OOXML 写侧：`paragraphXml` `:1001-`、`PPR_CHILD_ORDER` `:1029`（CT_PPr 子元素顺序）、
-  `modeledPprParts` `:1102`、`paragraphPprXml` `:1137`（导入与新建段落共用）、
-  `mergedElementXml` `:1216`（属性级合并）、`horizontalRuleXml` `:1422`、
-  `pmToOoxml` 尾部单 sectPr。
-- 样式：`packages/docx-io/src/styles.ts`（`StyleMap`）、`docx.ts:119`（`word/styles.xml`）。
+- OOXML 读侧段落属性：`packages/docx-io/src/ooxml-pm.ts:303-`（`paragraphFromXml`：pPr 采集 + rawPpr 透传）、
+  `:399`（`readParagraphFormat`：`w:ind` 含 left/right/start/end/firstLine/hanging、`w:spacing`
+  行距、`w:outlineLvl` 与 4 个 CT_OnOff 开关；样式定义里的 pPr 走同一个函数）、
+  `:511`（`jcToTextAlign`）、`:714`（`readRunProperties`：正文 run 与样式定义共用的字符属性表）。
+- OOXML 写侧：`paragraphXml` `:1052-`、`PPR_CHILD_ORDER` `:1085`（CT_PPr 子元素顺序）、
+  `modeledPprParts` `:1158`、`paragraphPprXml` `:1196`（导入与新建段落共用）、
+  `mergedElementXml` `:1304`（属性级合并）、`horizontalRuleXml` `:1512`、
+  `pmToOoxml` `:246` 尾部单 sectPr。
+- 样式：`packages/docx-io/src/styles.ts`（`StyleMap`，含 `docDefaultsPPrInner:229`、
+  `defaultParagraphStyleId:236`）、`style-format.ts:143`（`resolvedStyles`：按 §17.7.2.5 合并样式链）、
+  `docx.ts:132`（`word/styles.xml`）。
+- 编辑器侧的文档样式表：`apps/desktop/src/editor/docStyleSheet.ts:169`（`docStyleSheet`）、
+  `:31`（`fallbackSelector`）；共用的映射在 `extensions/TextStyle.ts:21`（`runStyleDeclarations`）、
+  `extensions/ParagraphFormatting.ts:276`（`ptToPx`）与 `:321`（`lineHeightCss`）；
+  注入点 `apps/desktop/src/App.tsx`（`editor-area` 里的 `<style>`，数据来自 `fileHandlers.ts` 的
+  `OpenResult.styleFormats`）。
 - 域：`apps/desktop/src/editor/extensions/Field.ts`；编号：`packages/docx-io/src/numbering.ts`。
 - 模板里的首行缩进按 pt 计算：`apps/desktop/src/editor/templates.ts:26`（`2 字符 = 2 × 字号磅值`）。
