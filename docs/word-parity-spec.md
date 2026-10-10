@@ -133,8 +133,8 @@ run 通过 `<w:rStyle>`。**样式链**（`w:basedOn`）与 `w:next`、`w/link`�
 | ③.5 | 写侧按样式表复核引用：改了级别就换成这一级声明的那条，标题转正文就删引用 | `aa0d848` |
 | ④ | 样式窗格：引擎半（`paneStyles()` + 唯一的对齐规则 `fitStyleId`）`7cb35b5`；UI 半（清单经 IPC 进渲染层、`applyNamedStyle` 命令、窗格）`481c4ec` | `7cb35b5` `481c4ec` |
 | ⑤ | 样式链解析成可见格式（文档作用域生成的样式表，换算仍只在 `docx-io`）：引擎半 `26e5783`，渲染半 `3a9a79b`；前置整理 `5171dcb`（`@w:val` 读取收进 `xml.ts`，第四处副本） | `26e5783` `3a9a79b` |
-| ⑥ | 新建样式 / 修改样式（从选区抓格式） | 待做 |
-| ⑦ | 写侧 `styles.xml` 合并生成（splice-and-keep，保住 `docDefaults`/`latentStyles`）+ 真实保存往返 | 待做 |
+| ⑥ | 新建样式 / 修改样式（从选区抓格式）：抓取半 `b6dd2be`，窗格入口与保存装配 `84d4e80` | `b6dd2be` `84d4e80` |
+| ⑦ | 写侧 `styles.xml` 合并生成（splice-and-keep，保住 `docDefaults`/`latentStyles`）+ 真实保存往返：引擎半 `8970b77`，装配半 `84d4e80` | `8970b77` `84d4e80` |
 
 窗格这一版的取舍（都是按 Word 的行为定的，不是省事）：
 
@@ -179,10 +179,39 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 （实测：`docBlocks.live.test.ts` 跨段用例在旧实现下必失败）。现在两条段落命令共用
 `mapFormatBlocks`，一次操作攒成一个事务。
 
+⑥⑦（新建 / 更新样式，并把样式定义真的写回文档）这一版的取舍：
+
+- **预览与保存共用同一个 `DocxFile.applyStyleEdits`，"窗格预览 == 保存结果"不是巧合而是同一段
+  代码跑两遍**。为此在主进程加了 `styles:preview`：拿当前文档（没有文件就用空白模板）在内存里
+  合并攒下的编辑，返回 `paneStyles()` 与样式链投影，**不落盘**。否决方案"渲染层自己算样式链"：
+  那是第二套样式解析，与 §5 引擎层优先直接冲突。
+- **样式表先于 `replaceProseMirror` 落地**。正文里的 `<w:pStyle w:val="X"/>` 引用的是 styles.xml
+  声明过的 id；先写引用再写声明，中间失败就留下"引用了未声明样式"的文档，Word 会静默按正文排。
+  `docx-io` 的用例"saves both the declaration and the body reference of a created style"钉的就是
+  这一条顺序（同一次保存里 `document.xml` 有引用、`styles.xml` 有声明）。
+- **新建 / 更新只写引用，不改块类型**（`applyStyleReference` 用 `setParagraphFormat({ styleId })`）。
+  不能用 `applyNamedStyle`：那条命令按 Word 的套用规则把标题段转成正文段，用户只是想给这段起个名。
+- **同一条样式只留最新一份编辑**（`styleEditsRef` 按 `styleId` 去重后追加），且用 ref 不用 state：
+  菜单、快捷键、工具栏拿到的保存 handler 必须始终看到最新一份，把 state 塞进依赖会让每个菜单项跟着重建。
+  换文档（新建 / 打开）时清空——那些编辑指向的是上一份文档的 `styles.xml`。
+- **合并是 splice-and-keep**：同 id 的旧 `<w:style>` 整条换成新的，`docDefaults`、`latentStyles`
+  与本文档其它样式原样保留；部件缺失时同时补 `[Content_Types].xml` 的 Override 与
+  `word/_rels/document.xml.rels` 的 Relationship（Word 是经关系找到 styles.xml 的，只登记内容类型不够）。
+- **局部格式不拍平**（AGENTS §2.3）：`captureStyleFromSelection` 对"各段属性不一致"和"某项字符格式
+  只覆盖部分文字"两种情况返回失败码，窗格按码拼中文提示（§5.7 引擎不给文案）。
+  `[!]` 这条拒绝分支在真实 app 里没能手工触发（探针按 `title === "加粗"` 找按钮，实际 DOM 的 title 不同），
+  由 `styleCapture.test.ts` 的 7 条用例覆盖。
+
 排名 2 的遗留（不在本排名的验收范围内）：编辑器里多块一起改标题级别时，Tiptap 的
 `setNode`/`setHeading` 只在 `$anchor.sameParent($head)` 时才复制原块属性，跨块会丢 `styleId`
 （一手依据：`@tiptap/core/dist/index.js:3307-3331`）；`fitStyleId` 改为"没建模过的标题先问样式表"
 之后，真实文档里这个丢失不再改变导出结果，故记为遗留不单独修。
+
+另一条已知差距（`loadForEdit` 引入前就存在，不是这版带来的）：**另存为到一个还不存在的路径时，
+`saveDocx` 从空白模板重建文档**，源文件的 `styles.xml`、`numbering.xml` 等部件不会跟过去，正文里
+`Heading1`/`Heading2` 这类引用因此在副本里成了未声明样式。这版保证的是"用户自己新建的样式，声明与
+引用一定同时到位"；要把整份保真复制到新路径，得改成从**当前内存里的那份 `DocxFile`** 写盘，属于保存
+链路的重构，留给后续排名处理。
 
 ## 三、排名 3：目录 / 题注 / 交叉引用 / 脚注尾注
 
