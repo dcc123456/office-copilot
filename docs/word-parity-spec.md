@@ -419,18 +419,73 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 
 ## 四、排名 4：批注 / 修订跟踪
 
-- 修订 = `w:ins`/`w:del`（run 级）、`w:pPrChange`/`w:rPrChange`（格式改动）、段落删除用
-  `w:del` 包住段落标记；`w:delText` 替代 `w:t`。接受 = 落地并删标记，拒绝 = 反向。
-- 批注 = `word/comments.xml` 部件 + 正文 `w:commentRangeStart`/`w:commentRangeEnd`/
-  `w:commentReference`。
-- 与现有机制的关系：`userData/modlog/<文档名>.json` + 内容寻址撤销（AGENTS §2.5）是**本地改动历史**，
-  不能当修订用——它不进文件。本节的修订标记必须是文档内容的一部分，且要与 modlog 互不干扰
-  （modlog 继续记录 op，撤销一个带修订标记的 op 时逆操作要把标记一起撤销）。
-- 渲染层：`w:delText` 要有删除线呈现；`w:ins` 下划线呈现；接受/拒绝入口进右键菜单。
-- 需新增 mark（`trackedChange`）与节点（`commentAnchor`?）→ 一律走 `EDITOR_EXTENSIONS` + live 用例。
+一手来源（每条都实际打开过，`learn.microsoft.com` 按元素名猜 URL 会 404，别再试）：
 
-提交切分：① 修订读写（run 级 ins/del/delText）；② 编辑器呈现 + 接受/拒绝命令；③ 批注部件读写；
-④ 批注侧栏 UI 与右键菜单入口。
+- ECMA-376 Part 4 的镜像页给出内容模型：`commentRangeStart`/`commentRangeEnd` 属于
+  `EG_RangeMarkupElements` ⊂ `EG_RunLevelElts` ⊂ `EG_PContent`，**与 `w:r` 平级、排在 `w:pPr` 之后**，
+  而且 body 层也允许，所以一个批注区间可以跨段
+  （[commentRangeStart](https://c-rex.net/samples/ooxml/e1/Part4/OOXML_P4_DOCX_commentRangeStart_topic_ID0EFJMV.html)）；
+  `commentReference` 属于 `EG_RunInnerContent`，**必须待在 `w:r` 里**
+  （[commentReference](https://c-rex.net/samples/ooxml/e1/Part4/OOXML_P4_DOCX_commentReference_topic_ID0E4PNV.html)）。
+  规范原文的样例就是我们要写回去的形状：
+  ```xml
+  <w:p>
+    <w:r><w:t xml:space="preserve">Some </w:t></w:r>
+    <w:commentRangeStart w:id="0" />
+    <w:r><w:t>text.</w:t></w:r>
+    <w:commentRangeEnd w:id="0" />
+    <w:r><w:commentReference w:id="0" /></w:r>
+  </w:p>
+  ```
+- `w:comment` 是 `CT_Comment` extends `CT_TrackChange`：`w:id` **必填**、`w:author` **必填**（≤255 字）、
+  `w:date` 可选、`w:initials` 可选（≤9 字），内容是 `EG_BlockLevelElts`——**批注体可以放整段甚至表格**
+  （[Comment Class](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.comment?view=openxml-3.0.1)）。
+- 部件注册：content type `application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml`，
+  关系类型 `…/officeDocument/2006/relationships/comments`，根元素 `w:comments`
+  （[Open-XML-SDK 的部件清单](https://raw.githubusercontent.com/dotnet/Open-XML-SDK/main/data/parts/WordprocessingCommentsPart.json)）。
+- 修订：`w:ins`/`w:del` 是 `CT_RunTrackChange`，包的是**运行块而不是裸文字**；删除的文字换成 `w:delText`
+  （同一份 `CT_Text`，`xml:space` 是约定不是强制）
+  （[DeletedRun](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.wordprocessing.deletedrun?view=openxml-3.0.1)）。
+  段落标记自己的增删写成 `w:pPr/w:rPr/w:ins|w:del`，`CT_ParaRPr` 里它们排在 `EG_RprBase` **之前**；
+  接受一次段落标记删除 = 把本段并进**后一段**（本段 `pPr` 留下）
+  （[wml_xsd 内容模型](https://schemas.liquid-technologies.com/officeopenxml/2006/wml_xsd.html)、
+  [Accept all revisions](https://learn.microsoft.com/en-us/office/open-xml/word/how-to-accept-all-revisions-in-a-word-processing-document)）。
+- 注解 id 是**整个文档共享的一个编号空间**（批注、书签、`customXmlInsRangeStart` 都用它），规范对流只有一条
+  硬约束："同一个 id 出现多条批注时 Word 只加载一条，其余忽略"。`w:date` 缺失合法；重复 id 的容错行为**无文档可查**。
+- `w15:people` / `w15:commentEx`（已解决状态）/ `w16cid:commentId` 都是**微软扩展不是 ECMA**。Word 自己会生成，
+  但"第三方生产者省略它们会怎样"没有任何官方说明——**未证实**，所以我们的取舍是：读到的原样带走，不主动生成。
+
+判据与取舍（这些是刻意的，不要当成待修项）：
+
+- **批注在编辑器里建模成 `comment` mark，不是两个 inline 节点**：区间的起点/终点是 PM 里"哪些文字带这个标记"
+  的自然表达，侧栏高亮、点击跳转、删除标记都免费拿到；写回时按 mark 覆盖到的第一个/最后一个文字节点定位
+  `commentRangeStart`/`End`。代价是**空区间**（start 紧跟 end）建模不出来——规范允许，Word 行为无文档，
+  读到时整条退化为"只有 `commentReference` 的锚点"，不硬造区间。
+- **`w:commentReference` 那个运行不落 PM**：它是 Word 画批注编号用的载体，我们的写侧在 `commentRangeEnd`
+  之后固定补一个 `<w:r><w:rPr>?<w:commentReference w:id="N"/></w:r>`，读侧把它当锚点记号消费掉。
+  这样正文里不会出现一个"隐形字符"节点，也不会因为它带 `w:rPr`（上标 + 批注框样式）而把样式牵扯进来。
+- **批注体走脚注那套透明部件**（`footnotes.ts` 的形状：按 id 存 `{ rawXml, dirty }`，没改过的整段原样带走，
+  改过的才用 `pmToOoxml` 片段重建），复用 `DocxFile.ensurePartReference` 注册 content type 与关系
+  （§3.3/§3.4：引擎层加一个 `comments.ts`，不新建包、不改保存主链路）。
+- **modlog 不是修订**（AGENTS §2.5 的本地历史不进文件）。两者互不干扰：`w:ins`/`w:del` 是文档内容，
+  op 的逆操作要把标记一起撤销；"接受修订"是一次普通改动块，照样可撤销、照样进修改历史。
+- 修订的**读侧保真先于写侧**：现在 `w:ins`/`w:del`/`w:delText` 在正文遍历里根本没有分支，导入一份带修订的
+  `.docx` 会把删除的文字整块丢掉或把插入的文字当普通文字——**这是既有缺陷**，比"能不能开修订"更严重，
+  所以 ③ 排在呈现与命令之前。
+- 段落标记的 `w:ins`/`w:del` 在 `w:pPr/w:rPr` 里，**没有运行可走**，只遍历 `w:r` 的读侧一定会漏（取证第 9 条）。
+  本节按"标记留在段落 attrs 上透传"处理，不把它做成可见的段落分隔符。
+
+提交切分（实现顺序，逐条落地后回填提交号）：
+
+| # | 内容 | 提交 |
+| --- | --- | --- |
+| ① | docx-io：`word/comments.xml` 透明部件（按 id 存、没动过原样带走）+ 正文三个锚点元素读写往返 | 待做 |
+| ② | desktop：`comment` mark 注册进 `EDITOR_EXTENSIONS`，批注区间⇄mark 互转与 live 用例 | 待做 |
+| ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读侧保真（含 `pPr/w:rPr` 里段落标记的增删），不再丢删除的文字 | 待做 |
+| ④ | desktop：修订呈现（插入下划线 / 删除删除线）+ 接受 / 拒绝命令（右键菜单入口） | 待做 |
+| ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
+| ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
+
 
 ## 五、排名 5：制表位 + 前导符
 
