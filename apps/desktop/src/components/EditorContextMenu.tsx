@@ -72,6 +72,20 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
   const [open, setOpen] = useState<OpenMenu | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [sub, setSub] = useState<{ id: CtxItemId; top: number } | null>(null);
+  // 子菜单的"延时收"：斜着走向子菜单的路上必然擦过下面几行叶子项，立刻收就永远
+  // 走不到目的地；给 260ms 宽限，进入菜单/子菜单就撤销，停手不走了才收。
+  const closeSubTimer = useRef<number | null>(null);
+  const cancelCloseSub = useCallback(() => {
+    if (closeSubTimer.current !== null) {
+      window.clearTimeout(closeSubTimer.current);
+      closeSubTimer.current = null;
+    }
+  }, []);
+  const scheduleCloseSub = useCallback(() => {
+    cancelCloseSub();
+    closeSubTimer.current = window.setTimeout(() => setSub(null), 260);
+  }, [cancelCloseSub]);
+  useEffect(() => cancelCloseSub, [cancelCloseSub]);
 
   useEffect(() => {
     const dom = editor.view.dom;
@@ -96,6 +110,7 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
   useEffect(() => {
     if (!open && !panel) return;
     const close = () => {
+      cancelCloseSub();
       setOpen(null);
       setPanel(null);
       setSub(null);
@@ -139,6 +154,7 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
   const act = (id: CtxItemId) => {
     const anchor = open;
     if (!anchor) return;
+    cancelCloseSub();
     if (id === "font-dialog" || id === "paragraph-dialog") {
       setOpen(null);
       setSub(null);
@@ -159,23 +175,29 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
           className="ctx-menu editor-ctx-menu"
           style={{ left: menuPos.left, top: menuPos.top, width: MENU_W }}
           onMouseDown={(e) => e.preventDefault()}
+          // 子菜单只在指针彻底离开"菜单 + 子菜单"这个整体时才收掉：mouseleave 按
+          // DOM 后代判定，子菜单是本容器的后代，所以路过父项右侧那 5px 内边距、或
+          // 斜着走向子菜单的路上都不会误关；真正的离开还要过 260ms 延时才生效。
+          onMouseEnter={cancelCloseSub}
+          onMouseLeave={scheduleCloseSub}
+          // 手慢的时候，斜着走会擦过下面几行叶子项，光是"进入叶子"就排程收掉的话，
+          // 用户永远走不到子菜单上。所以：只要在菜单内继续移动就撤销这个排程，真正
+          // 停下或离开整体才收。
+          onMouseMove={cancelCloseSub}
         >
           {rows.map((row, i) =>
             "separator" in row ? (
               <div key={`sep-${i}`} className="ctx-sep" />
             ) : row.children ? (
-              // 子菜单必须挂在父项的 DOM 之内：指针从父项移向子菜单时，父项的
-              // mouseleave 会先于子菜单的 mouseenter 触发，卸载掉子菜单的话那点
-              // 就落在空白上，永远点不到「只保留文本」。挂成后代元素后父项不会
-              // 判定"指针已离开"，Word 的菜单也是这么做的。
-              <div
-                key={row.id + String(i)}
-                className="ctx-row"
-                onMouseLeave={() => setSub(null)}
-              >
+              // 子菜单挂在父项的 DOM 之内，让它成为父项的"后代命中区"：斜着移动进
+              // 子菜单时不会走到"谁都不属于"的空白上；收掉的动作交给容器（见上）。
+              <div key={row.id + String(i)} className="ctx-row">
                 <CtxButton
                   item={row}
-                  onHover={(top) => setSub({ id: row.id, top })}
+                  onHover={(top) => {
+                    cancelCloseSub();
+                    setSub({ id: row.id, top });
+                  }}
                   onLeave={() => {}}
                   onRun={() => {}}
                 />
@@ -192,6 +214,9 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
                         ref={subBox.ref}
                         className="ctx-menu ctx-submenu"
                         style={{ left: pos.left, top: pos.top, width: SUB_W }}
+                        // 从叶子项绕进子菜单时指针一直没离开外层容器，容器的
+                        // mouseenter 不会再触发，所以这里自己撤销待执行的收。
+                        onMouseEnter={cancelCloseSub}
                         onMouseDown={(e) => e.preventDefault()}
                       >
                         {row.children.map((child) => (
@@ -211,7 +236,9 @@ export function EditorContextMenu({ editor }: { editor: Editor }) {
               <CtxButton
                 key={row.id + String(i)}
                 item={row}
-                onHover={() => {}}
+                // 移到没有子菜单的项上：延时收掉还开着的子菜单（立刻收的话，斜着
+                // 走向子菜单的路上擦过这一行就把目的地关掉了）。
+                onHover={scheduleCloseSub}
                 onLeave={() => {}}
                 onRun={() => act(row.id)}
               />
