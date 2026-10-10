@@ -11,6 +11,7 @@ import {
   type CtxItemId,
   type CtxRow,
 } from "../editor/contextMenu.js";
+import { selectionTouchesRevision } from "../editor/extensions/Revision.js";
 import { ParagraphFields } from "./ParagraphPopover.js";
 import { FontFields } from "./FontFields.js";
 import { promptSetLink, safeHref } from "./linkPrompt.js";
@@ -363,6 +364,12 @@ async function applyAction(
     case "link-remove":
       editor.chain().focus().extendMarkRange("link").unsetLink().run();
       return;
+    case "revision-accept":
+      editor.chain().focus().acceptRevision().run();
+      return;
+    case "revision-reject":
+      editor.chain().focus().rejectRevision().run();
+      return;
     case "delete-object":
       if (anchor.imagePos === null) return;
       editor.chain().focus().setNodeSelection(anchor.imagePos).deleteSelection().run();
@@ -508,6 +515,7 @@ async function openAt(
       headingLevel,
       imageWrap: (imageNode?.attrs.wrap as CtxFacts["imageWrap"]) ?? null,
       painterActive: hasStoredFormat(editor),
+      hasRevision: selectionTouchesRevision(editor),
       clipboard,
     },
   };

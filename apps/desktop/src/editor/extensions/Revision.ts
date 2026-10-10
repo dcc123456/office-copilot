@@ -1,4 +1,4 @@
-import { Mark, mergeAttributes, type CommandProps } from "@tiptap/core";
+import { Mark, mergeAttributes, type CommandProps, type Editor } from "@tiptap/core";
 import type { MarkType, Node as PMNode } from "@tiptap/pm/model";
 import type { PMMark } from "@office-copilot/docx-io";
 
@@ -63,6 +63,19 @@ function revisionsTouching(
   });
   // 只留选区碰得到的：光标落在一次修订里就够了，与 Word 的"接受此修订"同语义。
   return [...groups.values()].filter((g) => g.ranges.some((r) => r.from < to && r.to > from));
+}
+
+/**
+ * 选区（或光标所在处）有没有落在某一次修订里——右键菜单据此决定"接受/拒绝修订"是否可用。
+ *
+ * @param editor 桌面编辑器实例。
+ * @returns 碰到了修订为 true；文档里没有修订、或选区落在修订之外为 false。
+ */
+export function selectionTouchesRevision(editor: Editor): boolean {
+  const type = editor.state.schema.marks.revision;
+  if (!type) return false;
+  const { from, to } = editor.state.selection;
+  return revisionsTouching(editor.state.doc, type, from, to).length > 0;
 }
 
 export const Revision = Mark.create({

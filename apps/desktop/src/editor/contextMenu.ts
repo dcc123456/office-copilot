@@ -32,6 +32,8 @@ export interface CtxFacts {
   imageWrap: "none" | "square" | "tight" | "through" | "topAndBottom" | null;
   /** 格式刷是否已取好样式（正在待刷状态）。 */
   painterActive: boolean;
+  /** 选区或光标是否落在某一次修订（`revision` 标记）里，决定接受/拒绝两条是否可用。 */
+  hasRevision: boolean;
   clipboard: ClipboardSnapshot;
 }
 
@@ -55,6 +57,8 @@ export type CtxItemId =
   | "link-insert"
   | "link-open"
   | "link-remove"
+  | "revision-accept"
+  | "revision-reject"
   | "delete-object"
   | `block:${string}`
   | `wrap:${string}`
@@ -178,6 +182,10 @@ export function buildContextMenu(facts: CtxFacts): CtxRow[] | null {
     rows.push({ id: "link-insert", label: "超链接(K)…" });
   }
 
+  rows.push({ separator: true });
+  // Word 也按落点给这两条：没落在修订上就置灰，不藏起来（本菜单一贯"不可用看得见"）。
+  rows.push({ id: "revision-accept", label: "接受修订", disabled: !facts.hasRevision });
+  rows.push({ id: "revision-reject", label: "拒绝修订", disabled: !facts.hasRevision });
   rows.push({ separator: true });
   rows.push({ id: "ai:polish", label: "AI：润色", disabled: !canEdit });
   rows.push({ id: "ai:expand", label: "AI：扩写", disabled: !canEdit });

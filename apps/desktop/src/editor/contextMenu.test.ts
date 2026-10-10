@@ -21,6 +21,7 @@ function facts(patch: Partial<CtxFacts> = {}): CtxFacts {
     headingLevel: null,
     imageWrap: null,
     painterActive: false,
+    hasRevision: false,
     clipboard: { text: "甲", html: "<p>甲</p>" },
     ...patch,
   };
@@ -91,6 +92,15 @@ describe("buildContextMenu", () => {
     expect(link.some((r) => "id" in r && r.id === "link-remove")).toBe(true);
     const plain = rows(facts());
     expect(plain.some((r) => "id" in r && r.id === "link-open")).toBe(false);
+  });
+
+  it("接受 / 拒绝修订两条按落点置灰：没落在修订里也看得见，只是点不动", () => {
+    const plain = rows(facts());
+    expect(find(plain, "revision-accept").disabled).toBe(true);
+    expect(find(plain, "revision-reject").disabled).toBe(true);
+    const onRevision = rows(facts({ hasRevision: true }));
+    expect(find(onRevision, "revision-accept").disabled).toBe(false);
+    expect(find(onRevision, "revision-reject").disabled).toBe(false);
   });
 
   it("图片菜单给剪切/复制/文字环绕/删除，文字环绕勾当前值", () => {

@@ -8,7 +8,7 @@ import { EditorState, TextSelection } from "@tiptap/pm/state";
 import { EDITOR_EXTENSIONS } from "./extensions/editorExtensions.js";
 import { footnoteRefKey, indexFootnoteRefs } from "./extensions/FootnoteRef.js";
 import { ParagraphFormatting } from "./extensions/ParagraphFormatting.js";
-import { Revision } from "./extensions/Revision.js";
+import { Revision, selectionTouchesRevision } from "./extensions/Revision.js";
 import { blocksOf, executeOps } from "./docBlocks.js";
 import { planEdit, revert, addressOf, type Block, type CoreOp, type StylePatch } from "../ai/docEdit.js";
 import { templateProposal, typographyProposal } from "./formatDocument.js";
@@ -112,6 +112,33 @@ const mixedBoldDoc = [
 ];
 
 /**
+ * 把选区放到指定文字上：harness 的 editor 是手搓的最小对象，没有 Tiptap 的 `commands`，
+ * 只能自己派发一个设选区的事务。
+ *
+ * @param editor harness 出来的编辑器。
+ * @param words 要选中的文字，所有匹配处一起进选区。
+ * @param mode `range` 拉整段文字（默认），`cursor` 只把光标停在第一处前面。
+ * @throws 文档里找不到要选的文字——是用例写错了，不该静默通过。
+ */
+function selectWords(editor: Editor, words: string[], mode: "range" | "cursor" = "range"): void {
+  let from = -1;
+  let to = -1;
+  editor.state.doc.descendants((node, pos) => {
+    if (!node.isText || !words.some((word) => (node.text ?? "").includes(word))) return;
+    from = from < 0 ? pos : Math.min(from, pos);
+    to = Math.max(to, pos + node.nodeSize);
+  });
+  if (from < 0) throw new Error(`no run matching ${words.join("/")}`);
+  editor.view.dispatch(
+    editor.state.tr.setSelection(
+      mode === "cursor"
+        ? TextSelection.create(editor.state.doc, from)
+        : TextSelection.create(editor.state.doc, from, to),
+    ),
+  );
+}
+
+/**
  * 用真实 schema 跑一条扩展自己的命令。
  *
  * harness 的 editor 是手搓的最小对象，没有 Tiptap 的 `commands` / `chain` 装配，
@@ -138,21 +165,7 @@ function runFormatCommand(
     },
   mode: "range" | "cursor" = "range",
 ): boolean {
-  let from = -1;
-  let to = -1;
-  editor.state.doc.descendants((node, pos) => {
-    if (!node.isText || !words.some((word) => (node.text ?? "").includes(word))) return;
-    from = from < 0 ? pos : Math.min(from, pos);
-    to = Math.max(to, pos + node.nodeSize);
-  });
-  if (from < 0) throw new Error(`no run matching ${words.join("/")}`);
-  editor.view.dispatch(
-    editor.state.tr.setSelection(
-      mode === "cursor"
-        ? TextSelection.create(editor.state.doc, from)
-        : TextSelection.create(editor.state.doc, from, to),
-    ),
-  );
+  selectWords(editor, words, mode);
   const commands = (
     source.config.addCommands as (this: unknown) => Record<
       string,
@@ -960,6 +973,18 @@ describe("修订跟踪（真实 schema）", () => {
   it("选区没碰到修订时命令返回 false（菜单项据此置灰）", () => {
     const editor = harness([para([text("正文"), text("插入的字", [ins])])]);
     expect(runRevision(editor, "acceptRevision", ["正文"])).toBe(false);
+  });
+
+  it("右键菜单的落点事实与命令同一个判据：碰到修订才亮，碰不到就灰", () => {
+    const editor = harness([para([text("正文"), text("插入的字", [ins])])]);
+    selectWords(editor, ["插入的字"]);
+    expect(selectionTouchesRevision(editor)).toBe(true);
+    selectWords(editor, ["正文"]);
+    expect(selectionTouchesRevision(editor)).toBe(false);
+    // 菜单亮 == 命令有活干：两条都走 `revisionsTouching`，不能一个说有一个说无。
+    expect(runRevision(editor, "acceptRevision", ["正文"])).toBe(false);
+    selectWords(editor, ["插入的字"]);
+    expect(runRevision(editor, "acceptRevision", ["插入的字"])).toBe(true);
   });
 });
 
