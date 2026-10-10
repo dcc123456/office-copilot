@@ -1251,6 +1251,94 @@ describe("域（w:fldChar / w:instrText / w:fldSimple）", () => {
     expect(once).not.toContain(`<w:r><w:bookmarkStart`);
     expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
   });
+
+  /**
+   * ⑤.2 交叉引用：本 app 写出的 `REF` / `PAGEREF` 域。
+   * `display` 是缓存结果——刚插入时是空串（还没让 Word 算过），指向题注时是编号或页码。
+   */
+  const CROSSREF_PM: PMDoc = {
+    type: "doc",
+    content: [
+      {
+        type: "paragraph",
+        content: [
+          { type: "text", text: "见" },
+          { type: "field", attrs: { kind: "REF", instr: `REF _Ref2 \\h`, display: "" } },
+          { type: "text", text: "，页码在" },
+          { type: "field", attrs: { kind: "PAGEREF", instr: `PAGEREF _Ref2 \\h`, display: "5" } },
+        ],
+      },
+    ],
+  };
+
+  it("交叉引用写出去：指令只在 instrText，页码才是缓存结果", () => {
+    const xml = pmToOoxml(CROSSREF_PM);
+    expect(xml).toContain(
+      `<w:r><w:instrText xml:space="preserve"> REF _Ref2 \\h </w:instrText></w:r>`,
+    );
+    // 指令变成看得见的正文，Word 里就会真的印出 `{ REF _Ref2 \h }`。
+    expect(xml).not.toContain(`<w:t xml:space="preserve"> REF`);
+    expect(xml).toContain(`<w:t xml:space="preserve">5</w:t>`);
+    expect(pmToOoxml(ooxmlToPm(xml))).toBe(xml);
+  });
+
+  it("交叉引用读回来：域还是域，书签名与 \\h 开关都不丢", () => {
+    const para = ooxmlToPm(pmToOoxml(CROSSREF_PM)).content[0]!;
+    expect(para.content?.[1]).toEqual({
+      type: "field",
+      attrs: { kind: "REF", instr: `REF _Ref2 \\h`, display: "" },
+    });
+    expect(para.content?.[3]).toMatchObject({
+      type: "field",
+      attrs: { kind: "PAGEREF", display: "5" },
+    });
+  });
+
+  /**
+   * Word 自己写的交叉引用：整条域被 `w:hyperlink w:anchor` 包着（`\h` 的产物）。
+   * 链接里的域也得走域状态机——只按 run 抽文字的话指令丢掉，存回去就是死文字。
+   */
+  const WORD_CROSSREF = bodyXml(
+    `<w:p><w:r><w:t>如</w:t></w:r>` +
+      `<w:hyperlink w:anchor="_Ref10">` +
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Ref10 \\h </w:instrText></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+      `<w:r><w:t>2</w:t></w:r>` +
+      `<w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+      `</w:hyperlink>` +
+      `<w:r><w:t>所示</w:t></w:r></w:p>`,
+  );
+
+  it("Word 写在超链接里的交叉引用：指令留着，不折成死文字", () => {
+    const para = ooxmlToPm(WORD_CROSSREF).content[0]!;
+    expect(para.content).toEqual([
+      { type: "text", text: "如" },
+      {
+        type: "field",
+        attrs: { kind: "PAGEREF", instr: `PAGEREF _Ref10 \\h`, display: "2" },
+      },
+      { type: "text", text: "所示" },
+    ]);
+    // 链接只落在文字上（addMark 的既有约定），这条 `w:hyperlink` 里只有域、没有文字，
+    // 所以存回去时链接不重发：`\h` 写在指令里，Word 更新域时自己把超链接补上。
+    const once = pmToOoxml(ooxmlToPm(WORD_CROSSREF));
+    expect(once).toContain(
+      `<w:r><w:instrText xml:space="preserve"> PAGEREF _Ref10 \\h </w:instrText></w:r>`,
+    );
+    expect(once).not.toContain(`<w:t xml:space="preserve"> PAGEREF`);
+    expect(pmToOoxml(ooxmlToPm(once))).toBe(once);
+  });
+
+  it("站内锚点往返一致：w:anchor 装的是书签名，`#` 不能越存越多", () => {
+    const xml = pmToOoxml(
+      ooxmlToPm(
+        bodyXml(`<w:p><w:hyperlink w:anchor="_Toc9"><w:r><w:t>第一章</w:t></w:r></w:hyperlink></w:p>`),
+      ),
+    );
+    expect(xml).toContain(`<w:hyperlink w:anchor="_Toc9">`);
+    expect(pmToOoxml(ooxmlToPm(xml))).toBe(xml);
+  });
 });
 
 describe("书签（w:bookmarkStart / w:bookmarkEnd）", () => {

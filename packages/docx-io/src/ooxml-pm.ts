@@ -928,10 +928,10 @@ function collectInline(p: Element, ctx: InlineCtx = {}): PMNode[] {
       const href = child.attributes?.["r:id"] as string | undefined;
       const anchor = child.attributes?.["w:anchor"] as string | undefined;
       const url = anchor ? `#${anchor}` : href ? `relationship:${href}` : undefined;
-      const inline: PMNode[] = [];
-      for (const sub of children(child)) {
-        if (sub.name === "w:r") inline.push(...runToInlines(sub, { ...ctx, inLink: true }));
-      }
+      // 链接里还能有域：Word 写的交叉引用整条被 `w:hyperlink` 包着（`{ PAGEREF _Ref2 \h }`），
+      // 只按 run 抽文字会把指令丢掉，存回去就变成死文字。所以链接内部走同一套域状态机，
+      // `addMark` 只给文字加链接，域保持原子节点（写侧不手写 w:hyperlink，Word 更新域时自己补）。
+      const inline = collectInline(child, { ...ctx, inLink: true });
       if (url) addMark(inline, { type: "link", attrs: { href: url } });
       out.push(...inline);
     } else if (child.name === "w:bookmarkStart") {
@@ -2150,7 +2150,9 @@ function runXml(nodes: PMNode[], link?: LinkStyle | null): string {
     if (href.startsWith("relationship:")) {
       return `<w:hyperlink r:id="${href.slice("relationship:".length)}">${wrapped}</w:hyperlink>`;
     }
-    return `<w:hyperlink w:anchor="${escapeXml(href)}">${wrapped}</w:hyperlink>`;
+    // 读侧把 `w:anchor` 折成 `#名字`（浏览器式的站内锚点），写侧就得把那个 `#` 去掉：
+    // `w:anchor` 装的是书签名本身，留着 `#` 会让 Word 指向不存在的书签，且每次存盘多长一个。
+    return `<w:hyperlink w:anchor="${escapeXml(href.replace(/^#/, ""))}">${wrapped}</w:hyperlink>`;
   }
   return wrapped;
 }
