@@ -459,9 +459,9 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 
 - **批注在编辑器里建模成三个 inline 节点，不是 `comment` mark**：`commentRangeStart {id}` /
   `commentRangeEnd {id}` / `commentReference {id}`，与既有 `bookmarkStart`/`bookmarkEnd`、
-  `footnoteReference` 同形（取证第 3 条里它们本来就是 `w:p` 的直接子元素、与 `w:r` 平级）。
+  `footnoteReference` 同形（上面内容模型那条里它们本来就是 `w:p` 的直接子元素、与 `w:r` 平级）。
   改用 mark 是错的三条理由：mark 会被复制/剪切带走，一份批注被粘到别处就成了同 id 的第二个区间，
-  而 id 是文档级唯一命名空间（取证第 6 条）；按 mark 集合干活的既有功能（格式刷、样式抓取）
+  而 id 是文档级唯一命名空间（见上面"注解 id 是整个文档共享的一个编号空间"那条）；按 mark 集合干活的既有功能（格式刷、样式抓取）
   会被一个"不是字符样式"的 mark 污染；PM 的 mark 跨块边界本就别扭，批注区间恰恰常常跨段。
   代价是区间归属要在读侧自己配对（start/end 各落在自己那段），写侧照原位置各写一个空元素——
   这与书签已经做过的事完全一样，不算新增复杂度。**空区间**（start 紧跟 end）也能自然表示，
@@ -469,7 +469,8 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 - **`w:commentReference` 落 PM，形状照 `footnoteReference`**：它同样是"引用点"而不是文字，
   读侧消费掉外面那个 `w:r`（那份 `w:rPr` 是 Word 的呈现样式，不进模型），写侧固定输出
   `<w:r><w:commentReference w:id="N"/></w:r>`。批注编号的呈现由编辑器自己算（脚注那边有
-  `FootnoteNumbering` 插件的先例），不跟 Word 的 `AnnotationReference` 样式较劲。
+  `FootnoteNumbering` 插件的先例），不跟 Word 的 `AnnotationReference` 样式较劲；② 只把芯片与
+  区间端点画出来，编号与跨段高亮要跟侧栏一起在 ⑤ 做——那一步才需要"点条目跳到锚点"的位置索引。
 - **批注体走脚注那套透明部件**（`footnotes.ts` 的形状：按 id 存 `{ rawXml, dirty }`，没改过的整段原样带走，
   改过的才用 `pmToOoxml` 片段重建），复用 `DocxFile.ensurePartReference` 注册 content type 与关系
   （§3.3/§3.4：引擎层加一个 `comments.ts`，不新建包、不改保存主链路）。
@@ -478,19 +479,25 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 - 修订的**读侧保真先于写侧**：现在 `w:ins`/`w:del`/`w:delText` 在正文遍历里根本没有分支，导入一份带修订的
   `.docx` 会把删除的文字整块丢掉或把插入的文字当普通文字——**这是既有缺陷**，比"能不能开修订"更严重，
   所以 ③ 排在呈现与命令之前。
-- 段落标记的 `w:ins`/`w:del` 在 `w:pPr/w:rPr` 里，**没有运行可走**，只遍历 `w:r` 的读侧一定会漏（取证第 9 条）。
+- 段落标记的 `w:ins`/`w:del` 在 `w:pPr/w:rPr` 里，**没有运行可走**，只遍历 `w:r` 的读侧一定会漏
+  （见上面"段落标记自己的增删"那条）。
   本节按"标记留在段落 attrs 上透传"处理，不把它做成可见的段落分隔符。
 
 提交切分（实现顺序，逐条落地后回填提交号）：
 
 | # | 内容 | 提交 |
 | --- | --- | --- |
-| ① | docx-io：`word/comments.xml` 透明部件（按 id 存、没动过原样带走）+ 正文三个锚点元素读写往返 | 待做 |
-| ② | desktop：三个批注节点注册进 `EDITOR_EXTENSIONS`（呈现为区间高亮 + 编号角标），live 用例 | 待做 |
+| ① | docx-io：`word/comments.xml` 透明部件（按 id 存、没动过原样带走）+ 正文三个锚点元素读写往返 | `5b32ea8` |
+| ② | desktop：三个批注节点注册进 `EDITOR_EXTENSIONS`（区间端点画〔〕、引用记号画"批"字芯片），live 用例 | `52b66da` |
 | ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读侧保真（含 `pPr/w:rPr` 里段落标记的增删），不再丢删除的文字 | 待做 |
 | ④ | desktop：修订呈现（插入下划线 / 删除删除线）+ 接受 / 拒绝命令（右键菜单入口） | 待做 |
 | ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
 | ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
+
+①② 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP）：打一份含两条批注（其中一条区间跨段、
+一条正文里有 `w:br`）的 `.docx` 让 app 打开，编辑器里 6 个锚点全在位（`〔文字〕批` 跨两段各一组），
+点保存后 `word/comments.xml` **逐字节等于原部件**，正文里 6 个锚点元素重写回来，`[Content_Types].xml`
+补上 `comments+xml` 登记。用 Word / WPS 打开验证：本机没装，**BLOCKED**。
 
 
 ## 五、排名 5：制表位 + 前导符
