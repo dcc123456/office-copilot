@@ -240,7 +240,8 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | `e9f2806` |
 | ④.1 | 脚注/尾注部件保真（`footnotes.xml`/`endnotes.xml` + Content_Types + rels）+ 正文引用点的行内 atom | `013d8ca` |
 | ④.2 | 脚注正文的编辑与编号：在编辑器里改脚注内容、插入/删除脚注时重排 `w:id` 与 Word 的显示编号 | `f005b3c` |
-| ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
+| ⑤.1 | 题注 `SEQ`：`SEQ 图 \* ARABIC` 域 + `_Ref` 书签包裹缓存编号，标签各自计数、编号随正文派生重排；对话框选标签/位置/说明文字 | `51750c3` |
+| ⑤.2 | 交叉引用 `REF`/`PAGEREF`：指向 `_Ref…`/`_Toc…` 书签的引用弹窗 | 待做 |
 
 ③.2 的取舍（都是刻意的，不要当成待修项）：
 
@@ -317,6 +318,46 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 正文承载，重新生成目录（③.2）因此必须先有这一对边界。
 未闭合的域（有 begin 无 end）③.1 选择**原样透传**：不替用户编一个 end，Word 重算时会自己补齐。
 
+⑤.1 的做法（题注 `SEQ`）：Word 的题注编号是**域的缓存结果**，不是正文文字（ECMA-376 §17.9.4.15、
+微软「字段代码：SEQ 字段」），所以 `editor/captions.ts` 造的段落是
+`text("图 ") → bookmarkStart(_RefN) → field(SEQ) → bookmarkEnd → text(" 说明")` 五件套：编号写进
+`field.display`，指令 `SEQ 图 \* ARABIC` 写进 `instr`（标签含空格才加引号），序列化仍走 ②/③.1 打通的
+`fldChar`/`instrText` 路径，`docx-io` 一行没改。取号按"目标边界之前有几条同标签的域"来数
+（`sequenceCountBefore`），图/表/公式各自计数，上题注与下题注因此能拿到不同起始号。编号是**派生显示值**：
+`CaptionNumbering` 插件在 `docChanged` 后按标签重扫一遍、把号写回节点 attrs，并用
+`setMeta("addToHistory", false)` 让重排不掺进撤销栈——模式与 ④.2 的脚注编号相同（第二处同一逻辑，§3.2 只是
+照搬结构，没有为此新建基础设施）。书签 id 复用目录那份 `nextBookmarkId`（全文档最大数字 id 加一），
+`_Toc…` 与 `_Ref…` 不会撞号。落文档走既有 op：`planCaptionInsertion` 先按大纲模拟，`runOps` 有跳过的段就
+整批放弃并返回 `ops-failed`；块模型寻址用的文字由 `jsonContentText(json)` 现算——那份实现原本私有在
+`toc.ts`，这是第二处使用，已上收到 `docBlocks.ts`（§3.2）。
+
+⑤.1 的取舍（都是刻意的，不要当成待修项）：
+
+- **不写 `w:pStyle Caption`**：与 ③.2 同理，文档里没有这个样式定义，写过去就是悬空引用；题注段的 attrs 一律留空。
+- **块模型的地址文字里是双空格**（`图  系统架构`）：域是原子节点，不贡献 `textContent`，而 `buildJsonBlock`
+  拿现算的期望文字核对节点，所以标签后那个空格必须留在 text 节点里，否则撤销时按内容寻址找不到回来那条路。
+- **不手工包 `w:hyperlink`**：交给 Word 更新域时生成，同 ③.2。
+- **`_Ref` 书签只保证存在，不做跳转**：引用入口是 ⑤.2。
+
+⑤.1 的验收与差距：
+
+- 真实 app 实测（构建产物 + CDP 驱动，独立 `--user-data-dir`，不碰用户在跑的实例），样例是两段正文
+  （`正文一 / 正文二`）：工具栏「插入题注」开弹窗，预览即 `将插入「图 1 架构图」`；确定后芯片 `["1"]`、
+  书签 `["_Ref1"]`、新段 `图 1 架构图`。**第二次插在前面那条题注之上**，预览给 `图 1 流程图`，落地后芯片
+  `["1","2"]`、书签 `["_Ref2","_Ref1"]`、段落顺序 `图 1 流程图 / 图 2 架构图`——**编号跟着正文重排**，
+  新号占 1、旧那条自动变 2；点工具栏「撤销」回到 `["1"]` 与 `图 1 架构图`。
+- 保存后读回 `word/document.xml`：`SEQ` 指令 2 条、缓存编号 `["1","2"]`，`w:bookmarkStart` 是段直子元素
+  （`w:id="2" w:name="_Ref2"` / `w:id="1" w:name="_Ref1"`），且指令文字没有出现在任何 `w:t` 里
+  （这是要求，不是缺陷）。`docx-io` 读回题注 2 段，首段节点序
+  `text:图 → bookmarkStart:_Ref2 → field:1 → bookmarkEnd → text: 流程图`，写回没有被挡下的段。
+- **保存产物与读入的 `document.xml` 逐字节不一致（2095 → 2149），根因不在题注**：另跑了一个"打开后不编辑、
+  直接保存"的隔离探针，结果 `<w:sectPr>` **整块消失**（打开时有，原样保存后没有）——页面设置被应用的保存
+  payload 丢了，而 `docx-io` 的直接读写路径会保留它。这是 §2.7 的既有缺陷，属排名 7 ①（多节 sectPr 读写保真），
+  **没有夹进本次题注提交**。
+- 差距：题注段没有 `Caption` 样式，在 Word 里不会自动带出题注的字号与间距；编号只在编辑器里派生，
+  落盘是域的缓存值，Word 按 F9 重算时以自己为准。
+- **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，只做到读回一致。
+
 ## 四、排名 4：批注 / 修订跟踪
 
 - 修订 = `w:ins`/`w:del`（run 级）、`w:pPrChange`/`w:rPrChange`（格式改动）、段落删除用
@@ -376,6 +417,10 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
 - 行号：`w:lnNumType w:countBy="1" w:restart="newPage"`（节属性）。
 
 提交切分：① 多节 sectPr 读写保真；② 分栏；③ 页面边框 + 行号；④ 首字下沉；⑤ 水印。
+
+> ⑤.1 期间实测到的新事实（2026-10-11，隔离探针：打开样例后不编辑、直接保存）：**桌面 app 的保存 payload 会让
+> `<w:sectPr>` 整块消失**，而 `docx-io` 的直接读写路径保留它。也就是上面那条"读侧丢弃"在桌面上还额外严重一层——
+> 单节文档的页面尺寸也保不住。①动手时先定位是渲染侧没带上，还是写侧又丢了一次。
 
 ## 八、总验收表（每个功能提交都要填满）
 
