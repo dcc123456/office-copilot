@@ -11,11 +11,13 @@
 1. **单位换算只在 `packages/docx-io` 进出口**（AGENTS §2.1）。编辑器里一律 pt / 倍数 / CSS px；
    OOXML 里是 twips（1pt = 20 twips）。因此本规格里所有"写进 `w:*` 属性"的换算都发生在
    `ooxml-pm.ts`，`apps/desktop` 里禁止出现第二份换算。
-2. **属性必须显式建模，`rawPpr` 只做兜底**。现在的问题正是"读侧只解析三四个属性，写侧
-   `cleanRaw` 把整个 `<w:ind>` 抹掉再按 attrs 重建"（`packages/docx-io/src/ooxml-pm.ts:980-990`
-   + `:1027-1040`），于是**没建模的属性在保存时静默消失**——右缩进就是这么丢的（实测见 §1.1）。
-   新属性走的路线统一是：读侧解析进 attrs → 渲染层用 `data-*` 呈现 → 写侧从 attrs 生成。
-   暂时无法建模的复杂结构（如整段 `w:pBdr`）才继续靠 rawPpr，且**不得被 cleanRaw 波及**。
+2. **属性必须显式建模，`rawPpr` 只做兜底**。改动前的问题是"读侧只解析三四个属性，写侧
+   `cleanRaw` 把整个 `<w:ind>` 抹掉再按 attrs 重建"，于是**没建模的属性在保存时静默消失**
+   ——右缩进就是这么丢的（实测见 §1.1）。新属性走的路线统一是：读侧解析进 attrs → 渲染层用
+   `data-*` 呈现 → 写侧从 attrs 生成。
+   **已落地**：`cleanRaw` 与整元素重建都删掉了，现在 `mergedElementXml` 做属性级合并（只删
+   真正被改值的那对同义属性），`paragraphPprXml` 按 CT_PPr 顺序重建 `<w:pPr>`；暂时无法建模
+   的复杂结构（如整段 `w:pBdr`）继续靠 rawPpr 原样透传。
 3. **一个功能一个提交**（用户要求 + AGENTS §1.4/1.6）。每个提交的验收按 §7 那张表逐条打分。
 4. **新增节点/标记必须注册进 `EDITOR_EXTENSIONS`**（`apps/desktop/src/editor/extensions/editorExtensions.ts`），
    并同步补 `docBlocks.live.test.ts` 真实 schema 用例 + `docx-io` 往返用例（AGENTS §5.3）。
@@ -70,25 +72,37 @@ Word 的「段落」对话框给的是：常规（对齐方式 + 大纲级别 + 
 | `outlineLevel` | 0–9 或 null（Word 的"级别 1–10"= 0–9） | 无视觉效果，仅 `data-outline-level` + 大纲侧栏读取 | `w:outlineLvl/@w:val` |
 | `keepWithNext` | boolean | 无 | `w:keepNext` |
 | `keepLines` | boolean | 无 | `w:keepLines`（段中不分页） |
-| `widowControl` | boolean \| null（null=继承样式，Word 默认开） | 无 | `w:widowControl`（`w:val="off"` 表示关） |
+| `widowControl` | boolean \| null（null=继承样式，Word 默认开） | 无 | `w:widowControl`（CT_OnOff：关写 `w:val="0"`，缺省即 true） |
 | `snapToGrid` | boolean \| null | 无 | `w:snapToGrid` |
 
 UI：`components/ParagraphPopover.tsx` 的 `ParagraphFields` 改成 Word 的两段式——
 "常规"（对齐方式 4 段钮 + 大纲级别下拉 + 特殊格式下拉[无/首行缩进/悬挂缩进] + 左侧/右侧缩进 +
-特殊格式缩进值）、"间距"（现有段前/段后/行距不动）、"换行控制"（4 个 checkbox）。
-数值框**必须允许负值**（悬挂走的是"特殊格式"下拉 + 正数宽度，内部再取负），
-并删掉 `Math.max(0, …)`。段落属性入口同时挂进右键菜单已有的「段落(P)…」，不新建第二个面板。
+特殊格式缩进值）、"间距"（现有段前/段后/行距不动）、"分页与换行"（5 个开关：孤行控制、
+与下段同页、段中不分页、段前分页、对齐到网格）。数值框**必须允许负值**（悬挂走的是"特殊格式"下拉 +
+正数宽度，内部再取负），并删掉 `Math.max(0, …)`。段落属性入口同时挂进右键菜单已有的「段落(P)…」，
+不新建第二个面板。
+
+> 实测差异：开关用的是既有的 `.pp-seg-btn` 而不是 checkbox——`styles.css` 里 `input[type=checkbox]`
+> 没有 `width:auto`，新增一行复选框需要先改那份公共样式表。
 
 **不做**：`w:leftChars`/`w:firstLineChars` 等字符单位版属性——本仓一律按 pt 建模，
-读到时把它换算掉还是保留？→ 保留 rawPpr 且**不被 cleanRaw 波及**（§0.2 的写法改造里，
-`cleanRaw` 只删除本仓已建模并即将重写的属性；整元素删除必须改成"属性级合并"）。
+读到就保留：`mergedElementXml` 做的是属性级合并，`*Chars`/`*Lines` 同义属性只在本轮**确实改了
+那个值**时才删除，否则原样透传（实测见 `docx.test.ts` 的"两次保存字节一致"用例）。
 
-### 1.3 提交切分
+### 1.3 提交切分（排名 1 已全部落地）
 
-1. `fix(docx-io): 段落右缩进与 w:start/w:end 在往返中丢失` —— 含 §0.1 的 `w:ind` 生成器合并。
-2. `fix(desktop): 段落面板把悬挂缩进清零` —— `Num` 允许负值 + 特殊格式下拉。
-3. `feat(docx-io): 段落属性补大纲级别/同页/不分页/孤行控制/对齐网格` —— 读写 + 往返用例。
-4. `feat(desktop): 段落对话框补齐 Word 字段` —— 全局属性 + `ParagraphFields` 改版 + live 用例。
+1. `fix(docx-io): 段落右缩进与 w:start/w:end 在往返中丢失` —— 含 §0.1 的 `w:ind` 生成器合并。（`35ee7a6`）
+2. `fix(desktop): 段落面板把悬挂缩进清零` —— 特殊格式下拉 + 磅值取绝对值。（`da82107`）
+3. `feat(docx-io): 段落属性补大纲级别/同页/不分页/孤行控制/对齐网格` —— 读写 + 往返用例。（`857f184`）
+4. `feat(desktop): 段落对话框补齐 Word 字段` —— 全局属性 + `ParagraphFields` 改版 + live 用例。（`ed57c87`）
+5. `fix(docx-io): 分隔线导出为段落底部边框` —— `horizontalRule` 不再引用本仓没写进
+   styles.xml 的 `HorizontalRule` 样式，改成 `<w:pBdr><w:bottom w:val="single" w:sz="6"
+   w:space="1" w:color="auto"/>`（`w:sz` 单位 1/8 磅，ECMA-376 §17.3.4 的例子里 sz=18 即
+   2.25 磅）。导入侧不新增识别：带 `w:pBdr` 的段落继续按 rawPpr 原样透传，两次保存字节一致。
+   （`688e2e6`）
+
+> 遗留（不在排名 1 范围内，留给后续排名）：`codeBlockXml` 仍引用未定义的 `Code` 样式；
+> 标题/引用块整体丢弃 rawPpr；`w:tab` 制表符不会重新写出。
 
 ---
 
@@ -193,6 +207,24 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
 | Word 实测 | 本机无 Word/WPS → 标 BLOCKED；不得写"已验证" |
 | 提交 | 中文 `<type>(<scope>): 做了什么+为什么`，一提交一件事，推送后 `git ls-remote origin main` 复核 |
 
+### 8.1 排名 1 验收记录（`35ee7a6` `da82107` `857f184` `ed57c87` `688e2e6`）
+
+- 往返用例：`docx.test.ts` 的"keeps every indentation spelling through a real save"、
+  "keeps the pagination switches and the paragraph mark run props"、
+  "keeps an imported paragraph border through two real saves"、
+  "saves the editor's horizontal rule as a paragraph bottom border"（两次保存字节一致）。
+- live 用例：`docBlocks.live.test.ts` 的"段落对话框补齐的字段（真实 schema）"3 条，含
+  "新段落六个新属性都是 null，套版不会凭空写出 `w:keepNext`"。
+- 局部格式：整段字符样式仍走 `applyStyleToNode` 的部分覆盖拒绝；新增字段都是段落级，无拍平面。
+- 撤销：`indentRight` 与 5 个开关进 `STYLE_KEYS`，`setStyle` op 的逆操作由既有快照机制给出；
+  开关与 `outlineLevel` **刻意不上报给 LLM**（`agent.ts` 提示词只列缩进/间距），避免模型乱设分页。
+- 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包
+  docx-io 103 / desktop 119 / word-client 8 / word-tools 6 / server 2；`apps/cli`、
+  `packages/shared` 无测试文件（根命令 `passWithNoTests`，故必须逐包核对）。
+- UI：`[!] BLOCKED`——本仓没有 Electron 的 CDP harness，渲染层 dev 也无 mock bridge，
+  新面板未实跑走一遍；仅有真实 schema 的 live 测试作为替代证据。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。
+
 ## 附录 A：现状盘点（`path:line` 为证）
 
 - 段落格式属性与命令：`apps/desktop/src/editor/extensions/ParagraphFormatting.ts:34-133`
@@ -200,10 +232,13 @@ OOXML：`w:rPr/w:vertAlign w:val="superscript|subscript"`。
 - 段落面板：`apps/desktop/src/components/ParagraphPopover.tsx`（`ParagraphFields` 被工具栏与
   右键「段落(P)…」共用）；字体面板 `components/FontFields.tsx`；
   菜单模型 `apps/desktop/src/editor/contextMenu.ts`。
-- OOXML 读侧段落属性：`packages/docx-io/src/ooxml-pm.ts:311-380`（pPr 采集 + rawPpr）、
-  `:437-455`（`w:ind` 只取 left/firstLine/hanging）、`:412-435`（`w:spacing` 行距）。
-- OOXML 写侧：`paragraphXml` `:957-1008`（`cleanRaw` + 重建）、`synthesizedFormatXml` `:1012-1041`、
-  `pPrXml` `:1233-`、`horizontalRule` `:933`、`pmToOoxml` 尾部单 sectPr `:234-243`。
+- OOXML 读侧段落属性：`packages/docx-io/src/ooxml-pm.ts:307-383`（pPr 采集 + rawPpr 透传）、
+  `:385-`（`readParagraphFormat`：`w:ind` 含 left/right/start/end/firstLine/hanging、`w:spacing`
+  行距、`w:outlineLvl` 与 4 个 CT_OnOff 开关）。
+- OOXML 写侧：`paragraphXml` `:1001-`、`PPR_CHILD_ORDER` `:1029`（CT_PPr 子元素顺序）、
+  `modeledPprParts` `:1102`、`paragraphPprXml` `:1137`（导入与新建段落共用）、
+  `mergedElementXml` `:1216`（属性级合并）、`horizontalRuleXml` `:1422`、
+  `pmToOoxml` 尾部单 sectPr。
 - 样式：`packages/docx-io/src/styles.ts`（`StyleMap`）、`docx.ts:119`（`word/styles.xml`）。
 - 域：`apps/desktop/src/editor/extensions/Field.ts`；编号：`packages/docx-io/src/numbering.ts`。
 - 模板里的首行缩进按 pt 计算：`apps/desktop/src/editor/templates.ts:26`（`2 字符 = 2 × 字号磅值`）。
