@@ -1,10 +1,12 @@
-import { children, firstChild, onOffValue, parseDocument, serialize } from "./xml.js";
+import {
+  children,
+  firstChild,
+  onOffValue,
+  parseDocument,
+  serialize,
+  val,
+} from "./xml.js";
 import type { Element } from "./xml.js";
-
-function val(el: Element | undefined): string | undefined {
-  if (!el) return undefined;
-  return (el.attributes?.["w:val"] as string | undefined) ?? undefined;
-}
 
 /** Twentieths of a point in one CSS px, the inverse of docx.ts's TWIP_TO_PX. */
 const TWIPS_PER_PX = 15;

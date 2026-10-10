@@ -113,6 +113,22 @@ export function onOffValue(el: Element | null | undefined): boolean | undefined 
 }
 
 /**
+ * 读 OOXML 属性表里那个通用的 @w:val（`w:jc`、`w:pStyle`、`w:sz` 都以它装值）。
+ *
+ * `docx-io` 里每个读属性的模块都要它，所以和 `onOffValue` 一起放在最底层：
+ * 之前 styles/numbering/ooxml-pm 各写了一份一模一样的，读法稍有出入就会让
+ * "正文读得到、样式读不到"这类分歧无从对照。
+ *
+ * @param el 承载 @w:val 的元素；不存在时传 undefined/null。
+ * @returns 属性原值（不换算单位、不解释语义）；元素缺失或没写 @w:val 时返回 undefined，
+ *   含义是"这里没建模过"，调用方不得替 Word 补一个它没写过的值。
+ */
+export function val(el: Element | null | undefined): string | undefined {
+  if (!el) return undefined;
+  return (el.attributes?.["w:val"] as string | undefined) ?? undefined;
+}
+
+/**
  * Parse a standalone XML fragment (multiple top-level elements allowed) and
  * return them as Element nodes. Wraps the fragment in a synthetic root.
  */

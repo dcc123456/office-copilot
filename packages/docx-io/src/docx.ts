@@ -8,6 +8,7 @@ import {
   parseDocument,
   parseFragment,
   serialize,
+  val,
   type Element,
 } from "./xml.js";
 import { ooxmlToPm, pmToOoxml } from "./ooxml-pm.js";
@@ -185,7 +186,7 @@ export class DocxFile {
     return all.map((p, index) => {
       const pPr = firstChild(p, "w:pPr");
       const pStyle = pPr ? firstChild(pPr, "w:pStyle") : undefined;
-      const style = pStyle?.attributes?.["w:val"] as string | undefined;
+      const style = val(pStyle);
       return { index, text: paragraphText(p), style };
     });
   }

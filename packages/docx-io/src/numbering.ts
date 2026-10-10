@@ -1,10 +1,5 @@
-import { children, firstChild, parseDocument } from "./xml.js";
+import { children, firstChild, parseDocument, val } from "./xml.js";
 import type { Element } from "./xml.js";
-
-function val(el: Element | undefined): string | undefined {
-  if (!el) return undefined;
-  return (el.attributes?.["w:val"] as string | undefined) ?? undefined;
-}
 
 /**
  * Parse word/numbering.xml so we can tell whether a <w:numPr> paragraph is

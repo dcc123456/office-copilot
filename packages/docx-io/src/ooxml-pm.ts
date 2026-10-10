@@ -8,6 +8,7 @@ import {
   parseDocument,
   parseFragment,
   serialize,
+  val,
   type Element,
 } from "./xml.js";
 import type { PPrAttrs, PMDoc, PMMark, PMNode, PMTextNode } from "./pm-schema.js";
@@ -1951,11 +1952,6 @@ function stripMarker<T extends PMNode>(node: T): T {
     return copy as T;
   }
   return node;
-}
-
-function val(el: Element | undefined): string | undefined {
-  if (!el) return undefined;
-  return (el.attributes?.["w:val"] as string | undefined) ?? undefined;
 }
 
 /**
