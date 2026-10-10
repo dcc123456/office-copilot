@@ -515,7 +515,7 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 | ② | desktop：三个批注节点注册进 `EDITOR_EXTENSIONS`（区间端点画〔〕、引用记号画"批"字芯片），live 用例 | `52b66da` |
 | ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读成一个 `revision` 标记、写回按修订区间合并成单元素；段落标记的增删仍靠 `rawPpr` | `5197192` |
 | ④a | desktop：标记注册进 `EDITOR_EXTENSIONS`（插入下划线 / 删除删除线 + 作者与时间）+ 接受 / 拒绝命令 | `bee11e4` |
-| ④b | desktop：接受 / 拒绝的右键菜单入口 | 待做 |
+| ④b | desktop：接受 / 拒绝的右键菜单入口 | `ced2499` |
 | ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
 | ⑥ | 修订开关：开了就把本次编辑写成 `w:ins`/`w:del` | 待做 |
 
@@ -531,6 +531,12 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 
 ③④a 之后仍然没建模的：移动类修订（`w:moveFrom`/`w:moveTo`/`w:moveFromRangeStart`）读侧没有分支，
 移动过的文字按普通文字收下、写回不再带移动标记——真要补是给同一个标记加一个 `kind` 值，不新开机制。
+
+④b 的实测（同一套 CDP 探针，右击用 DOM 上的 `contextmenu` 事件合成）：右击落在插入的文字上，菜单里
+"接受修订 / 拒绝修订"两条都可用，点接受后**两个 `ins` 片段一起清掉**（同一次修订的两个 run），删除线
+那两条原样留着；右击落在没有修订的正文上，两条都在但 `disabled`；右击落在删除的文字上点拒绝，
+被删的字**留下**且标记清空。存盘后 `document.xml` 里 `<w:ins>`/`<w:del>` 一条都不剩、正文一字未少，
+带 `w:b` 的那个 run 仍带着自己的 `w:rPr`。用 Word / WPS 打开验证：本机没装，**BLOCKED**。
 
 ①② 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP）：打一份含两条批注（其中一条区间跨段、
 一条正文里有 `w:br`）的 `.docx` 让 app 打开，编辑器里 6 个锚点全在位（`〔文字〕批` 跨两段各一组），
@@ -765,31 +771,35 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   `apps/task-pane` 仍无测试文件。
 - 提交：`26e5783` `3a9a79b` 已推送，`git ls-remote origin main` = `3a9a79b`。
 
-### 8.4 排名 4 ③④a（修订跟踪读写保真 + 编辑器标记与接受/拒绝）验收记录（`5197192` `bee11e4`）
+### 8.4 排名 4 ③④a④b（修订跟踪读写保真 + 编辑器标记、接受/拒绝与菜单入口）验收记录（`5197192` `bee11e4` `ced2499`）
 
 - 往返用例：`ooxml-pm.test.ts` 的"修订跟踪（`w:ins` / `w:del` / `w:delText`）"8 条——读成标记且
   id/author/date 逐字带走、写回逐字节相同且二次写出一致、一次修订并成一个元素内部两个 `w:r`、
   `del` 套 `ins` 只留外层且不产出 `<w:ins`、超链接在外修订在内、段落标记的 `w:pPr/w:rPr/w:ins` 透传、
   文档没作者时不编名字、被删的制表符留在同一条删除里；再加 `DocxFile` 的
   "keeps tracked insertions and deletions across open → save"。
-- live 用例：`docBlocks.live.test.ts` 的"修订跟踪（真实 schema）"5 条——docx-io 的产出进真实
+- live 用例：`docBlocks.live.test.ts` 的"修订跟踪（真实 schema）"6 条——docx-io 的产出进真实
   `EDITOR_EXTENSIONS` 不被丢、写回仍是 `w:ins`/`w:delText`、部分改色不拍平同段的加粗与红字、
-  接受/拒绝四种结局各一条、一处修订被按段落拆开时接受一次全清、选区没碰到修订时返回 `false`。
+  接受/拒绝四种结局各一条、一处修订被按段落拆开时接受一次全清、选区没碰到修订时返回 `false`，
+  再加"菜单落点事实与命令同一个判据"一条（`selectionTouchesRevision` 与 `acceptRevision`
+  不能一个说有一个说无）。菜单数据层另有 `contextMenu.test.ts` 的一条置灰用例，
   呈现另有 `extensions/Revision.test.ts` 3 条（`data-revision` 与 `title`、缺作者时不编名、
   `parseHTML` 返回空）。
 - 局部格式：标记合并只按 `type` 与 attrs 分组，不重建 `w:rPr`，同段其它字符格式原样留在自己的 run 里。
 - 撤销：接受 / 拒绝是**一个事务**（所有区间按位置倒序攒在同一个 `tr` 上），所以 ⌘Z 一次回到改动前；
-  本节没有新增 op 类型，modlog 与 AI 改动块的逆操作机制不受影响。命令目前还没有 UI 入口（④b），
-  等接到右键菜单时再按 §2.5 检查是否要进修改历史。
+  本节没有新增 op 类型，modlog 与 AI 改动块的逆操作机制不受影响。接到右键菜单后仍是同一条命令，
+  用户在菜单里点的是一次普通编辑。
 - 类型 + 测试：`pnpm build` EXIT=0（含 `tsc --noEmit`，8 个包）；`pnpm test` EXIT=0，逐包
-  docx-io 249 / desktop 262（24 个文件）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、
+  docx-io 249 / desktop 264（24 个文件）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、
   `packages/shared`、`apps/task-pane` 仍无测试文件。
   **踩到的坑要记下来**：`apps/desktop` 解析 `@office-copilot/docx-io` 走的是 `dist/`，改了 docx-io
   源码不重新构建的话，桌面测试看到的还是旧转换器（症状是插入的文字被并回普通 run、`delText` 直接消失）。
-- UI：真实 app 探针（见上面"③④a 的实测"）——4 个 `span[data-revision]` 的配色与 `title` 正确，
-  保存后 `w:ins`/`w:del`/`w:delText` 回来且无重复 id；段落标记那条修订经编辑器丢失，已记为缺口。
+- UI：真实 app 探针两轮（见上面"③④a 的实测"与"④b 的实测"）——4 个 `span[data-revision]` 的配色与
+  `title` 正确，保存后 `w:ins`/`w:del`/`w:delText` 回来且无重复 id；右击落在修订上两条命令可用、
+  落在正文上置灰，点接受/拒绝后标记按整条修订清空而文字一字不缺。
+  段落标记那条修订经编辑器丢失，已记为缺口。
 - Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。
-- 提交：`5197192` `bee11e4` 已推送，`git ls-remote origin main` = `bee11e4`。
+- 提交：`5197192` `bee11e4` `ced2499` 已推送，`git ls-remote origin main` = `ced2499`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
