@@ -492,6 +492,9 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
   PM 建节点时不认识的就直接不保留，所以任何"靠透传保真"的段落内容都过不了"打开→保存"这一趟。
   补法是把 `rawPpr` 注册成段落的非渲染全局属性，但它会同时改变排名 1 / 5 / 7 各条的透传结局，
   按 §1.4 单独成片，不夹进修订的提交里。
+  **（这片已经做掉：④ 的 `d30939a` 把 `rawPpr` 注册成隐式段落属性，见 §7 的 ④ 判据与 §8.8。
+  段落标记自己的 `w:ins`/`w:del` 现在也跟着 rawPpr 活过编辑器，但那条场景没有单测覆盖，
+  等 ⑤⑥ 再补。）**
 - **修订建模成标记而不是节点**：一次修订只覆盖段落里的一段文字，文字必须留在原位；做成 `ins`/`del`
   节点会把段落劈开，还得重新定义跨块语义。标记形状 `{kind, id, author, date}` 进 `PMMark` 联合（§5.3），
   四者都 `rendered: false`——归属信息不是 DOM 契约，靠 `editor.getJSON()` 落盘。
@@ -670,7 +673,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 分节：`w:p/w:pPr/w:sectPr`（分节符）与 body 末尾的 `w:sectPr`。`pmToOoxml`（`:291-301`）在 body
   末尾写一个默认 `w:sectPr`，读侧遇到 body 级 `w:sectPr` 直接 `continue` 丢弃（`:264`）——
   节属性走的是 `section` 载荷而不是 PM 文档，所以单节文档靠 `replaceProseMirror` 把原节点换回来。
-  段内分节符（`w:pPr/w:sectPr`）目前只靠 `rawPpr` 透传，经编辑器会丢（见下面"①的实测"）。
+  段内分节符（`w:pPr/w:sectPr`）靠 `rawPpr` 透传；`rawPpr` 到 ④ 才注册进段落 schema，此前经编辑器会丢（见下面"①的实测"）。
 - 分栏（**②已落地**）：`w:cols w:num="2" w:space="twips"` + 每栏 `w:col`，承载在 `SectionGeometry.columns`
   上（`{count, gap, equalWidth, widths}`，gap/widths 是 CSS px @96DPI），入口就是「页面设置」面板。
 - 页面边框（**③已落地**）：`w:pgBorders`（`CT_PageBorders`，父元素 `sectPr`，§17.6.10）承载在
@@ -678,14 +681,17 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   `{style, sizePt, spacePt, color}`。线宽 `w:sz` 是**八分之一 pt**、间距 `w:space` 是 **pt**（§17.3.4），
   两者就按 pt 存在模型里，不再换算成 cm。水印：`w:headerReference` 里的 `v:shape` 文字（Word 用
   WordArt VML，本仓可以退化成 `w:pict` 文本框，需在规格里明确"Word 打开效果待验"）。
-- 首字下沉：`w:pPr/w:framePr w:dropRows="3" w:line="…" w:hAnchor="text" w:vAnchor="text"`。
+- 首字下沉（**④已落地**）：`w:pPr/w:framePr` 的 `w:dropCap="none|drop|margin"` + `w:lines`
+  （ECMA-376 §17.3.1.11 `CT_FramePr`；`w:lines` 缺省 **1**，规格里原先写的 `w:dropRows` 这个属性
+  **不存在**）。承载在段落属性 `dropCap` 上：`{position, lines?}`；三态沿用 ②③——
+  `undefined` = 这一段没建模过、原文一动不动，`null` = 用户选"无"，有值 = 值等价就不重建。
 - 行号（**③已落地**）：`w:lnNumType w:countBy w:distance w:start`（`CT_LineNumber`，父元素 `sectPr`，
   在 §17.6.1 的子元素序列里排在 `pgBorders` 之后、`cols` 之前），
   承载在 `SectionGeometry.lineNumbers` = `{countBy, distance(CSS px), start}`；`w:restart` 本片**不建模**，
   靠"值等价就整段不重建"原样留着。
 
 提交切分：① 节属性读写保真（`bba064e`）；② 分栏（`b93c1ef` `a806d69`）；
-③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉；⑤ 水印。
+③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉（`2cfe911` `d30939a`）；⑤ 水印。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -709,6 +715,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 > 仍然没解决的：段内分节符（分节符那一段的 `w:pPr/w:sectPr`）靠 `rawPpr` 透传，而
 > `rawPpr` 在 Tiptap 的段落 schema 里没有注册，所以**经编辑器**的多节文档仍会被拍成单节——
 > 这条与排名 4 记下的 `rawPpr` 缺口是同一个，属独立一片，不夹进本节。
+> **（④ 的 `d30939a` 把 `rawPpr` 注册成隐式段落属性，这条已经解决，见 ④ 的判据与 §8.8。）**
 > 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**。
 
 > ②的判据与实测（`b93c1ef` `a806d69`）：分栏建模成 `SectionGeometry.columns`
@@ -775,6 +782,30 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 > `w:pgMar` 的 1800 变 1803。
 > 用 Word / WPS 实际打开验证：本机未安装，**BLOCKED**（线宽/间距的单位与 `ST_Border` 字面量
 > 取自微软 XML-Schema 参考页，不是本机实测）。
+
+> ④的判据与实测（`2cfe911` `d30939a`）：外部取证先纠正了本规格写错的一处属性名——`CT_FramePr`
+> （§17.3.1.11）里**没有** `w:dropRows`，首字下沉是 `w:dropCap`（`none`/`drop`/`margin`）+
+> `w:lines`，且 `w:lines` 的 Schema 缺省是 **1 行**。缺省是 1 就决定了写侧的取舍：用户在面板上
+> 做过任何一次选择都要显式写行数，否则"3 行"导出会变成 1 行；反过来没动过的段落绝不凭空补
+> `w:lines`，仍是"值等价就整段不重建"。另一处不能想当然：`w:framePr` 只要存在就表示"这一段是
+> 文本框"，所以选"无"不能退化成留下 `<w:framePr/>`——纯下沉框架整条删掉，带边距/锚点的真文本框
+> 只把 `w:dropCap` 写成 `none` 并去掉 `w:lines`。
+> 顺带补上 ①②③ 一路挂在遗留里的 `rawPpr` 缺口：docx-io 早就把 `w:pPr` 里没建模的那半截塞进
+> `rawPpr`，但 Tiptap 的段落 schema 没注册这个属性，于是**任何经编辑器的保存都会把它洗掉**——
+> 真文本框的 `w:hSpace`/锚点、段内 `w:pBdr`、`w:pPr/w:sectPr` 全都掉。④ 把它注册成隐式属性
+> （`parseHTML` 恒 `undefined`、`renderHTML` 什么都不写：HTML 里没有原文可复原，也绝不把 OOXML
+> 泄进 DOM 让粘贴带出垃圾），②的遗留③ 与 ③的遗留⑤ 一起解决。
+> 浏览器侧（Electron 32 / Chromium 128 实测）：`initial-letter` 认 `3` 也认 `3 1`，**负值与
+> `-webkit-initial-letter` 都不支持**，所以"突出到页边距外"只能映射成两值语法 `N 1`（跨 N 行、
+> 只下沉 1 行）；该属性不继承也不认行内 style，所以整份代码只有一条
+> `.oc-drop-cap::first-letter { initial-letter: var(--oc-drop-cap, 3) }`，段落用 CSS 变量把行数传进来，
+> `printHtml` 按 `?raw` 引用同一个文件——画布与纸上是同一条声明（§3.2）。行数走变量而不是复制规则，
+> 是因为 `initial-letter` 无法写进行内 style。
+> 已知差距（实测数字）：Chromium 只在正文行数够时才把下沉字占的行位撑出来——240px 宽、
+> `14px/1.5` 的夹具里 3 行正文配 3 行下沉仍是 63px、配 4 行才 84px，而**单行正文配 3 行下沉只有
+> 21px**，下沉字于是压到下一段（Word 会按 `w:lines` 留空）。`1lh` 单位要 Chrome 133 才有，
+> 本机拿不到；为了让画布撑高而再造一套行盒计算既会跟 `PagedLayout` 的高度测量打架，也不是交付物
+> 关心的事，所以画布保持近似，差距同时记在样式文件与 §8.8。
 
 ## 八、总验收表（每个功能提交都要填满）
 
@@ -917,6 +948,9 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   `CT_SectPr` 序列推断，不是实测。
 - 遗留（写清楚，不算本片做完）：段内分节符仍靠 `rawPpr` 透传，经编辑器会丢，多节文档在桌面上
   仍被拍成单节；与排名 4 记下的 `rawPpr` 注册缺口同属一片独立改动。
+  **（前半个已由 ④ 的 `d30939a` 补上：`rawPpr` 现在是段落的隐式属性，能活过"打开→保存"，
+  live 用例里段内 `<w:pBdr>` 与整条文本框 `w:framePr` 都逐字留下了。但"整篇两节文档经桌面保存
+  仍保持两节"这条还没有实测用例——需要一份真带段内 `w:sectPr` 的样例才能判定，留给下一片。）**
 - 提交：`bba064e` 已推送，`git ls-remote origin main` = `bba064e`。
 
 ### 8.6 排名 7 ②（分栏）验收记录（`b93c1ef` `a806d69`）
@@ -941,7 +975,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   加上观测到的现存文档属性顺序，不是实测。
 - 遗留（写清楚，不算本片做完）：① 面板不提供逐栏宽度编辑，不等宽文档只在**栏数不变**时保住
   `widths`，改栏数会拉平成等宽；② 编辑视图只有导引线，没有栏内回流；③ 段内 `w:pPr/w:cols`
-  仍受 `rawPpr` 注册缺口影响（与 §8.5 同一条）。
+  曾受 `rawPpr` 注册缺口影响（与 §8.5 同一条），已由 ④ 的 `d30939a` 注册 `rawPpr` 解决。
 - 提交：`b93c1ef` + `a806d69` 已推送，`git ls-remote origin main` = `a806d69`。
 
 ### 8.7 排名 7 ③（页面边框 + 行号）验收记录（`587a9c9` `96afc34`）
@@ -979,10 +1013,56 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 遗留（写清楚，不算本片做完）：① 编辑视图无逐行行号（只有数据与打印链路有）；② 改任一条边会
   整段重建 `w:pgBorders`，没建模的 `w:display`/`w:shadow`/`w:zOrder` 在那一次会掉（与 ② 的 `w:sep`
   同一个取舍）；③ 对话框的颜色只能选 hex，没法把已改过的颜色重置回 `auto`；④ `w:restart` 不建模，
-  只在整段未动时保住；⑤ 段内分节符仍受 `rawPpr` 注册缺口影响（与 §8.5、§8.6 同一条）；
+  只在整段未动时保住；⑤ 段内分节符曾受 `rawPpr` 注册缺口影响（与 §8.5、§8.6 同一条），
+  已由 ④ 的 `d30939a` 注册 `rawPpr` 解决；
   ⑥ 桌面原地保存没有产出 `.bak`（只有 `apps/cli/src/fsutil.ts:38` 有），与 §8 安全红线第 4 条对不上，
   等你决定是补桌面侧还是改文档。
 - 提交：`587a9c9` + `96afc34` 已推送，`git ls-remote origin main` = `96afc34`。
+
+### 8.8 排名 7 ④（首字下沉）验收记录（`2cfe911` `d30939a`）
+
+- 往返用例：`docx-io` 新增 6 条——`读出位置与行数，没改动的段落字节一致`、
+  `不是首字下沉的框架原样带走：真文本框、none 与表外值都算没建模过`、
+  `源文档没写 w:lines 时不猜行数，写回也就不会补上它`、
+  `新建的下沉补出锚定：缺省的 hAnchor/vAnchor 是页面，会把首字钉到纸边上去`、
+  `改行数只动 dropCap 与 lines，源文档那条框架的其余属性留着`、
+  `关掉下沉：纯下沉框架整条删掉，真文本框只把 dropCap 写成 none`。
+- live 用例（§5.3：`dropCap` 是段落属性，这次必须有真实 schema 条目）：`docBlocks.live.test.ts` 新增
+  5 条——`有值 / 显式关掉 / 没建模过三种状态都活过 doc JSON 往返`（`null` 在 JSON 里仍是
+  `"dropCap":null`，不与"没建模过"混）；`源文档的下沉进真实 schema，一个没动过的段落写回还是那一句`；
+  `面板改成突出页边距外、四行：写回换掉 dropCap 与 lines，别的属性不牵动`（断言
+  `<w:framePr w:dropCap="margin" w:lines="4" w:hSpace="180"/>` 与段落的 `<w:ind w:left="300"/>` 并存）；
+  `选「无」删掉整条纯下沉框架：留下空的 w:framePr 会把正文变成匿名文本框`；
+  `没建模的段落属性跟着 rawPpr 走过编辑器：真文本框的框架一个字都不动`（整条 ISO 文本框 `w:framePr`
+  与段内 `<w:pBdr>` 逐字留下）。段落默认值那条用例补了一句 `dropCap` 必须是 `undefined`。
+- 属性 DOM 读写（粘贴 / `getHTML→setContent` 路径）：`ParagraphFormatting.test.ts` +7 条——三种状态的
+  `data-drop-cap` 进出、`--oc-drop-cap` 变量、`margin`→`N 1`、缺省行数、读不懂的形状退回 `undefined`
+  （行数为 0/小数/字符串时只保留位置，让面板显示"下沉"而不是"无"）、`null` 不挂类。
+- 局部格式：不涉及——`dropCap` 是段落属性，不碰 `w:rPr`，没有"部分文字带不同格式被拍平"的风险（§2.3）。
+- 撤销：不涉及——没有新增 op，仍走 `formatParagraph` 既有路径；保存仍 `.tmp` → `rename`（§2.4）。
+- 类型 + 测试：`pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包 docx-io **271**（6 个文件，+6）/
+  desktop **298**（27 个文件，+16：live 5 + `ParagraphFormatting.test.ts` 7 + `ParagraphPopover.test.ts` 3 +
+  `printHtml.test.ts` 1）/ word-client 8 / word-tools 6 / server 2；`apps/cli`、`packages/shared`、
+  `apps/task-pane` 仍无测试文件。`vitest.config.ts` 开了 `css: true`：默认配置会把 `?raw` 的样式表
+  stub 成空串，打印那条用例会因此假绿。
+- UI：真实 app 探针（`tmp/dropcap-app-probe.mjs`，独立 `--user-data-dir` + CDP）——面板初始
+  `位置=无 / 行数框禁用 / 段落无类名`；选"下沉"自动补 3 行，段落挂上 `class="oc-drop-cap"`、
+  `style="--oc-drop-cap: 3"`，计算样式 `initial-letter: 3`；行数改 4 → `initial-letter: 4`；
+  位置改"突出到页边距外" → `initial-letter: 4 1`；保存读回
+  `<w:framePr w:wrap="around" w:vAnchor="text" w:hAnchor="text" w:dropCap="drop" w:lines="4"/>`，
+  切 margin 后是 `w:dropCap="margin" w:lines="4"`；再选"无"→ 整份文件 `w:framePr` 命中 **0** 次。
+  样例第一段故意带一条编辑器没建模的 `<w:pBdr><w:bottom w:val="single" w:sz="6" …/></w:pBdr>`，
+  四次保存后它仍在（`PBDR_KEPT_AT_END=true`）、正文一字不缺（`TEXT_KEPT=true`）、连点两次保存
+  字节一致（`STABLE_ACROSS_SAVES=true`）。
+- 已知差距（画布保真）：单行段落的大行数下沉字会压到下一段，Word 按 `w:lines` 留空而 Chromium 128
+  不撑行盒（数字见上面 ④ 的判据）。纸上由 Word 自己排，交付物不受影响。
+- Word 实测：`[!] BLOCKED`——本机未安装 Word / WPS。`w:dropCap`/`w:lines` 的合法值、`w:lines` 缺省 1
+  与新建框架的锚定属性顺序按 ECMA-376 §17.3.1.11（微软 XML-Schema 参考页）推断，不是本机实测。
+- 遗留（写清楚，不算本片做完）：① 画布单行段落的下沉字溢出；② 面板不做 Word 对话框里的"字体"与
+  "距正文"两项——`w:framePr` 不管字体（首字字体来自首字符的字符格式，动它就是 §2.3 的红线），
+  "距正文"是 `w:hSpace`，源文档里的值现在靠 `rawPpr` 逐字保住，但编辑器还不写它；
+  ③ 桌面原地保存仍没有 `.bak`（与 AGENTS §8 安全红线第 4 条不符，仍等你决定）。
+- 提交：`2cfe911` + `d30939a` 已推送，`git ls-remote origin main` = `d30939a2606545f5e9d298e2e11d0b67c4857cbe`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
