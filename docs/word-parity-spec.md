@@ -237,7 +237,7 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 | ② | 域读侧：同段 begin/end 配对成一条 `field` 节点，保留 `instr` 与**字面**缓存结果（`\t`⇄`<w:tab/>`、`\n`⇄`<w:br/>`），域内套域按 fieldDepth 折进外层结果；`Field.ts` 属性补 parse/render | `16a0e89` |
 | ③.1 | 跨段域的边界模型：段落内 begin 而本段无 end 时吐 `fieldBegin`/`fieldEnd` 一对节点（`fldCharTypes`/`closesInParagraph` 预扫判定），begin 后域深度归零让条目里的 `PAGEREF` 继续结构化；写侧 `fieldBoundaryXml` 还原 begin+instrText+separate 三件套；编辑器两个行内 atom | `bc06382` |
 | ③.2 | 目录生成与插入：按当前标题/`outlineLevel` 造 `TOC1…` 条目段（书签 + 制表位 + `PAGEREF`），页码取自本地分页。前提是排名 5 ① 的制表位数据层，已落地 `8c37fb4` | `2dadd0a` |
-| ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | 待做 |
+| ③.3 | 目录的入口与刷新：插入目录弹窗（级别数/是否显示页码/前导符/插入位置取自选区），落地后等分页收敛再刷一次 `PAGEREF` 缓存页码 | `e9f2806` |
 | ④ | 脚注/尾注部件（`footnotes.xml`/`endnotes.xml` + Content_Types + rels） | 待做 |
 | ⑤ | 题注 `SEQ` + 交叉引用 `REF`/`PAGEREF` | 待做 |
 
@@ -251,6 +251,16 @@ any further conflicting formatting"，`w:pPrDefault`/`w:rPrDefault` 各带一份
 - **`deleteBlock` 的逆操作会降级 json 段**：撤销一个插入目录的 op 时，`newFromBlock()` 按纯文本重建，
   `\t` 仍能序列化成 `<w:tab/>`，但 `PAGEREF` 域与 `tabStops` attrs 会丢。整块撤销的语义仍然是"文字回到原样"，
   结构回到原样要等 json 段自己的逆操作。
+
+③.3 的验收与差距：
+
+- 真实 app 实测（构建产物 + CDP 驱动，`--user-data-dir` 走独立目录，不碰用户自己在跑的实例）：工具栏「插入目录」
+  开弹窗 → 默认"光标所在段之后"、收录 1 个标题 → 确定后 toast「已插入目录（1 条）。」，条目段落
+  `data-tab-stops` 为 `{positionPt: 451.5, alignment: "right", leader: "dot"}`，文字 `无标题⇥1`，脏标记亮起。
+- **多页刷新路径未走通**：实测样例只有一页，`watchTocPageNumbers` 的"分页收敛后页码变了"这条分支没被真正触发过；
+  它的正确性目前只有 `tocPageNumberRefresh` 的单测背书。
+- **"用 Word 打开一遍"仍 `[!] BLOCKED`**：本机没有 Word / WPS / LibreOffice，`.docx` 只做到读回一致。
+- 前导符在编辑器里依旧不可见（见上面 ③.2 的取舍），排名 5 ② 一并关掉。
 
 ②的已知差距：一个 `field` 节点只表示**同一段内**的 begin/end 配对，Word 生成的多段目录从第二段起读成纯文本
 ——已由 ③.1 解决。缓存结果里的嵌套域指令（如目录条目的 `PAGEREF`）②只保留文本，③.1 起改由边界节点之间的
