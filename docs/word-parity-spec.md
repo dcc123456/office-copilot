@@ -457,13 +457,19 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 
 判据与取舍（这些是刻意的，不要当成待修项）：
 
-- **批注在编辑器里建模成 `comment` mark，不是两个 inline 节点**：区间的起点/终点是 PM 里"哪些文字带这个标记"
-  的自然表达，侧栏高亮、点击跳转、删除标记都免费拿到；写回时按 mark 覆盖到的第一个/最后一个文字节点定位
-  `commentRangeStart`/`End`。代价是**空区间**（start 紧跟 end）建模不出来——规范允许，Word 行为无文档，
-  读到时整条退化为"只有 `commentReference` 的锚点"，不硬造区间。
-- **`w:commentReference` 那个运行不落 PM**：它是 Word 画批注编号用的载体，我们的写侧在 `commentRangeEnd`
-  之后固定补一个 `<w:r><w:rPr>?<w:commentReference w:id="N"/></w:r>`，读侧把它当锚点记号消费掉。
-  这样正文里不会出现一个"隐形字符"节点，也不会因为它带 `w:rPr`（上标 + 批注框样式）而把样式牵扯进来。
+- **批注在编辑器里建模成三个 inline 节点，不是 `comment` mark**：`commentRangeStart {id}` /
+  `commentRangeEnd {id}` / `commentReference {id}`，与既有 `bookmarkStart`/`bookmarkEnd`、
+  `footnoteReference` 同形（取证第 3 条里它们本来就是 `w:p` 的直接子元素、与 `w:r` 平级）。
+  改用 mark 是错的三条理由：mark 会被复制/剪切带走，一份批注被粘到别处就成了同 id 的第二个区间，
+  而 id 是文档级唯一命名空间（取证第 6 条）；按 mark 集合干活的既有功能（格式刷、样式抓取）
+  会被一个"不是字符样式"的 mark 污染；PM 的 mark 跨块边界本就别扭，批注区间恰恰常常跨段。
+  代价是区间归属要在读侧自己配对（start/end 各落在自己那段），写侧照原位置各写一个空元素——
+  这与书签已经做过的事完全一样，不算新增复杂度。**空区间**（start 紧跟 end）也能自然表示，
+  不需要退化处理。
+- **`w:commentReference` 落 PM，形状照 `footnoteReference`**：它同样是"引用点"而不是文字，
+  读侧消费掉外面那个 `w:r`（那份 `w:rPr` 是 Word 的呈现样式，不进模型），写侧固定输出
+  `<w:r><w:commentReference w:id="N"/></w:r>`。批注编号的呈现由编辑器自己算（脚注那边有
+  `FootnoteNumbering` 插件的先例），不跟 Word 的 `AnnotationReference` 样式较劲。
 - **批注体走脚注那套透明部件**（`footnotes.ts` 的形状：按 id 存 `{ rawXml, dirty }`，没改过的整段原样带走，
   改过的才用 `pmToOoxml` 片段重建），复用 `DocxFile.ensurePartReference` 注册 content type 与关系
   （§3.3/§3.4：引擎层加一个 `comments.ts`，不新建包、不改保存主链路）。
@@ -480,7 +486,7 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 | # | 内容 | 提交 |
 | --- | --- | --- |
 | ① | docx-io：`word/comments.xml` 透明部件（按 id 存、没动过原样带走）+ 正文三个锚点元素读写往返 | 待做 |
-| ② | desktop：`comment` mark 注册进 `EDITOR_EXTENSIONS`，批注区间⇄mark 互转与 live 用例 | 待做 |
+| ② | desktop：三个批注节点注册进 `EDITOR_EXTENSIONS`（呈现为区间高亮 + 编号角标），live 用例 | 待做 |
 | ③ | docx-io：`w:ins`/`w:del`/`w:delText` 读侧保真（含 `pPr/w:rPr` 里段落标记的增删），不再丢删除的文字 | 待做 |
 | ④ | desktop：修订呈现（插入下划线 / 删除删除线）+ 接受 / 拒绝命令（右键菜单入口） | 待做 |
 | ⑤ | 批注侧栏 UI：列出、新增（选区右键）、删除、跳转到锚点；写侧的 `w:date`/`w:author` 取设置里的作者名 | 待做 |
