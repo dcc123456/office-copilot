@@ -26,6 +26,8 @@ export {
   fitStyleId,
   headingLookupFromPaneStyles,
 } from "./styles.js";
+export { mergeStylesXml, nextStyleId } from "./style-edit.js";
+export type { StyleEdit } from "./style-edit.js";
 export type { ResolvedStyle, ResolvedStyleFormat } from "./style-format.js";
 export type {
   StyleDefinition,

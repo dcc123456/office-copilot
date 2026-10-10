@@ -129,6 +129,22 @@ export function val(el: Element | null | undefined): string | undefined {
 }
 
 /**
+ * 元素内部 XML（不含外层标签）。
+ *
+ * `styles.ts`（读 `w:style` 的 `w:pPr` / `w:rPr`）与 `style-edit.ts`（写回时取原定义的
+ * 内部串再合并）要的是同一件事，所以放在最底层的 XML 模块里，避免两份实现的
+ * 子元素序列化方式走偏。
+ *
+ * @param el 已解析的元素。
+ * @returns 其子元素按顺序序列化的结果；没有子元素时返回空串。
+ */
+export function innerXml(el: Element): string {
+  return children(el)
+    .map(serialize)
+    .join("");
+}
+
+/**
  * Parse a standalone XML fragment (multiple top-level elements allowed) and
  * return them as Element nodes. Wraps the fragment in a synthetic root.
  */

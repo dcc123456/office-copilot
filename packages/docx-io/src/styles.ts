@@ -1,6 +1,7 @@
 import {
   children,
   firstChild,
+  innerXml,
   onOffValue,
   parseDocument,
   serialize,
@@ -114,13 +115,6 @@ function attrOnOff(el: Element, name: string): boolean {
   if (raw === undefined) return false;
   const v = String(raw).toLowerCase();
   return !(v === "0" || v === "false" || v === "off");
-}
-
-/** 元素内部 XML（不含外层标签），用于把一段 pPr/rPr 原样带走。 */
-function innerXml(el: Element): string {
-  return children(el)
-    .map(serialize)
-    .join("");
 }
 
 /**

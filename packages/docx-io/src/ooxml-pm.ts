@@ -1128,22 +1128,44 @@ interface PprPart {
 }
 
 /**
- * 按 CT_PPr 顺序稳定排序后拼出 `<w:pPr>`。
+ * 按给定顺序表稳定排序子元素，拼成内部 XML。
  *
  * @param parts 子元素列表，允许乱序；同名元素的相对次序保持传入顺序。
- * @returns 完整的 pPr 字符串；一个子元素都没有时返回空串（段落直接不带 pPr）。
+ * @param order 顺序表（都是带 `w:` 前缀的元素名）；表里没有的名字排到最后。
+ * @returns 排好序的子元素串；空列表返回空串。
  */
-function pprFromParts(parts: PprPart[]): string {
+function sortParts(parts: PprPart[], order: readonly string[]): string {
   const rankOf = (name: string): number => {
-    const i = PPR_CHILD_ORDER.indexOf(name);
-    return i < 0 ? PPR_CHILD_ORDER.length : i;
+    const i = order.indexOf(name);
+    return i < 0 ? order.length : i;
   };
-  const inner = parts
+  return parts
     .map((part, index) => ({ index, rank: rankOf(part.name), xml: part.xml }))
     .sort((a, b) => a.rank - b.rank || a.index - b.index)
     .map((part) => part.xml)
     .join("");
+}
+
+/**
+ * 按 CT_PPr 子元素顺序拼出 `<w:pPr>`。
+ *
+ * @param parts 待写出的子元素。
+ * @returns 完整的 pPr 字符串；一个子元素都没有时返回空串（段落直接不带 pPr）。
+ */
+function pprFromParts(parts: PprPart[]): string {
+  const inner = sortParts(parts, PPR_CHILD_ORDER);
   return inner ? `<w:pPr>${inner}</w:pPr>` : "";
+}
+
+/**
+ * 按 CT_PPr 子元素顺序拼出 pPr 的**内部** XML（不含外层标签）。
+ *
+ * @param parts 待写出的子元素。
+ * @returns 内部串；空列表返回空串。样式定义里的 `w:pPr` 存的是内部 XML，
+ *   所以读侧与写侧共用同一个形状。
+ */
+function pprInnerFromParts(parts: PprPart[]): string {
+  return sortParts(parts, PPR_CHILD_ORDER);
 }
 
 /**
@@ -1176,6 +1198,22 @@ function modeledPprParts(a: PPrAttrs, rawPpr?: string): PprPart[] {
 }
 
 /**
+ * 源文档 pPr 里我们**没建模过**的子元素，原样带走。
+ *
+ * @param rawEls 已解析的 rawPpr 子元素。
+ * @param covered attrs 这一轮已经写出的元素名，同名元素由 attrs 说了算。
+ * @returns 待排序写出的子元素。`w:pStyle` 永远不在这里生成：它由 `pStylePart` 单独
+ *   决定，同一份 pPr 里出现两个时 Word 取第一个，套哪个样式变得不可预测；样式定义里
+ *   写它更是自己引用自己。`w:numPr` 与其余没建模的写法（`w:tabs`、`w:pBdr`）一样带走——
+ *   我们从选区抓不到列表编号，更没有权力删掉用户原本挂在段落或样式上的编号。
+ */
+function unmodeledRawParts(rawEls: Element[], covered: Set<string>): PprPart[] {
+  return rawEls
+    .map((el) => ({ name: el.name, xml: serialize(el) }))
+    .filter((part) => !covered.has(part.name) && part.name !== "w:pStyle");
+}
+
+/**
  * 生成段落的 `<w:pPr>`，两条路径（有 rawPpr 的导入段落 / 编辑器新建段落）共用。
  *
  * 合并规则：attrs 建模过的元素顶替 rawPpr 里的同名元素——spacing/ind 内部还要
@@ -1204,14 +1242,11 @@ function paragraphPprXml(
   } = {},
 ): string {
   const modeled = modeledPprParts(a, opts.rawPpr);
-  const covered = new Set(modeled.map((part) => part.name));
   const rawEls = opts.rawPpr ? parseFragment(opts.rawPpr) : [];
   const rawStyle = rawEls.find((el) => el.name === "w:pStyle");
   // pStyle 只由 pStylePart 决定，别让它从两个来源各进来一次——
   // 同一份 pPr 里出现两个 w:pStyle 时 Word 取第一个，套哪个样式变得不可预测。
-  const rawParts = rawEls
-    .map((el) => ({ name: el.name, xml: serialize(el) }))
-    .filter((part) => !covered.has(part.name) && part.name !== "w:pStyle");
+  const rawParts = unmodeledRawParts(rawEls, new Set(modeled.map((part) => part.name)));
   const parts: PprPart[] = [];
   const applied = fitStyleId(a.styleId, opts.headingLevel, opts.styles);
   const style = pStylePart(applied, rawStyle, opts.pStyle);
@@ -1220,6 +1255,45 @@ function paragraphPprXml(
   if (opts.numPr) parts.push({ name: "w:numPr", xml: opts.numPr });
   parts.push(...modeled);
   return pprFromParts(parts);
+}
+
+/**
+ * 由"从选区抓到的格式"生成一条**样式定义**的 pPr / rPr 内部 XML。
+ *
+ * 与段落写侧共用同一批生成器（`modeledPprParts` / `runPropertiesParts`），所以字号、
+ * 缩进、行距的换算在整个仓库里只有一份（AGENTS §2.1）。样式定义不写 `w:pStyle`：
+ * 那是自己引用自己。我们从选区抓不到列表编号，所以也从不生成 `w:numPr`，
+ * 但被改样式原本挂着的编号与其他没建模的写法一样原样带走。
+ *
+ * @param format.paragraph 段落 attrs（段前/缩进是 pt，lineHeight 是倍数或 pt:N / atLeast:N）。
+ * @param format.marks 选区那段文字的行内标记。
+ * @param existing 被改样式原有的 pPrInner / rPrInner。同名元素被新值顶替，我们没
+ *   建模过的写法（`w:tabs`、`w:pBdr`、`w:lang`）原样留着——Word 的"更新样式以匹配
+ *   所选内容"是在原定义上合并，不是整条重建。
+ * @returns 内部 XML（不含外层标签）；两个空串表示这条样式不带任何属性。
+ */
+export function stylePropertiesXml(
+  format: { paragraph: PPrAttrs; marks: PMMark[] },
+  existing: { pPrInner?: string; rPrInner?: string } = {},
+): { pPrInner: string; rPrInner: string } {
+  const modeled = modeledPprParts(format.paragraph, existing.pPrInner);
+  const rawParts = unmodeledRawParts(
+    existing.pPrInner ? parseFragment(existing.pPrInner) : [],
+    new Set(modeled.map((part) => part.name)),
+  );
+  const runParts = runPropertiesParts(format.marks, null);
+  const covered = new Set(
+    runParts.flatMap((part) => [part.name, ...(part.alsoCovers ?? [])]),
+  );
+  // 源定义里没被这次抓取覆盖的元素留着；w:szCs 跟着 w:sz 走（两者永远成对写出），
+  // 否则旧字号留在后面，Word 按先出现的那条排，字号只改了一半。
+  const keptRunParts = (existing.rPrInner ? parseFragment(existing.rPrInner) : [])
+    .map((el) => ({ name: el.name, xml: serialize(el) }))
+    .filter((part) => !covered.has(part.name));
+  return {
+    pPrInner: pprInnerFromParts([...rawParts, ...modeled]),
+    rPrInner: rprInnerFromParts([...keptRunParts, ...runParts]),
+  };
 }
 
 /**
@@ -1718,18 +1792,49 @@ const RPR_ORDER = [
   "u",
   "shd",
 ] as const;
-type RPrKey = (typeof RPR_ORDER)[number];
+
+/** RPR_ORDER 的带前缀写法，供 `sortParts` 与段落那边用同一套排序。 */
+const RPR_ELEMENT_ORDER = RPR_ORDER.map((key) => `w:${key}`);
+
+/**
+ * 按 CT_RPr 顺序拼出 `<w:rPr>` 的内部 XML。
+ *
+ * @param parts 子元素列表，允许乱序（同名元素的相对次序保持传入顺序）。
+ * @returns 内部串；空列表返回空串。
+ */
+function rprInnerFromParts(parts: PprPart[]): string {
+  return sortParts(parts, RPR_ELEMENT_ORDER);
+}
 
 /** A font name as an XML attribute value. */
 function fontAttr(name: string): string {
   return escapeXml(name).replace(/"/g, "");
 }
 
+/** `<w:rPr>` 的一个子元素 + 它顶替掉的原定义元素名（`sz` 要连 `szCs` 一起换）。 */
+interface RunPropertyPart extends PprPart {
+  /** 除自身之外还要被这条顶替掉的原元素名。 */
+  alsoCovers?: string[];
+}
+
 function runPropertiesXml(marks: PMMark[], link?: LinkStyle | null): string {
+  const inner = rprInnerFromParts(runPropertiesParts(marks, link));
+  return inner ? `<w:rPr>${inner}</w:rPr>` : "";
+}
+
+/**
+ * 由行内标记生成 `<w:rPr>` 的子元素序列。
+ *
+ * @param marks 这段文字的标记（编辑器里的字号是 CSS px、颜色是 #rrggbb）。
+ * @param link 文档级超链接样式；null/undefined 表示这段不是链接。
+ * @returns 每个元素名一项（`w:sz` 那一项同时带 `w:szCs`，两者永远成对写出）。
+ *   没有任何属性时返回空数组。
+ */
+function runPropertiesParts(marks: PMMark[], link?: LinkStyle | null): RunPropertyPart[] {
   // One writer per element name. A duplicated `<w:color>` is not merely
   // untidy: Word honours the first and ignores the rest, which is how a link
   // that also carried the user's own colour used to lose it.
-  const el: Partial<Record<RPrKey, string>> = {};
+  const el = new Map<string, RunPropertyPart>();
   const styleMark = marks.find(
     (m): m is Extract<PMMark, { type: "textStyle" }> => m.type === "textStyle",
   );
@@ -1740,16 +1845,23 @@ function runPropertiesXml(marks: PMMark[], link?: LinkStyle | null): string {
   const linkColor = cssColorToOoxmlHex(link?.color ?? "") ?? "0563C1";
   const linkUnderline = link?.underline !== false;
 
-  if (marks.some((m) => m.type === "bold")) el.b = "<w:b/>";
-  if (marks.some((m) => m.type === "italic")) el.i = "<w:i/>";
-  if (ownUnderline) el.u = `<w:u w:val="single"/>`;
-  if (marks.some((m) => m.type === "strike")) el.strike = "<w:strike/>";
+  const put = (part: RunPropertyPart): void => {
+    el.set(part.name, part);
+  };
+
+  if (marks.some((m) => m.type === "bold")) put({ name: "w:b", xml: "<w:b/>" });
+  if (marks.some((m) => m.type === "italic")) put({ name: "w:i", xml: "<w:i/>" });
+  if (ownUnderline) put({ name: "w:u", xml: `<w:u w:val="single"/>` });
+  if (marks.some((m) => m.type === "strike")) put({ name: "w:strike", xml: "<w:strike/>" });
   if (marks.some((m) => m.type === "code")) {
-    el.rFonts = `<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>`;
+    put({
+      name: "w:rFonts",
+      xml: `<w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/>`,
+    });
   }
   if (marks.some((m) => m.type === "link")) {
-    if (!ownColor) el.color = `<w:color w:val="${linkColor}"/>`;
-    if (!ownUnderline && linkUnderline) el.u = `<w:u w:val="single"/>`;
+    if (!ownColor) put({ name: "w:color", xml: `<w:color w:val="${linkColor}"/>` });
+    if (!ownUnderline && linkUnderline) put({ name: "w:u", xml: `<w:u w:val="single"/>` });
   }
 
   if (styleMark) {
@@ -1766,23 +1878,28 @@ function runPropertiesXml(marks: PMMark[], link?: LinkStyle | null): string {
       ]
         .filter((a) => a !== "")
         .join(" ");
-      el.rFonts = `<w:rFonts ${attrs}/>`;
+      put({ name: "w:rFonts", xml: `<w:rFonts ${attrs}/>` });
     }
     if (fontSize) {
       const pt = cssFontSizeToPt(String(fontSize));
       const n = pt === null ? 0 : Math.round(pt * 2);
-      if (n > 0) el.sz = `<w:sz w:val="${n}"/><w:szCs w:val="${n}"/>`;
+      if (n > 0)
+        put({
+          name: "w:sz",
+          xml: `<w:sz w:val="${n}"/><w:szCs w:val="${n}"/>`,
+          alsoCovers: ["w:szCs"],
+        });
     }
     if (letterSpacing) {
       // rPr `w:spacing` is character spacing in twentieths of a point, and it
       // may be negative (tightening) — only zero means "inherit".
       const pt = cssLetterSpacingToPt(String(letterSpacing));
       const twips = pt === null ? 0 : Math.round(pt * 20);
-      if (twips !== 0) el.spacing = `<w:spacing w:val="${twips}"/>`;
+      if (twips !== 0) put({ name: "w:spacing", xml: `<w:spacing w:val="${twips}"/>` });
     }
     if (color) {
       const hex = cssColorToOoxmlHex(color);
-      if (hex) el.color = `<w:color w:val="${hex}"/>`;
+      if (hex) put({ name: "w:color", xml: `<w:color w:val="${hex}"/>` });
     }
     if (backgroundColor) {
       // Word's 16 highlight names win when the colour is one of them; any
@@ -1792,15 +1909,17 @@ function runPropertiesXml(marks: PMMark[], link?: LinkStyle | null): string {
       const hex = cssColorToOoxmlHex(raw);
       const named = HIGHLIGHT_FROM_CSS[hex ? `#${hex.toLowerCase()}` : raw];
       if (named) {
-        el.highlight = `<w:highlight w:val="${named}"/>`;
+        put({ name: "w:highlight", xml: `<w:highlight w:val="${named}"/>` });
       } else if (hex) {
-        el.shd = `<w:shd w:val="clear" w:color="auto" w:fill="${hex}"/>`;
+        put({
+          name: "w:shd",
+          xml: `<w:shd w:val="clear" w:color="auto" w:fill="${hex}"/>`,
+        });
       }
     }
   }
 
-  const xml = RPR_ORDER.map((k) => el[k]).filter((v): v is string => Boolean(v)).join("");
-  return xml ? `<w:rPr>${xml}</w:rPr>` : "";
+  return RPR_ORDER.map((k) => el.get(`w:${k}`)).filter((p): p is RunPropertyPart => !!p);
 }
 
 function fieldXml(node: Extract<PMNode, { type: "field" }>): string {

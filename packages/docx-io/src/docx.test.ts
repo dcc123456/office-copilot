@@ -357,8 +357,8 @@ describe("DocxFile", () => {
   });
 
   /**
-   * 编辑器里插入的分隔线必须落成段落底部边框：本仓不写 styles.xml，
-   * 旧实现引用的 HorizontalRule 样式在文档里不存在，Word 只会排出空段落。
+   * 编辑器里插入的分隔线必须落成段落底部边框：旧实现引用了一条文档里根本不存在的
+   * HorizontalRule 样式，Word 只会排出空段落。
    */
   it("saves the editor's horizontal rule as a paragraph bottom border", async () => {
     const docx = await DocxFile.fromBytes(await makeDocx(["上文"]));
@@ -373,5 +373,59 @@ describe("DocxFile", () => {
       '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/>',
     );
     expect(body).not.toContain("HorizontalRule");
+  });
+
+  /**
+   * 排名 2 ⑥/⑦：窗格里"新建样式"要能真的存进文件。这里走完整往返——写 styles.xml →
+   * 重新读回来 → 样式链解析，等价于保存后重开一次编辑器。
+   */
+  it("saves a created style into word/styles.xml and reads it back", async () => {
+    const docx = await DocxFile.fromBytes(await makeDocx(["正文"]));
+    const { styles, styleFormats } = await docx.applyStyleEdits([
+      {
+        name: "重点段落",
+        paragraph: { indent: 36, spacingBefore: 12 },
+        marks: [{ type: "textStyle", attrs: { fontSize: "24px", color: "#c00000" } }],
+      },
+    ]);
+    expect(styles.map((s) => s.name)).toContain("重点段落");
+    const out = await docx.toBytes();
+    const zip = await JSZip.loadAsync(out);
+    const stylesXml = await zip.file("word/styles.xml")?.async("string");
+    expect(stylesXml).toContain('w:customStyle="1"');
+    // 这份文档原本没有样式表，部件登记必须补全，否则 Word 判"文档损坏"。
+    const contentTypes = await zip.file("[Content_Types].xml")!.async("string");
+    expect(contentTypes).toContain('PartName="/word/styles.xml"');
+    expect(contentTypes).toContain("wordprocessingml.styles+xml");
+    const rels = await zip.file("word/_rels/document.xml.rels")!.async("string");
+    expect(rels).toContain('Target="styles.xml"');
+    const reopened = await DocxFile.fromBytes(out);
+    const reloaded = await reopened.toProseMirror();
+    expect(reloaded.styles.map((s) => s.name)).toContain("重点段落");
+    expect(reloaded.styleFormats).toEqual(styleFormats);
+  });
+
+  /** 已有样式表时按 splice-and-keep 合并：docDefaults 那条链不能被保存一次就抹平。 */
+  it("keeps docDefaults alive when a style is edited", async () => {
+    const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:pPrDefault><w:pPr><w:spacing w:after="120"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="1"><w:name w:val="Normal"/></w:style></w:styles>`;
+    const docx = await DocxFile.fromBytes(await makeDocx(["正文"], { stylesXml }));
+    await docx.applyStyleEdits([
+      { name: "Loose", paragraph: { indent: 36 }, marks: [] },
+    ]);
+    const reopened = await DocxFile.fromBytes(await docx.toBytes());
+    const { styleFormats } = await reopened.toProseMirror();
+    const created = styleFormats.find((entry) => entry.styleId === "Loose");
+    expect(created?.format).toMatchObject({ indent: 36, spacingAfter: 6 });
+  });
+
+  /** 一次编辑都没产出时不该凭空造一份 styles.xml。 */
+  it("leaves the package untouched when no style edit is valid", async () => {
+    const docx = await DocxFile.fromBytes(await makeDocx(["正文"]));
+    await docx.applyStyleEdits([{ name: "   ", paragraph: {}, marks: [] }]);
+    const zip = await JSZip.loadAsync(await docx.toBytes());
+    expect(zip.file("word/styles.xml")).toBeNull();
+    // 关系与内容类型也不许出现悬空引用：Word 会因为指向不存在的部件而判文档损坏。
+    expect(await zip.file("[Content_Types].xml")!.async("string")).not.toContain("/word/styles.xml");
   });
 });

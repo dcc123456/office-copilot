@@ -17,6 +17,7 @@ import type { PMDoc, PMNode } from "./pm-schema.js";
 import { NumberingMap } from "./numbering.js";
 import { StyleMap, type PaneStyle } from "./styles.js";
 import { resolvedStyles, type ResolvedStyle } from "./style-format.js";
+import { mergeStylesXml, type StyleEdit } from "./style-edit.js";
 import {
   ensureDefaultHeaderFooter,
   loadHeaderFooters,
@@ -150,6 +151,11 @@ export class DocxFile {
   private paragraphs: Element[];
   private numbering: NumberingMap;
   private styles: StyleMap;
+  /**
+   * `word/styles.xml` 的原文。合并式写回要在它上面动刀（splice-and-keep），
+   * 只留 StyleMap 的话 `docDefaults`、`latentStyles` 这些没建模的块就找不回来了。
+   */
+  private stylesXml?: string;
   private headers: HeaderFooterBundle = { entries: {} };
   private pendingSection?: SectionGeometry;
   private pendingStyle?: DocStyle;
@@ -183,7 +189,9 @@ export class DocxFile {
     const styles = StyleMap.fromXml(stylesXml);
     const relsXml = (await zip.file(RELS_XML)?.async("string")) ?? "";
     const headers = await loadHeaderFooters(zip, xml, relsXml, numbering, styles);
-    return new DocxFile(zip, root, numbering, styles, headers);
+    const file = new DocxFile(zip, root, numbering, styles, headers);
+    file.stylesXml = stylesXml;
+    return file;
   }
 
   // -------- Read --------
@@ -746,51 +754,88 @@ export class DocxFile {
    */
   private async writeNumberingIfNeeded(): Promise<void> {
     if (!this.numbering.hasAny()) return;
-
     const existingXml = await this.zip.file(NUMBERING_XML)?.async("string");
-    const newXml = this.numbering.toXml(existingXml);
-    this.zip.file(NUMBERING_XML, newXml);
+    this.zip.file(NUMBERING_XML, this.numbering.toXml(existingXml));
+    await this.ensurePartReference(
+      NUMBERING_XML,
+      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml",
+    );
+  }
 
-    // Content type override.
+  /**
+   * 把"新建样式 / 修改样式"的编辑并进 `word/styles.xml`（splice-and-keep）。
+   *
+   * 与写列表那套同一条路：合并只动被点名的 `w:style`，`docDefaults` 与其余样式原样带走，
+   * 部件不存在时补登记 `[Content_Types].xml` 与 rels。合并完立刻刷新内存里的样式表，
+   * 所以同一次保存里 `replaceProseMirror` 判断 styleId 是否已声明时看到的就是新状态。
+   *
+   * @param edits 本会话累计的编辑（渲染层带全量，顺序 = 用户操作顺序）；空数组什么都不做。
+   * @returns 样式窗格清单与解析好的样式格式，供界面立刻刷新预览；edits 全是无效名字时
+   *   zip 不动，返回的仍是原样式表——不会静默造出一份空 styles.xml。
+   */
+  async applyStyleEdits(
+    edits: readonly StyleEdit[],
+  ): Promise<{ styles: PaneStyle[]; styleFormats: ResolvedStyle[] }> {
+    const projection = (): { styles: PaneStyle[]; styleFormats: ResolvedStyle[] } => ({
+      styles: this.styles.paneStyles(),
+      styleFormats: resolvedStyles(this.styles),
+    });
+    if (!edits.length) return projection();
+    const merged = mergeStylesXml(this.stylesXml, edits);
+    if (merged === undefined || merged === this.stylesXml) return projection();
+    this.stylesXml = merged;
+    this.zip.file(STYLES_XML, merged);
+    await this.ensurePartReference(
+      STYLES_XML,
+      "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+    );
+    this.styles = StyleMap.fromXml(merged);
+    return projection();
+  }
+
+  /**
+   * 确保一个部件在 `[Content_Types].xml` 与 `document.xml.rels` 里登记过。
+   *
+   * 新建的文档可能压根没有这个部件（例如它原本没有样式表），只写 zip 里的 XML
+   * 是不够的：Word 认的是包里的登记关系，缺了就直接判"文档损坏"。
+   *
+   * @param partName zip 内部路径，如 "word/styles.xml"。
+   * @param relationshipTypeUrl rels 里的 @Type，如 "…/relationships/styles"。
+   * @param contentType Override 的 @ContentType（不含 `wordprocessingml.` 前缀差异由调用方给全）。
+   * @returns 无返回值；两处都按需要写入。包里没有 `[Content_Types].xml` 时跳过登记——
+   *   那不是我们要伪造的包；没有 rels 部件时新建一份，Word 只认关系里的引用。
+   */
+  private async ensurePartReference(
+    partName: string,
+    relationshipTypeUrl: string,
+    contentType: string,
+  ): Promise<void> {
     const ctFile = this.zip.file(CONTENT_TYPES);
     if (ctFile) {
-      let ct = await ctFile.async("string");
-      if (!ct.includes("/word/numbering.xml")) {
-        ct = ct.replace(
-          /<Types\b[^>]*>/,
-          (m) =>
-            `${m}<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>`,
-        );
-        this.zip.file(CONTENT_TYPES, ct);
+      const ct = await ctFile.async("string");
+      if (!ct.includes(`/${partName}`)) {
+        const override = `<Override PartName="/${partName}" ContentType="${contentType}"/>`;
+        this.zip.file(CONTENT_TYPES, ct.replace(/<Types\b[^>]*>/, (m) => `${m}${override}`));
       }
     }
 
-    // Document relationship.
     const relsXml = await this.zip.file(RELS_XML)?.async("string");
-    if (relsXml) {
-      if (!relsXml.includes("relationships/numbering")) {
-        const rels = parseDocument(relsXml);
-        const ids = children(rels).map((c) => c.attributes?.["Id"] as string);
-        const nextNum =
-          ids
-            .map((id) => {
-              const m = id?.match(/^rId(\d+)$/);
-              return m ? Number(m[1]) : 0;
-            })
-            .reduce((a, b) => Math.max(a, b), 0) + 1;
-        (rels.children as unknown as Element[]).push({
-          type: "element",
-          name: "Relationship",
-          attributes: {
-            Id: `rId${nextNum}`,
-            Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering",
-            Target: "numbering.xml",
-          },
-          children: [],
-        } as unknown as Element);
-        this.zip.file(RELS_XML, serialize(rels));
-      }
-    }
+    if (relsXml?.includes(relationshipTypeUrl)) return;
+    const rels = relsXml ? parseDocument(relsXml) : newRelsDocument();
+    const existingIds = children(rels).map((c) => c.attributes?.["Id"] as string);
+    (rels.children as unknown as Element[]).push({
+      type: "element",
+      name: "Relationship",
+      attributes: {
+        Id: nextRid(existingIds),
+        Type: relationshipTypeUrl,
+        Target: partName.split("/").pop() ?? partName,
+      },
+      children: [],
+    } as unknown as Element);
+    this.zip.file(RELS_XML, serialize(rels));
   }
 }
 
