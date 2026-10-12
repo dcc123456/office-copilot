@@ -701,6 +701,45 @@ export function paragraphTexts(text: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * 全文改写能动哪些块：有文字的段落与标题。表格、图片和空段一律原样保留——
+ * 空段既没文字可改，也会让"第 i 段"两边数不到一块去。
+ *
+ * @param blocks 当前大纲（`blocksOf` 的结果，`index` 就是块在文档里的序号）。
+ * @returns 按文档顺序排好的可改写块。
+ */
+export function rewritableBlocks(blocks: Block[]): Block[] {
+  return blocks.filter((b) => isTextual(b) && b.text.trim());
+}
+
+/**
+ * 把整篇改写的结果逐段对回原来的段——快捷指令在没有选区时对全文走这条路。
+ *
+ * 只换文字不动版式：模型回的第 i 段落到第 i 个可改写块上。段数一旦对不上就整批放弃，
+ * 既不把多出来的段落硬塞进某一段，也不替用户删掉段落（AGENTS §2.3、§2.7）。
+ *
+ * @param blocks 送出去改写时的那份大纲（落地前会重新取一次并核对文字）。
+ * @param rewritten 模型回的整篇新文字，段间用换行分隔。
+ * @returns `ops` 是与原文一一对应的 setText（`index` 用文档里的块号）；对不齐时为空，
+ *   `errors` 给出放弃的原因。
+ */
+export function alignRewrite(blocks: Block[], rewritten: string): { ops: AiOp[]; errors: string[] } {
+  const targets = rewritableBlocks(blocks);
+  const parts = paragraphTexts(rewritten);
+  if (!targets.length) return { ops: [], errors: ["文档里没有可以改写的文字。"] };
+  if (!parts.length) return { ops: [], errors: ["没有收到改写后的正文。"] };
+  if (parts.length !== targets.length) {
+    return {
+      ops: [],
+      errors: [
+        `模型把 ${targets.length} 段改成了 ${parts.length} 段，段数对不上，只能整批放弃（文档未改动）。选中要改写的那几段再点一次会更稳。`,
+      ],
+    };
+  }
+  const ops: AiOp[] = targets.map((b, i) => ({ op: "setText", index: b.index, text: parts[i]! }));
+  return { ops, errors: [] };
+}
+
 function blockFromNew(nb: NewBlock): Block {
   if (nb.type === "table") {
     return {

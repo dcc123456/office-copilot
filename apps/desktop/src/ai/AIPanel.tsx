@@ -23,9 +23,11 @@ import {
 } from "lucide-react";
 import { SettingsModal } from "../components/SettingsModal.js";
 import { DiffView, InlineDiff } from "./DiffView.js";
-import { describeCoreOp, type Block, type CoreOp } from "./docEdit.js";
+import { alignRewrite, describeCoreOp, rewritableBlocks, type Block, type CoreOp } from "./docEdit.js";
+import { blocksOf } from "../editor/docBlocks.js";
 import {
   aiStreamTransform,
+  applyProposal,
   commitOps,
   commitSelectionRewrite,
   requestProposal,
@@ -60,6 +62,8 @@ interface PlanCard {
 }
 
 interface RewriteCard {
+  /** selection：只改选区那段；document：没有选区时改整篇。 */
+  scope: "selection" | "document";
   from: number;
   to: number;
   beforeText: string;
@@ -81,7 +85,7 @@ type Item =
 
 const uid = () => crypto.randomUUID();
 
-const SELECTION_ACTIONS = [
+const QUICK_ACTIONS = [
   { label: "扩写", action: "扩写" },
   { label: "缩写", action: "缩写" },
   { label: "润色", action: "润色" },
@@ -89,6 +93,13 @@ const SELECTION_ACTIONS = [
   { label: "更口语", action: "换语气:口语化" },
   { label: "译成英文", action: "翻译:英文" },
 ];
+
+/**
+ * 全文改写时追加的约束：落地走 `alignRewrite`，段数对不上就整批放弃，
+ * 所以必须一开始就说清"一段对一段"，别让模型自己合并段落。
+ */
+const FULL_DOC_REWRITE_NOTE =
+  "下面这份是整篇文档。请按原有段落逐段改写：保持段落数量与顺序，一段都不合并、不新增、不删除；只用换行分段，不要编号、不要解释、不要代码块围栏。";
 
 const DOC_ACTION_CHIPS = [
   {
@@ -162,7 +173,7 @@ export function AIPanel({
       t: "msg",
       role: "assistant",
       text:
-        "选中文字后点快捷按钮，或直接写下你的要求（比如「把第三节改成表格」「全文纠正错别字」）。默认是「半自动」：我先给 diff 预览，你确认后才写入文档；「全自动」直接改文档，「聊天」只给建议。每次改动都能在修改历史里看 diff 并单独撤销。",
+        "选中文字后点快捷按钮就改那几段，不选中就是改整篇；也可以直接写下你的要求（比如「把第三节改成表格」「全文纠正错别字」）。默认是「半自动」：我先给 diff 预览，你确认后才写入文档；「全自动」直接改文档，「聊天」只给建议。每次改动都能在修改历史里看 diff 并单独撤销。",
     },
   ]);
   const [input, setInput] = useState("");
@@ -363,7 +374,38 @@ export function AIPanel({
   /* ------------- selection rewrite: stream then apply -------------- */
 
   const applyRewrite = useCallback(
-    async (id: string, card: RewriteCard) => {
+    async (id: string, card: RewriteCard, label: string) => {
+      if (card.scope === "document") {
+        const blocks = blocksOf(editor.state.doc);
+        const current = rewritableBlocks(blocks)
+          .map((b) => b.text)
+          .join("\n");
+        if (current !== card.beforeText) {
+          patchCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            message: "文档内容已经变化，请重新点一次。",
+          }));
+          return;
+        }
+        // 全文改写落成逐段 setText：表格、图片、空段一律不动，每段自己可撤销。
+        const { ops, errors } = alignRewrite(blocks, card.rewritten);
+        if (!ops.length) {
+          patchCard(id, (c) => ({ ...c, status: "failed", message: errors.join("；") }));
+          return;
+        }
+        patchCard(id, (c) => ({ ...c, status: "applying" }));
+        const r = await applyProposal(editor, { summary: label, ops }, docKey);
+        if (!r.ok) {
+          patchCard(id, (c) => ({ ...c, status: "failed", message: r.message }));
+          return;
+        }
+        patchCard(id, (c) => ({ ...c, status: "applied", message: r.message }));
+        onChanged();
+        if (r.message) toast(r.message, "error");
+        return;
+      }
+
       const current = editor.state.doc.textBetween(card.from, card.to, "\n");
       if (current !== card.beforeText) {
         patchCard(id, (c) => ({
@@ -391,25 +433,38 @@ export function AIPanel({
     [editor, docKey, onChanged, patchCard],
   );
 
-  const rewriteSelection = useCallback(
+  /**
+   * 跑一条快捷指令：有选区就改选区，没有选区就改整篇（而不是报错让用户先选）。
+   *
+   * @param action 主进程内置的语气键（`扩写`/`缩写`/`润色`/`换语气:…`/`翻译:…`）。
+   */
+  const quickRewrite = useCallback(
     async (action: string) => {
       if (busyRef.current) return;
       if (modeRef.current === "chat") {
-        note("聊天模式只给建议、不会改动文档。需要改写选中的文字时，切到「半自动」或「全自动」。");
+        note("聊天模式只给建议、不会改动文档。需要改写文字时，切到「半自动」或「全自动」。");
         return;
       }
       const { from, to } = editor.state.selection;
-      const text = editor.state.doc.textBetween(from, to, "\n");
-      if (!text.trim()) {
-        note("请先在文档里选中要改写的文字。");
+      const selected = editor.state.doc.textBetween(from, to, "\n");
+      const scope: RewriteCard["scope"] = selected.trim() ? "selection" : "document";
+      const source =
+        scope === "selection"
+          ? selected
+          : rewritableBlocks(blocksOf(editor.state.doc))
+              .map((b) => b.text)
+              .join("\n");
+      if (!source.trim()) {
+        note("文档里还没有可以改写的文字。");
         return;
       }
+      const label = `${scope === "document" ? "全文" : ""}${action.split(":")[0] ?? action}`;
       const id = uid();
       push({
         id,
         t: "rewrite",
-        label: action.split(":")[0] ?? action,
-        card: { from, to, beforeText: text, rewritten: "", status: "streaming" },
+        label,
+        card: { scope, from, to, beforeText: source, rewritten: "", status: "streaming" },
       });
       setBusyBoth(true);
       const requestId = uid();
@@ -418,7 +473,8 @@ export function AIPanel({
       try {
         await aiStreamTransform({
           action,
-          text,
+          text: source,
+          instruction: scope === "document" ? FULL_DOC_REWRITE_NOTE : undefined,
           providerId: activeProviderId,
           requestId,
           onDelta: (chunk) => {
@@ -440,7 +496,11 @@ export function AIPanel({
         patchCard(id, (c) => ({ ...c, status: "pending" }));
         if (modeRef.current === "auto") {
           toast("全自动：已直接写入文档，可在修改历史里撤销这次修改。", "success");
-          await applyRewrite(id, { from, to, beforeText: text, rewritten: acc, status: "pending" });
+          await applyRewrite(
+            id,
+            { scope, from, to, beforeText: source, rewritten: acc, status: "pending" },
+            label,
+          );
         }
       } catch (e) {
         const err = e as Error & { needsSetup?: boolean };
@@ -542,19 +602,19 @@ export function AIPanel({
       const action = (e as CustomEvent<string>).detail;
       const preset = DOC_BY_LABEL.get(action);
       if (preset) void askAgent(preset.instruction, preset.label);
-      else void rewriteSelection(action);
+      else void quickRewrite(action);
     };
     const subs = [
-      window.officeCopilot.onMenu("ai:expand", () => void rewriteSelection("扩写")),
-      window.officeCopilot.onMenu("ai:shorten", () => void rewriteSelection("缩写")),
-      window.officeCopilot.onMenu("ai:polish", () => void rewriteSelection("润色")),
+      window.officeCopilot.onMenu("ai:expand", () => void quickRewrite("扩写")),
+      window.officeCopilot.onMenu("ai:shorten", () => void quickRewrite("缩写")),
+      window.officeCopilot.onMenu("ai:polish", () => void quickRewrite("润色")),
     ];
     window.addEventListener("ai:run", onRun);
     return () => {
       subs.forEach((u) => u());
       window.removeEventListener("ai:run", onRun);
     };
-  }, [askAgent, rewriteSelection]);
+  }, [askAgent, quickRewrite]);
 
   const activeProvider: ProviderConfig | null =
     settings?.providers.find((p) => p.id === activeProviderId) ?? null;
@@ -809,9 +869,9 @@ export function AIPanel({
                     <>
                       <button
                         className="primary"
-                        onClick={() => void applyRewrite(it.id, c)}
+                        onClick={() => void applyRewrite(it.id, c, it.label)}
                       >
-                        <Check size={12} /> 替换选中
+                        <Check size={12} /> {c.scope === "document" ? "写入全文" : "替换选中"}
                       </button>
                       <button className="ghost" onClick={() => dismiss(it.id)}>
                         <X size={12} /> 放弃
@@ -901,12 +961,12 @@ export function AIPanel({
                     />
                     <div className="ai-pop">
                       <div className="ai-chips">
-                        {SELECTION_ACTIONS.map((a) => (
+                        {QUICK_ACTIONS.map((a) => (
                           <span
                             key={a.label}
                             className="chip"
-                            title="改写选中文字（需要先选中）"
-                            onClick={() => void rewriteSelection(a.action)}
+                            title="改写选中文字；没有选中时改写整篇文档"
+                            onClick={() => void quickRewrite(a.action)}
                           >
                             {a.label}
                           </span>

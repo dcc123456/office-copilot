@@ -214,17 +214,17 @@ function buildMenu(): Menu {
       label: "AI",
       submenu: [
         {
-          label: "扩写选中文字",
+          label: "扩写（选中/全文）",
           accelerator: "Alt+CmdOrCtrl+J",
           click: () => mainWindow?.webContents.send("ai:expand"),
         },
         {
-          label: "缩写选中文字",
+          label: "缩写（选中/全文）",
           accelerator: "Alt+CmdOrCtrl+U",
           click: () => mainWindow?.webContents.send("ai:shorten"),
         },
         {
-          label: "润色",
+          label: "润色（选中/全文）",
           accelerator: "Alt+CmdOrCtrl+I",
           click: () => mainWindow?.webContents.send("ai:polish"),
         },

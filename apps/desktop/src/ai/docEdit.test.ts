@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  alignRewrite,
   coerceProposal,
   planEdit,
   revert,
+  rewritableBlocks,
   runOps,
   type Block,
   type DiagramResolver,
@@ -303,5 +305,50 @@ describe("coerceProposal", () => {
     );
     expect(r.proposal).toBeNull();
     expect(r.errors.join()).toContain("rows");
+  });
+});
+
+describe("alignRewrite：快捷指令没选区时对整篇逐段改写", () => {
+  const table = (index: number): Block => ({
+    index,
+    type: "table",
+    text: "甲 | 乙",
+    rows: [["甲", "乙"]],
+    style: {},
+  });
+
+  it("第 i 段落到第 i 个可改写块，表格与空段不参与对齐", () => {
+    const blocks = [para(0, "第一段"), table(1), para(2, ""), para(3, "第四段")];
+    const r = alignRewrite(blocks, "第一段（润色）\n第四段（润色）");
+    expect(r.errors).toEqual([]);
+    expect(r.ops).toEqual([
+      { op: "setText", index: 0, text: "第一段（润色）" },
+      { op: "setText", index: 3, text: "第四段（润色）" },
+    ]);
+    // 送出去的原文与对齐口径必须同源，否则两边段数永远对不上。
+    expect(rewritableBlocks(blocks).map((b) => b.text).join("\n")).toBe("第一段\n第四段");
+  });
+
+  it("段数对不上就整批放弃，既不硬塞也不替用户删段", () => {
+    const r = alignRewrite(doc("甲", "乙", "丙"), "甲改写\n乙改写");
+    expect(r.ops).toEqual([]);
+    expect(r.errors.join()).toContain("段数对不上");
+  });
+
+  it("文档里没有可改写的文字时给原因，而不是空提案", () => {
+    expect(alignRewrite(doc("", "  "), "随便写点什么").errors.join()).toContain("没有可以改写的文字");
+  });
+
+  it("逐段 setText 走提案管道：版式不动，撤销能回到原样", () => {
+    const blocks = [para(0, "第一段"), table(1), para(2, "第三段")];
+    const { ops } = alignRewrite(blocks, "第一段改写\n第三段改写");
+    const plan = planEdit(blocks, { summary: "全文润色", ops });
+    expect(plan.ok).toBe(true);
+    expect(lines(plan.after)).toEqual([
+      "paragraph:第一段改写",
+      "table:甲 | 乙",
+      "paragraph:第三段改写",
+    ]);
+    expect(lines(revert(plan.after, plan.inverses).after)).toEqual(lines(blocks));
   });
 });
