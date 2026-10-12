@@ -167,11 +167,31 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 额外收获两条：① 未建模结构在**部件内部**（强化了 §零.6）；② `exceljs@4.4.0` 自己写 `dataBar` 条件格式会抛
 `cfvo undefined`（实测），说明它的写路径不可当作"OOXML 正确性"的裁判，只能当夹具。
 
-### 阶段 1 · `packages/sheet-io`：读 + 保真回写
+### 阶段 1 · `packages/sheet-io`：读 + 保真回写 — `[x] 已完成 2026-10-12`
 
 **目标**：`SheetFile.fromBytes()` → `toSheetDoc()` → 不改任何东西再 `toBytes()`，**输出与原文件在所有已建模与未建模部件上等价**。
 **完成判定**：往返单测绿（未建模部件逐字节、sharedStrings 条目数、维度、合并区域数不变）；类型/日期/数字读回正确；
 `.xlsm` 与含外部链接的包给出明确拒绝或"原样保留"结论。**此时还没有 UI。**
+
+**实际结果**：`packages/sheet-io` = `src` 下 10 个源文件 + 4 个测试文件，25 条单测全绿（`address` 5 / `datetime` 4 / `color` 3 / `sheet-file` 13）；
+根 `pnpm build` / `pnpm test` 通过（sheet-io 24、docx-io 296、desktop 398、word-client 8、word-tools 6、server 2；shared/cli 仍无测试文件）。
+
+落地的部件（与原计划文件的对应）：`opc.ts`（解 zip + 关系图 + `.xlsm` 拒绝）、`model.ts`/`address.ts`/`datetime.ts`/`color.ts`
+（唯一换算入口）、`xlsx-strings.ts`/`xlsx-styles.ts`（**只追加不重排**的 string 表与 `cellXfs`）、`xlsx-sheet.ts`
+（持有 `sourceXml`，写回时用正则**定点替换 `<sheetData>` 与 `<dimension>`**，其余元素与扩展属性原样搬运）、`sheet-file.ts`
+（惰性解析 + 快照/还原 + 只覆写变化过的部件）。夹具生成器 `scripts/make-sample-sheet.ts` 的 XML 逐字抄自 §二 的实测样本。
+
+**交叉验证（P4 的替代证据，`tmp/xlsx-probe/cross-read.mjs`）**：我们的 writer 产出 5508 字节 → 第三方独立库 exceljs 4.4.0 读回：
+工作表名 `销售/空表`、`A6="新增项目"`（新增共享字符串）、`C6=300`、`G6` 公式 `SUM(C2:C6)` 缓存值 `660`、
+`D2` 日期 `2026-01-31` 且 numFmt `yyyy-mm-dd`、我们**新追加**的 `E6` 自定义格式 `yyyy"年"m"月"`（numFmtId 165）被正确识别、
+被删的 `C4=null`、合并 `["H1:I2"]`、冻结 pane 完整、数据验证 `list "华东,华北"`、富文本两 run（粗体 + 蓝色）全部读回。
+含跨簿引用 `'[1]Sheet1'!$A$2` 的格与 `xl/externalLinks/externalLink1.xml`（及其 `TargetMode="External"` 关系）也被第三方读回，包部件 13 个一个不少。
+`<conditionalFormatting>` 在产物 XML 里逐字保留（`unzip -p cross.xlsx xl/worksheets/sheet1.xml` 断言），但 exceljs 的
+`getConditionalFormattings` 返回 null —— 这是**该库读路径的局限**，不是产物缺陷（它自己写 `dataBar` 会抛异常，见 §二 阶段 0 额外收获 ②）。
+
+**与执行计划的偏差（记录，不算违背 §1.4）**：§五 把阶段 1 拆成 5 个提交，实际合成 1 个 `feat(sheet-io)`。
+原因是按文件切分会让中间提交处于"引用了还不存在的模块"的状态、`pnpm build` 在该提交上红——
+§1.6 要求每个提交都可推送且远端复核，所以选择"一个包 = 一个可编译提交"。spec 回填单独一个 `docs` 提交。
 
 ### 阶段 2 · 表格视图可用（人手动编辑）
 
@@ -209,7 +229,7 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | --- | --- | --- | --- |
 | 0 | P1/P5 部件清单与解析试验：用 exceljs 生成样本 → 解包 → 打印 parts/rels | `tmp/`（不进主干，`AGENTS.md` §6.5） | 1 提交（仅结论进本文） |
 | 0 | 夹具生成器 | `packages/sheet-io/scripts/make-sample-sheet.ts` | 并入阶段 1 首个提交 |
-| 1 | 新包骨架：`package.json`/`tsconfig`/`vitest.config`（**必须带 `css.postcss.plugins: []`**，`AGENTS.md` §8） | `packages/sheet-io/**` | 提交 1 |
+| 1 | 新包骨架：`package.json`/`tsconfig`（**不建 `vitest.config`**：同类包 `packages/docx-io` 就没有，无 CSS 的包再建一套是平行基建，`AGENTS.md` §3.4；将来若引 CSS 必须带 `css.postcss.plugins: []`，§8） | `packages/sheet-io/**` | 提交 1（实际与 2–5 合为 1 个提交，见阶段 1 偏差说明） |
 | 1 | OPC 打开：解 zip、`[Content_Types].xml`/`workbook.xml`/`_rels` 关系图、拒绝 `.xlsm` | `src/opc.ts` | 提交 2 |
 | 1 | 模型：`SheetDoc`/`Cell`/`NumberFormat`/`styleToken` 与日期序列号换算（唯一入口）；ARGB(`FFFF0000`) ↔ CSS(`#rrggbb`+alpha) 只在此处（实测 §二 P3：`.xlsx` 里是 8 位 ARGB 或 `theme` 引用） | `src/model.ts` `src/datetime.ts` | 提交 3 |
 | 1 | reader：`sharedStrings`（含 `<r>` run）、`sheetData`、`dimension`、`mergeCells`、`cols/rows`、`styles.xml` numFmt 定位 | `src/xlsx-sheet.ts` `src/xlsx-styles.ts` | 提交 4 |
@@ -240,14 +260,21 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### A. 文档正确性（最高优先级，对应 `AGENTS.md` §2）
 
-1. `[ ]` **空改动往返**：读入 → 立刻写出，与原文件在所有部件上语义等价；未建模部件（条件格式、数据验证、透视表、外部链接、图表、主题）逐字节保留。
-2. `[ ]` 打开真实世界工作簿不丢文本：含富文本 `<r>` run 的 sharedStrings 读出为纯文本时，写回后**内容不丢**（格式丢失需给出 warning，不许静默）。
-3. `[ ]` 日期/数字读回正确：序列号 ↔ 日期只在 `sheet-io` 进出口换算一次；同一文件反复打开得到同一显示值。
-4. `[ ]` 公式写回后 **Excel/WPS 打开能重算**（读回断言 `<f>` 存在且合法，`<v>` 为缓存值）；无法本地求值的函数在 UI 明示"需 Excel 重算"，不许显示过期数字当作结果。
+1. `[x]` **空改动往返**：读入 → 立刻写出，与原文件在所有部件上语义等价；未建模部件（条件格式、数据验证、透视表、外部链接、图表、主题）逐字节保留。
+   **实测**：`sheet-file.test.ts`「打开后不改任何东西，写出的每个部件与原文件一致」把 13 个部件（含 `xl/externalLinks/externalLink1.xml` 与它的 rels）逐条 `toEqual` 原文。
+2. `[x]` 打开真实世界工作簿不丢文本：含富文本 `<r>` run 的 sharedStrings 读出为纯文本时，写回后**内容不丢**（格式丢失需给出 warning，不许静默）。
+   **实测**：夹具里那条两 run 的 `<si>`（粗体 + `FF0000FF` 蓝）读成纯文本 `粗蓝`，写回时整条 `rawSi` 原样搬（string 表只追加、不改已有条目）；第三方 exceljs 读回 `richText:[{bold:粗},{蓝}]`。
+3. `[x]` 日期/数字读回正确：序列号 ↔ 日期只在 `sheet-io` 进出口换算一次；同一文件反复打开得到同一显示值。
+   **实测**：`46053 → 2026-01-31`（`datetime.test.ts` 锚定真实样本序列号，含 1900 闰年 bug 的 `dayParts<=60` 分支）；自定义 `numFmtId=164` 与内建 `14` 都判成日期而值仍是序列号；`grep -rn "\bserial\b|serialTo|ToSerial|25569|epochDays" apps packages`（排除 `dist/`）在 `packages/sheet-io` **之外零命中**（本机实跑 exit 1），§零.2 的单点成立。
+4. `[~]` 公式写回后 **Excel/WPS 打开能重算**（读回断言 `<f>` 存在且合法，`<v>` 为缓存值）；无法本地求值的函数在 UI 明示"需 Excel 重算"，不许显示过期数字当作结果。
+   **阶段 1 到位的部分**：`<f>`+`<v>` 成对读写，跨簿引用 `'[1]Sheet1'!$A$2` 不被改写或多余转义；exceljs 读回公式 `SUM(C2:C6)` 与缓存值 `660`。
+   **未到位**：“UI 明示需 Excel 重算”属阶段 2/4，本阶段没有 UI。
 5. `[ ]` 保存走 `.tmp → rename`，原地写回保留 `.bak`；保存中断不会留下半个文件。
-6. `[ ]` `.xlsm` / 含外部连接的包：按阶段 1 的结论明确拒绝或原样保留，二者之一并有测试，不许"看起来成功"。
-7. `[ ]` 单位/颜色换算单点：全仓 grep 不出现第二处 serial/numFmt/颜色换算实现（§零.2）。
-8. `[!] BLOCKED` 用 Excel 或 WPS 实际打开一遍：本机 WPS 无可视验证通道（`AGENTS.md` §8、`docs/word-parity-spec.md` §8.12）。替代证据 = 读回解析一致 + 结构断言；此条**必须**如实标 BLOCKED。
+6. `[x]` `.xlsm` / 含外部连接的包：按阶段 1 的结论明确拒绝或原样保留，二者之一并有测试，不许"看起来成功"。
+   **实测结论**：含 VBA 宏（`xl/vbaProject.bin` 或宏 content-type）**明确拒绝**并给出可读消息；外部链接/透视表/图表/绘图**原样保留**并记进 `unsupported` 交给 UI 提示。各有单测（宏拒绝、`externalLinks` 部件逐字节 + `[1]` 引用活着）。
+7. `[x]` 单位/颜色换算单点：全仓 grep 不出现第二处 serial/numFmt/颜色换算实现（§零.2）。
+   **实测**：serial/numFmt 判定只在 `src/datetime.ts`，ARGB ↔ `#rrggbb` 只在 `src/color.ts`，列宽只存 `widthChars` 原样搬运（有单测钉住不做第二处换算）。
+8. `[!] BLOCKED` 用 Excel 或 WPS 实际打开一遍：本机 WPS 无可视验证通道（`AGENTS.md` §8、`docs/word-parity-spec.md` §8.12）。**已做到的替代证据** = 自读一致 + OOXML 结构断言 + **第三方独立库 exceljs 4.4.0 交叉读**我们的产物（`tmp/xlsx-probe/cross-read.mjs`，结论见阶段 1 实际结果）；此条**必须**如实标 BLOCKED，直到有人在装了 Excel 的机器上打开一遍。
 
 ### B. AI 行为（对应 §零.4/§零.5）
 
@@ -275,10 +302,13 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### E. 测试与门禁（对应 `AGENTS.md` §7）
 
-24. `[ ]` `pnpm build` 全绿（类型检查藏在 build 里，`pnpm test` 不能替代）。
-25. `[ ]` `pnpm test` 全绿，且**逐包核对通过数**（新包 `sheet-io`/`sheet-tools` 必须有测试文件，不许靠 `passWithNoTests` 蒙过）。
+24. `[x]` `pnpm build` 全绿（类型检查藏在 build 里，`pnpm test` 不能替代）。
+   **实测**：`pnpm build > tmp/xlsx-probe/root-build.log 2>&1` → `BUILD_EXIT=0`，日志含 `packages/sheet-io build: Done`。
+25. `[x]` `pnpm test` 全绿，且**逐包核对通过数**（新包 `sheet-io`/`sheet-tools` 必须有测试文件，不许靠 `passWithNoTests` 蒙过）。
+   **实测**：`TEST_EXIT=0`；逐包核对 —— sheet-io **25**、docx-io 296、desktop 398、word-tools 6、word-client 8、server 2；`packages/shared`/`apps/cli` 仍 “No test files found”（本仓既有状态，不是本次引入的假绿）。
 26. `[ ]` `pnpm dev:desktop` 起真实 app 手工走通主流程，收尾报告看到什么；跑不起来就如实说明卡点，不许用单测冒充可视验收。
-27. `[ ]` 测试产物只落 `tmp/` 且清理；不新增任何二进制夹具入库（`AGENTS.md` §7.3）。
+27. `[x]` 测试产物只落 `tmp/` 且清理；不新增任何二进制夹具入库（`AGENTS.md` §7.3）。
+   **实测**：夹具由 `scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
 28. `[ ]` 提交信息中文、`<type>(<scope>)`、一事一提交，功能与格式化不夹带；已推送并复核远端。
 
 ---
@@ -301,7 +331,9 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 阶段 | 提交 | 判据编号 | 状态 | 实测/BLOCKED 说明 |
 | --- | --- | --- | --- | --- |
 | 0 | 本提交 | P1–P6 | `[x]`（P4 BLOCKED 已定替代证据，P6 顺延阶段 5） | 证据在 `tmp/xlsx-probe/run.log`（不入主干，`AGENTS.md` §7.3） |
-| 1 | — | A1–A7 | `[ ]` | |
+| 1 | `e5d5ba4` | A1–A3、A6、A7、E24–E25、E27 | `[x]` | 25 条单测绿；第三方 exceljs 交叉读回值/公式缓存/日期 numFmt/合并/冻结/数据验证/富文本/外部链接部件全部一致 |
+| 1 | `e5d5ba4` | A4 | `[~]` | `<f>`+`<v>` 读写已测；“UI 明示需 Excel 重算”待阶段 2/4 |
+| 1 | — | A5、A8 | `[ ]` / `[!] BLOCKED` | A5 的 `.tmp→rename` + `.bak` 在主进程侧（阶段 2）；A8 本机 WPS 无可视通道（`AGENTS.md` §8），替代证据即上一条 |
 | 2 | — | D19–D22 | `[ ]` | |
 | 3 | — | C15–C17 | `[ ]` | |
 | 4 | — | B9–B14 | `[ ]` | |
