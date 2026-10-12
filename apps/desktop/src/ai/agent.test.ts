@@ -3,7 +3,13 @@ import { getSchema } from "@tiptap/core";
 import { EditorState } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 import { EDITOR_EXTENSIONS } from "../editor/extensions/editorExtensions.js";
-import { requestProposal } from "./agent.js";
+import {
+  extractJson,
+  requestProposal,
+  streamedParagraphs,
+  streamedSummary,
+} from "./agent.js";
+import { coerceProposal } from "./docEdit.js";
 
 /**
  * 改文档的 agent 走的是主进程那条 SSE 通道：这里只验"接线"——系统提示词必须送出去、
@@ -102,6 +108,25 @@ describe("改文档的 agent 走流式通道", () => {
     expect(out.message).toContain("可解析");
   });
 
+  it("输出被截断时抢救写完的 op，并把少了多少告诉用户", async () => {
+    stubStream([
+      {
+        requestId: "",
+        kind: "delta",
+        text:
+          '{"summary":"写三段","ops":[{"op":"insertParagraph","after":0,"text":"甲"},{"op":"insertParagraph","after":1,"text":"乙"},{"op":"insertParagraph","after":2,"text":"丙',
+      },
+      { requestId: "", kind: "done" },
+    ]);
+    const out = await requestProposal({
+      editor: editorWith(["现有的一段"]),
+      instruction: "再写三段",
+    });
+    expect(out.ok).toBe(true);
+    expect(out.proposal?.ops).toHaveLength(2);
+    expect(out.warnings.join()).toContain("截断");
+  });
+
   it("还没配模型时把 needsSetup 透出来，界面好拉开设置", async () => {
     stubStream([
       { requestId: "", kind: "error", message: "还没有配置模型。", needsSetup: true },
@@ -113,5 +138,57 @@ describe("改文档的 agent 走流式通道", () => {
     expect(out.ok).toBe(false);
     expect(out.needsSetup).toBe(true);
     expect(out.message).toContain("配置模型");
+  });
+});
+
+/**
+ * 模型很爱在 JSON 前后写点东西，也会被 max_tokens 拦腰截断。
+ * 这两种输出都要尽最大可能取出提案，而不是回一句"解析失败"。
+ */
+describe("从模型原文里取提案 JSON", () => {
+  it("散文里的花括号不会带偏起点", () => {
+    const raw =
+      '[索引] 类型 "文字" {当前样式}\n方案如下：{"summary":"改一版","ops":[{"op":"setText","index":0,"text":"新文字"}]} 还需要我做什么吗？';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(false);
+    expect(coerceProposal(value, 1).proposal?.ops).toEqual([
+      { op: "setText", index: 0, text: "新文字" },
+    ]);
+  });
+
+  it("代码块围栏照样能取", () => {
+    const { value } = extractJson('```json\n{"summary":"s","ops":[]}\n```');
+    expect(coerceProposal(value, 1).errors.join()).toContain("没有任何可执行的修改");
+  });
+
+  it("截断的输出补齐右括号，收到几条算几条", () => {
+    const raw =
+      '{"summary":"写三段","ops":[{"op":"insertParagraph","after":0,"text":"甲"},{"op":"insertParagraph","after":1,"text":"乙"},{"op":"insertParagraph","after":2,"text":"丙';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(true);
+    expect(coerceProposal(value, 1).proposal?.ops).toHaveLength(2);
+  });
+
+  it("一段都没写完时才算真的取不到", () => {
+    expect(extractJson('别急，我先看看文档… {"summary":"甲').value).toBeNull();
+  });
+});
+
+/** 流式预览：卡片上要显示的是正在写的正文，不是原始 JSON。 */
+describe("流式预览逐段取文", () => {
+  it("按出现顺序取出段落，最后一段写到一半也先显示", () => {
+    const raw =
+      '{"summary":"写两段","ops":[{"op":"insertParagraph","after":0,"text":"夜色沉进河谷。"},{"op":"insertParagraph","after":1,"text":"他推开';
+    expect(streamedSummary(raw)).toBe("写两段");
+    expect(streamedParagraphs(raw)).toEqual(["夜色沉进河谷。", "他推开"]);
+  });
+
+  it("正文里被转义的引号不会被当成键名", () => {
+    const raw = '{"ops":[{"op":"setText","index":0,"text":"他念了一句 \\"text\\":\\"再见\\""}]}';
+    expect(streamedParagraphs(raw)).toEqual(['他念了一句 "text":"再见"']);
+  });
+
+  it("还没写到正文时预览是空的", () => {
+    expect(streamedParagraphs('{"summary":"先看看","ops":[')).toEqual([]);
   });
 });

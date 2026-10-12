@@ -30,6 +30,8 @@ import {
   commitSelectionRewrite,
   requestProposal,
   simulateProposal,
+  streamedParagraphs,
+  streamedSummary,
 } from "./agent.js";
 import { toast } from "../components/ui/Toast.js";
 import type { AppSettings, ProviderConfig } from "../global.js";
@@ -706,6 +708,8 @@ export function AIPanel({
 
             if (it.t === "plan") {
               const c = it.card;
+              // 流式阶段每来一个增量都重算一次预览：收到哪段就显示哪段。
+              const streamLines = c.status === "streaming" ? streamedParagraphs(c.raw ?? "") : null;
               return (
                 <div key={it.id} className={`ai-card ${c.status}`}>
                   <div className="ai-card-head">
@@ -713,14 +717,18 @@ export function AIPanel({
                     <span className="ai-card-title">{it.label}方案</span>
                     {c.status === "streaming" ? (
                       <span className="ai-card-streaming">
-                        <Loader2 size={12} className="spin" /> 正在输出…
+                        <Loader2 size={12} className="spin" />
+                        {streamLines?.length ? `正在写第 ${streamLines.length} 段…` : "正在输出…"}
                       </span>
                     ) : (
                       <span className="ai-card-count">{c.ops.length} 处改动</span>
                     )}
                   </div>
                   {c.status === "streaming" ? (
-                    <div className="ai-card-stream">{c.raw || "正在等模型回话…"}</div>
+                    <StreamPreview
+                      summary={streamedSummary(c.raw ?? "")}
+                      lines={streamLines ?? []}
+                    />
                   ) : (
                     <>
                       <div className="ai-card-summary">{c.summary}</div>
@@ -986,5 +994,35 @@ export function AIPanel({
         onSaved={refreshSettings}
       />
     </>
+  );
+}
+
+/**
+ * 方案卡的流式预览：把模型正在写的正文逐段排出来，自动滚到最新一段。
+ *
+ * @param summary 提案说明，`"summary"` 的值收到才有，没收到时是空串。
+ * @param lines 已经出现的段落文字（最后一段可能只写了一半）。
+ */
+function StreamPreview({ summary, lines }: { summary: string; lines: string[] }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const lastLine = lines[lines.length - 1] ?? "";
+  useEffect(() => {
+    const box = boxRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [lastLine]);
+
+  if (!lines.length) {
+    return <div className="ai-card-stream empty" ref={boxRef}>{summary || "正在等模型回话…"}</div>;
+  }
+  return (
+    <div className="ai-card-stream" ref={boxRef}>
+      {summary && <div className="ai-stream-summary">{summary}</div>}
+      {lines.map((text, i) => (
+        <p key={i} className="ai-stream-p">
+          {text}
+          {i === lines.length - 1 && <span className="ai-stream-caret" />}
+        </p>
+      ))}
+    </div>
   );
 }

@@ -62,11 +62,12 @@ export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用�
 7. {"op":"replaceAll","find":"旧词","replace":"新词"} — 全文替换一个词。
 
 规则：
-- index/after 只能是大纲里真实存在的编号（插入时 after 用现有段落编号或 -1）。
+- 只输出那个 JSON 对象本身：不要复述大纲、不要写任何解释文字、不要加代码块围栏。
+- 已有段落的 index/after 用大纲里的编号。写新内容时每条 insertParagraph 的 after 指向"写到这里为止文档里的段落编号"，也就是刚插入那一段的编号（新文档从 after=-1 开始，接着 0、1、2…依次递增）。
 - 自动排版：给标题设 headingLevel/align/bold，给正文设 fontSize、lineHeight、indentFirst 等；排版任务不要改文字。
 - 纠正错别字：只改确实有错的段落，并在 summary 里列出改了哪几个词；没有错误就返回 {"summary":"未发现错别字","ops":[]}。
 - 保持文档原有语言，除非用户明确要求翻译。
-- 写新内容（章节、小说、长文）要一段一条 op：需要几段就发几条 insertParagraph，after 依次指向前一段（含刚插入那段的编号）。一条 text 里塞多行会被拆成多段，标题就得另发一条带 headingLevel 的。
+- 写新内容（章节、小说、长文）要一段一条 op：需要几段就发几条 insertParagraph，一条 text 里塞多行会被拆成多段，标题就得另发一条带 headingLevel 的。
 - 一次改动尽量精简，只做用户要求的事。`;
 
 export function buildUserMessage(instruction: string, blocks: Block[], selection?: string): string {
@@ -78,17 +79,97 @@ export function buildUserMessage(instruction: string, blocks: Block[], selection
   return parts.join("\n\n");
 }
 
-/** Models wrap JSON in prose or fences often enough that this is worth doing. */
-export function extractJson(text: string): unknown | null {
+/**
+ * 从模型回复里取出提案 JSON。
+ *
+ * @param text 模型原文，可能带解释文字或 ```json 围栏，也可能被截断。
+ * @returns `value` 是解析出的对象（取不到就是 null）；`truncated` 表示只能抢救到
+ *   最后一个完整的 op——输出在中途断了，前面的 op 依然可用。
+ */
+export function extractJson(text: string): { value: unknown | null; truncated: boolean } {
   const withoutFence = text.replace(/```(?:json)?/gi, "").trim();
-  const start = withoutFence.indexOf("{");
-  const end = withoutFence.lastIndexOf("}");
-  if (start < 0 || end <= start) return null;
+  const candidates: { body: string; scan: ReturnType<typeof scanBraces> }[] = [];
+  for (let i = withoutFence.indexOf("{"); i >= 0; i = withoutFence.indexOf("{", i + 1)) {
+    const body = withoutFence.slice(i);
+    candidates.push({ body, scan: scanBraces(body) });
+  }
+
+  // 提示词里就带着 `{当前样式}` 这种散文花括号，模型复述大纲时它会先被扫到；
+  // op 对象本身也能 parse 成 JSON，所以只认长得像提案的那个候选。
+  for (const { body, scan } of candidates) {
+    if (scan.closed === null) continue;
+    const value = parseJsonObject(body.slice(0, scan.closed));
+    if (isProposalShape(value)) return { value, truncated: false };
+  }
+  // 输出被 max_tokens 截断：丢掉最后一条没写完的 op，补齐右括号，能落地多少算多少。
+  for (const { body, scan } of candidates) {
+    if (scan.memberEnd === null) continue;
+    const value = parseJsonObject(`${body.slice(0, scan.memberEnd)}${scan.closers}`);
+    if (isProposalShape(value)) return { value, truncated: true };
+  }
+  return { value: null, truncated: false };
+}
+
+/**
+ * parse 一个 JSON 对象字面量。
+ *
+ * @param text 候选片段。
+ * @returns 解析出的对象；不是对象或语法不合法时 null。
+ */
+function parseJsonObject(text: string): Record<string, unknown> | null {
   try {
-    return JSON.parse(withoutFence.slice(start, end + 1));
+    const v: unknown = JSON.parse(text);
+    return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * 判断一个对象是不是"修改方案"的形状。
+ *
+ * @param value 候选对象。
+ * @returns 带 ops（或其别名）或 summary 之一时为 true；单条 op 之类不算。
+ */
+function isProposalShape(value: Record<string, unknown> | null): value is Record<string, unknown> {
+  if (!value) return false;
+  return ["ops", "operations", "操作", "summary", "说明", "title"].some((k) => k in value);
+}
+
+/**
+ * 单遍扫描 JSON 文本的括号结构，字符串字面量里的括号与转义都不计数。
+ *
+ * @param body 从某个 `{` 开始的文本，允许结尾被截断。
+ * @returns `closed` 根对象配平处的下标（未配平则 null）；`memberEnd` 最后一个完整成员的
+ *   结束下标；`closers` 是在 `memberEnd` 处把 JSON 补合法所需的右括号（从里到外）。
+ */
+function scanBraces(body: string): { closed: number | null; memberEnd: number | null; closers: string } {
+  const stack: string[] = [];
+  let memberEnd: number | null = null;
+  let closers = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") stack.push("}");
+    else if (ch === "[") stack.push("]");
+    else if (ch === "}" || ch === "]") {
+      if (stack.pop() !== ch) return { closed: null, memberEnd, closers: "" };
+      if (stack.length === 0) return { closed: i + 1, memberEnd, closers: "" };
+      // 刚闭合的是一个还能继续往下写的成员（一条 op、一个 style、ops 数组），
+      // 在它后面切断再补上栈里剩下的右括号，就还是一份合法 JSON。
+      memberEnd = i + 1;
+      closers = stack.slice().reverse().join("");
+    }
+  }
+  return { closed: null, memberEnd, closers };
 }
 
 export interface ProposalOutcome {
@@ -98,6 +179,84 @@ export interface ProposalOutcome {
   message?: string;
   needsSetup?: boolean;
   warnings: string[];
+}
+
+/**
+ * 从还没收完的模型输出里取出正文段落，给界面做"边收边显示"的预览。
+ *
+ * @param raw 目前收到的全部增量。
+ * @returns 按文档顺序排好的段落文字；最后一段可能只写了一半，收完前它会长。
+ */
+export function streamedParagraphs(raw: string): string[] {
+  return jsonStrings(raw, ["text", "alt"]).map((f) => f.text);
+}
+
+/**
+ * 从还没收完的模型输出里取出提案的一句话说明。
+ *
+ * @param raw 目前收到的全部增量。
+ * @returns 说明文字；`"summary"` 还没出现时是空串。
+ */
+export function streamedSummary(raw: string): string {
+  return jsonStrings(raw, ["summary"])[0]?.text ?? "";
+}
+
+/**
+ * 扫出给定键名下已经开头的字符串值，按它们在文本里出现的位置排序。
+ *
+ * @param raw 模型输出的全部增量。
+ * @param keys 要读的键名（`summary`/`text`/`alt`）。
+ * @returns `{ at, text }` 列表，`at` 是键名在 raw 里的下标；只有键名、值没开头的忽略。
+ */
+function jsonStrings(raw: string, keys: readonly string[]): { at: number; text: string }[] {
+  const out: { at: number; text: string }[] = [];
+  for (const key of keys) {
+    // 前面挂着转义反斜杠的不是键名：正文里写的 "text":" 会被转义成 \"text\":\"。
+    const re = new RegExp(`(?<!\\\\)"${key}"\\s*:\\s*"`, "g");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(raw))) {
+      const value = readJsonString(raw, m.index + m[0].length);
+      if (value?.trim()) out.push({ at: m.index, text: value.trim() });
+    }
+  }
+  return out.sort((a, b) => a.at - b.at);
+}
+
+/**
+ * 从指定位置读一个 JSON 字符串的值（不含首尾引号）。
+ *
+ * @param text 完整文本。
+ * @param from 值起始的下标（正好在开引号之后）。
+ * @returns 解码后的文字；引号还没闭合时返回写到哪算哪的半截（流式预览要的就是这个）。
+ */
+function readJsonString(text: string, from: number): string {
+  let i = from;
+  let escaped = false;
+  while (i < text.length) {
+    const ch = text[i];
+    if (escaped) escaped = false;
+    else if (ch === "\\") escaped = true;
+    else if (ch === '"') break;
+    i++;
+  }
+  const frag = text.slice(from, i);
+  if (i < text.length) return decodeJsonString(frag);
+  // 引号未闭合：丢掉末尾写了一半的转义起点，其余照原样显示。
+  return decodeJsonString(frag.replace(/\\$/, ""));
+}
+
+/**
+ * 把 JSON 字符串体解码成真实文字。
+ *
+ * @param frag 引号之间（或截断处）的原始片段。
+ * @returns 解码结果；转义序列本身还不完整时退回原文，宁可多显示一个反斜杠也不少一行。
+ */
+function decodeJsonString(frag: string): string {
+  try {
+    return JSON.parse(`"${frag}"`);
+  } catch {
+    return frag;
+  }
 }
 
 /**
@@ -207,8 +366,8 @@ export async function requestProposal(opts: {
       warnings: [],
     };
   }
-  const raw = extractJson(acc);
-  if (raw === null) {
+  const parsed = extractJson(acc);
+  if (parsed.value === null) {
     return {
       ok: false,
       before,
@@ -216,11 +375,18 @@ export async function requestProposal(opts: {
       warnings: [],
     };
   }
-  const coerced = coerceProposal(raw, before.length);
+  const coerced = coerceProposal(parsed.value, before.length);
+  // 截断的输出只抢救到前一半：明说少了多少，别让文档悄悄短一截。
+  const warnings = parsed.truncated
+    ? [
+        `模型输出被截断，只收到前 ${coerced.proposal?.ops.length ?? 0} 条修改，可以再说「继续」让它往下写。`,
+        ...coerced.errors,
+      ]
+    : coerced.errors;
   if (!coerced.proposal) {
-    return { ok: false, before, message: coerced.errors.join("；"), warnings: coerced.errors };
+    return { ok: false, before, message: warnings.join("；"), warnings };
   }
-  return { ok: true, proposal: coerced.proposal, before, warnings: coerced.errors };
+  return { ok: true, proposal: coerced.proposal, before, warnings };
 }
 
 export interface CommitResult {
