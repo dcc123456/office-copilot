@@ -789,7 +789,8 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 ③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉（`2cfe911` `d30939a`）；
 ⑤ 水印（`2044594` 数据层 + `1a44229` 桌面入口）；
 ⑥ 你实测"水印与分栏不可用"后的可用性修复（`d079287` 画布+PDF 画水印、`177f21b` 导出不再截成 1 页，
-判据与实测见 §8.13）；⑦ 横向宽高约定按 Word 的写法改正 + 其余档位实跑（`57bcccd`，见 §8.14）。
+判据与实测见 §8.13）；⑦ 横向宽高约定按 Word 的写法改正 + 其余档位实跑（`57bcccd`，见 §8.14）；
+⑧ 行号画进编辑画布（每页从起始号重新数、按行归页）+ 分栏与行号的生效范围说明（`12216f0` `6856b9a`，见 §8.15）。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -1437,6 +1438,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - **行号仍然是唯一"勾了看不到"的一项**：画布上 `[class*=line-num]` 0 个，PDF 里也没有——
   与 §8.13 里水印修复前同一状态。这一项要不要做预览、做到哪一步（只画布 / 画布+PDF），等你定；
   §8.7 当初的取舍是"逐行编号会把 `PagedLayout` 的分页测量打乱"，理由仍然成立。
+  **→ 本条已由 §8.15 的 `12216f0` 结掉**：你定的范围是"只加编辑画布行号"，PDF 仍不画行号。
 - 方向的真 bug（`57bcccd`）：`buildSectPr` 与 `readSection` 按 `w:orient` **交换**宽高，
   也就是横向页写出 `w:w=12240 w:h=15840`（短边在 w）。微软官方
   [How to: Change the print orientation](https://learn.microsoft.com/office/open-xml/word/how-to-change-the-print-orientation-of-a-word-processing-document)
@@ -1456,6 +1458,52 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - Word 实测：`[!] BLOCKED`（同 §8.12）。宽高约定是**官方文档 + 与 Word 产出样例的一致比对**，
   不是亲眼看到 Word 渲染；`w:pgMar`/`w:lnNumType` 的 twips 数值是浏览器实跑 + 单位换算核对。
 - 提交：`57bcccd` 已推送，`git ls-remote origin main` = `57bcccd`。
+
+### 8.15 排名 7 可用性修复 ③（行号画进编辑画布 + 分栏/行号生效范围说明）验收记录（`12216f0` `6856b9a`）
+
+你定的范围（AskUserQuestion 各二选一）：行号 →**只加编辑画布行号**，打印 / PDF 不画；
+分栏 →**保持导引线**，画布不重排正文，只在对话框里加一句说明，免得下次又被当成 bug。
+
+- 判据（Word 语义，`w:lnNumType`，ISO/IEC 29500-1 §17.6.9）：`w:countBy` = 每几行显一个号，
+  显示的值仍是**这一行本身的号**（所以 `countBy=2 start=7` 是 7、9、11…，不是 2、4、6）；
+  `w:distance` = 号与正文的间距；`w:start` = 起始号；`w:restart` 的缺省是 `newPage`，
+  规范例子原话 "each line, restarting at one at the top of each new page" → **每页从 `start` 重新数**。
+- 实现：`apps/desktop/src/editor/lineNumbers.ts` 只做几何与计数（不碰 DOM，可单测），
+  `PageChrome` 负责量布局——顶层块（列表按 `w:numPr` 的每一条单独算）摊成视觉行，
+  坐标一律 `.page-stage` 系（屏幕差值除以缩放），**按行中心落在哪一页的纸面**归页。
+- 踩到并修掉的两处错位：① 号浮在页顶之上 96px——我拿"页高 × 页码 + 页边距"自己算了坐标系，
+  而 `.ProseMirror` 的 rect 本来就在正文顶部；② 段中分页时号不复位——第一版按
+  `pageNumberOf(块首)` 给整块定页，跨页段落的后半截把上一页的大号码（49、51、53）写进了下一页顶部。
+- 实跑证据（`tmp/ps-ln-page.mjs`：真实 app + 独立 `--user-data-dir` + CDP，文档 = 你那份简历的副本；
+  每 2 行一个号、起始 7）：7 张 `.page-card-real` **每一张**首个号都是 7、序列 `7,9,11,13`、
+  `stepOk` 7/7 true、落在所有页范围之外的号 0 个。`tmp/ps-linenum-probe.mjs` 另测：
+  `countBy=1` 时 267 个号，`countBy=2/start=7` 时 135 个，打字后 135 → 153（跟着重排）；
+  号宽 `96px` = 左边距 120px − `w:distance` 24px（0.635cm，Word 的 0.25 英寸缺省）；
+  颜色 `rgb(138,138,138)`、`pointer-events:none` 不挡正文；首行对齐：号顶 120px vs 正文首行
+  Range 顶 122px（差 2px 是 half-leading，号高 = 行高 18.9px 居中）；控制台 0 条 error；
+  截图 `tmp/ps-ln-page.png`（对话框那两句说明见 `tmp/ps-hint.png`：栏数 >1 才出现分栏那句、
+  勾了行号才出现行号那句，单栏未勾时都收掉）。
+- **环境坑（本轮最费时间的一条，已同步进 AGENTS §8）**：探针 `npx electron apps/desktop`
+  不带 `VITE_DEV_SERVER_URL` 时走的是 `win.loadFile(dist/index.html)`（`apps/desktop/electron/main.ts:109`），
+  量的是**上一次 build 的包**。所以"改完 src 重跑探针数字一模一样"不是缓存错觉；
+  `curl http://127.0.0.1:5174/src/...` 看到新源码只能证明 dev server 是新的，证明不了 app 跑的是它。
+  改完必须先 `pnpm build`（或 `pnpm --filter @office-copilot/desktop exec vite build`）再跑探针。
+  顺带一条：`packages/sheet-io/dist` 落后于它的 src 会让桌面 renderer 的 rollup 构建直接失败
+  （`"readOnlyReason" is not exported`），先 `pnpm --filter @office-copilot/sheet-io build` 再 build。
+- 类型 + 测试：`pnpm build` EXIT=0（日志里 `error TS` 0 处）；`pnpm test` EXIT=0，逐包
+  desktop **416**（36 个文件，含新 `lineNumbers.test.ts` 6 条；§8.14 时是 398/34，中间还进了
+  另一位作者的 sheet 用例）/ docx-io 296（8 个文件）/
+  sheet-io 45（7 个文件，另一位作者的包）/ word-client 8 / word-tools 6 / server 2；
+  `apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- Word 实测：`[!] BLOCKED`（原因见 §8.12，装了 WPS 但看不到渲染画面）。"每页从 `start` 重新数"
+  是按 ISO 原文 + Word 帮助页**推断**并照此实现，Word 里真实渲染没亲眼看到。
+- 遗留（写清楚，不算本片做完）：① 打印 / PDF 不画行号（你定的范围，对话框里已写明）；
+  ② Word 在多栏里是**每栏各画一组**行号（规范原话 before each column of text），我们按整页单栏画；
+  ③ 表格与列表按块自身 computed `line-height` 摊行，跨页表格的行号不会与 Word 逐行对齐；
+  ④ `w:restart` 仍不建模（只靠"值等价就不重建"保住文件里的原值），文件写了 `restart` 的非缺省值时
+  画布预览照旧每页复位；⑤ 桌面原地保存仍没有 `.bak`（AGENTS §8 红线 4，仍等你决定）。
+- 提交：`12216f0`（行号）+ `6856b9a`（两句说明）+ 本条 docs 与 AGENTS 记录一起推送；推送后
+  `git ls-remote origin main` 与本仓 `git rev-parse HEAD` 一致才声称已推送。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 

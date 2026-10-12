@@ -177,6 +177,10 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
   （`osascript` 实测报 `-1728`），整屏截图只拿到壁纸与菜单栏，文档窗口不可捕获；没装 LibreOffice。
   所以"用 Word / WPS 打开验证"这一类条目写 `[!] BLOCKED` 时，原因是"看不到画面"而**不是**"没装"——
   别把"没装"当成结论重复写进文档或提交说明（详见 `docs/word-parity-spec.md` §8.12）。
+- **桌面探针跑的是 `dist`，不是 `src`**：`npx electron apps/desktop` 不带 `VITE_DEV_SERVER_URL` 时
+  `electron/main.ts` 走 `loadFile(dist/index.html)`，所以改完 src **必须先 `pnpm build`**（或
+  `pnpm --filter @office-copilot/desktop exec vite build`）再跑探针，否则"数字一模一样"是旧包造成的假象。
+  `curl http://127.0.0.1:5174/src/...` 只能证明 dev server 是新的，证明不了 app 跑的是它（§7.2 的实跑验收常踩这条）。
 - **门禁命令必须重定向后再读退出码**：`pnpm test > tmp/t.log 2>&1; echo "EXIT=$?"`。把 `pnpm test` 管道接
   `tail` 时退出码属于 `tail`，会出现套件红过仍拿到 0 的假绿。
 - **`pnpm test` 根命令是 `passWithNoTests: true` + `pnpm -r`**：某个包没测试也会"全绿"。**必须逐包核对通过数**
