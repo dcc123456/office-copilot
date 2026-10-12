@@ -20,10 +20,19 @@ import {
   SpellCheck,
   MessageSquare,
   Zap,
+  Play,
 } from "lucide-react";
 import { SettingsModal } from "../components/SettingsModal.js";
 import { DiffView, InlineDiff } from "./DiffView.js";
-import { alignRewrite, describeCoreOp, rewritableBlocks, type Block, type CoreOp } from "./docEdit.js";
+import {
+  alignRewrite,
+  describeCoreOp,
+  rewritableBlocks,
+  rewriteResume,
+  type Block,
+  type CoreOp,
+  type Proposal,
+} from "./docEdit.js";
 import { blocksOf } from "../editor/docBlocks.js";
 import {
   aiStreamTransform,
@@ -31,6 +40,7 @@ import {
   commitOps,
   commitSelectionRewrite,
   requestProposal,
+  rewriteInstruction,
   simulateProposal,
   streamedParagraphs,
   streamedSummary,
@@ -59,17 +69,25 @@ interface PlanCard {
   message?: string;
   /** 流式阶段模型已经吐出的文字，卡片边收边滚动显示。 */
   raw?: string;
+  /** 用户按了暂停：卡片给「继续」，不当失败处理。 */
+  stopped?: boolean;
+  /** 续写要送回原指令，以及上一次收到的改动（CoreOp 回不到 AiOp，只能留这份）。 */
+  instruction?: string;
+  proposal?: Proposal;
 }
 
 interface RewriteCard {
   /** selection：只改选区那段；document：没有选区时改整篇。 */
   scope: "selection" | "document";
+  /** 暂停后续写要用同一条内置语气指令。 */
+  action: string;
   from: number;
   to: number;
   beforeText: string;
   rewritten: string;
   status: CardStatus;
   message?: string;
+  stopped?: boolean;
 }
 
 type Item =
@@ -79,6 +97,9 @@ type Item =
       role: "user" | "assistant";
       text: string;
       pending?: boolean;
+      /** 暂停留下的半截：气泡上给「继续」，并记住它是从哪句话生成的。 */
+      stopped?: boolean;
+      prompt?: string;
     }
   | { id: string; t: "plan"; label: string; card: PlanCard }
   | { id: string; t: "rewrite"; label: string; card: RewriteCard };
@@ -93,13 +114,6 @@ const QUICK_ACTIONS = [
   { label: "更口语", action: "换语气:口语化" },
   { label: "译成英文", action: "翻译:英文" },
 ];
-
-/**
- * 全文改写时追加的约束：落地走 `alignRewrite`，段数对不上就整批放弃，
- * 所以必须一开始就说清"一段对一段"，别让模型自己合并段落。
- */
-const FULL_DOC_REWRITE_NOTE =
-  "下面这份是整篇文档。请按原有段落逐段改写：保持段落数量与顺序，一段都不合并、不新增、不删除；只用换行分段，不要编号、不要解释、不要代码块围栏。";
 
 const DOC_ACTION_CHIPS = [
   {
@@ -274,33 +288,44 @@ export function AIPanel({
     [],
   );
 
-  const askAgent = useCallback(
-    async (instruction: string, label = "AI 修改") => {
-      const trimmed = instruction.trim();
-      if (!trimmed || busyRef.current) return;
-      if (modeRef.current === "chat") {
-        note("聊天模式只给建议、不会改动文档。需要我直接改文档时，切到「半自动」或「全自动」。");
-        return;
+  /**
+   * 跑一次"改文档"的请求，结果落到指定或新建的方案卡上。
+   *
+   * @param opts.instruction 用户原话；续写时仍是原话，"接着上次写"由引擎再拼约束。
+   * @param opts.label 卡片标题。
+   * @param opts.cardId 复用已有卡片（点「继续」时），不给就新挂一张流式卡。
+   * @param opts.continueFrom 上一次暂停留下的半截改动与原始输出。
+   */
+  const runAgent = useCallback(
+    async (opts: {
+      instruction: string;
+      label: string;
+      cardId?: string;
+      continueFrom?: { ops: Proposal["ops"]; rawTail: string };
+    }) => {
+      const id = opts.cardId ?? uid();
+      if (opts.cardId) {
+        patchCard(id, (c) => ({ ...c, status: "streaming", raw: "", message: undefined, stopped: false }));
+      } else {
+        // 卡片先挂出来：流式阶段逐字显示模型的输出，收完才换成改动清单与 diff。
+        push({
+          id,
+          t: "plan",
+          label: opts.label,
+          card: { summary: "", ops: [], before: [], after: [], inverses: [], notes: [], status: "streaming", raw: "" },
+        });
       }
       setBusyBoth(true);
-      push({ id: uid(), t: "msg", role: "user", text: trimmed });
-      // 卡片先挂出来：流式阶段逐字显示模型的输出，收完才换成改动清单与 diff。
-      const id = uid();
-      push({
-        id,
-        t: "plan",
-        label,
-        card: { summary: "", ops: [], before: [], after: [], inverses: [], notes: [], status: "streaming", raw: "" },
-      });
       const requestId = uid();
       activeRequestRef.current = requestId;
       try {
         const out = await requestProposal({
           editor,
-          instruction: trimmed,
+          instruction: opts.instruction,
           providerId: activeProviderId,
           selection: selectionText(),
           requestId,
+          continueFrom: opts.continueFrom,
           onDelta: (chunk) =>
             patchCard(id, (c) => {
               const plan = c as PlanCard;
@@ -312,6 +337,8 @@ export function AIPanel({
           patchCard(id, (c) => ({
             ...c,
             status: "failed",
+            stopped: out.stopped,
+            instruction: opts.instruction,
             message: out.message ?? "AI 没有给出修改方案。",
           }));
           return;
@@ -339,9 +366,13 @@ export function AIPanel({
           inverses: plan.inverses!,
           notes: [...out.warnings, ...plan.skipped],
           status: "pending",
+          stopped: out.stopped,
+          instruction: opts.instruction,
+          proposal: out.proposal,
         };
         patchCard(id, () => card);
-        if (modeRef.current === "auto") {
+        // 暂停留下的半截方案不完整，不替用户直接写进文档，等他点「继续」或自己确认。
+        if (modeRef.current === "auto" && !out.stopped) {
           toast("全自动：已直接写入文档，可在修改历史里撤销这次修改。", "success");
           await applyPlan(id, card);
         }
@@ -351,6 +382,7 @@ export function AIPanel({
         patchCard(id, (c) => ({
           ...c,
           status: "failed",
+          instruction: opts.instruction,
           message: "调用失败：" + (err.message ?? String(e)),
         }));
       } finally {
@@ -369,6 +401,34 @@ export function AIPanel({
       selectionText,
       setBusyBoth,
     ],
+  );
+
+  const askAgent = useCallback(
+    async (instruction: string, label = "AI 修改") => {
+      const trimmed = instruction.trim();
+      if (!trimmed || busyRef.current) return;
+      if (modeRef.current === "chat") {
+        note("聊天模式只给建议、不会改动文档。需要我直接改文档时，切到「半自动」或「全自动」。");
+        return;
+      }
+      push({ id: uid(), t: "msg", role: "user", text: trimmed });
+      await runAgent({ instruction: trimmed, label });
+    },
+    [note, push, runAgent],
+  );
+
+  /** 点「继续」：已收到的改动留着，只让模型把剩下的补完。 */
+  const continuePlan = useCallback(
+    async (id: string, card: PlanCard, label: string) => {
+      if (busyRef.current || !card.instruction) return;
+      await runAgent({
+        instruction: card.instruction,
+        label,
+        cardId: id,
+        continueFrom: { ops: card.proposal?.ops ?? [], rawTail: card.raw ?? "" },
+      });
+    },
+    [runAgent],
   );
 
   /* ------------- selection rewrite: stream then apply -------------- */
@@ -434,6 +494,126 @@ export function AIPanel({
   );
 
   /**
+   * 跑一次纯文字改写（选区或全文），增量流进指定卡片。
+   *
+   * @param opts.cardId 复用已有卡片（点「继续」时），不给就新挂一张流式卡。
+   * @param opts.continuePartial 暂停时已经收到的半截改写；给了就只补剩下的段落，
+   *   断在段中间的那半截由 `rewriteResume` 丢掉重写。
+   */
+  const runRewrite = useCallback(
+    async (opts: {
+      action: string;
+      label: string;
+      scope: RewriteCard["scope"];
+      from: number;
+      to: number;
+      source: string;
+      cardId?: string;
+      continuePartial?: string;
+    }) => {
+      const id = opts.cardId ?? uid();
+      if (opts.cardId) {
+        patchCard(id, (c) => ({ ...c, status: "streaming", message: undefined, stopped: false }));
+      } else {
+        push({
+          id,
+          t: "rewrite",
+          label: opts.label,
+          card: {
+            scope: opts.scope,
+            action: opts.action,
+            from: opts.from,
+            to: opts.to,
+            beforeText: opts.source,
+            rewritten: "",
+            status: "streaming",
+          },
+        });
+      }
+      const partial = opts.continuePartial;
+      const resume = partial ? rewriteResume(opts.source, partial) : undefined;
+      // 半截已经收满全篇段数：没有要补的段落了，再问一次模型只会多出一段，
+      // 所以把卡片还原成可写入的样子让用户自己点。
+      if (resume && resume.remaining === 0) {
+        patchCard(id, (c) => ({
+          ...c,
+          status: "pending",
+          stopped: false,
+          message: "上一次已经收到完整段落，直接点写入即可。",
+        }));
+        return;
+      }
+      setBusyBoth(true);
+      const requestId = uid();
+      activeRequestRef.current = requestId;
+      // 续写时留下的段落先占住卡片，模型补的那几段接在后面（换行分段，落地时按段对齐）。
+      const seed = resume?.kept.length ? `${resume.kept.join("\n")}\n` : "";
+      let acc = seed;
+      try {
+        const { stopped } = await aiStreamTransform({
+          action: opts.action,
+          text: opts.source,
+          instruction: rewriteInstruction(opts.scope, resume),
+          providerId: activeProviderId,
+          requestId,
+          onDelta: (chunk) => {
+            acc += chunk;
+            const shown = acc;
+            setItems((prev) =>
+              prev.map((it) =>
+                it.id === id && it.t === "rewrite"
+                  ? { ...it, card: { ...it.card, rewritten: shown } }
+                  : it,
+              ),
+            );
+          },
+        });
+        if (!acc.trim()) {
+          patchCard(id, (c) => ({ ...c, status: "failed", message: "没有收到内容。" }));
+          return;
+        }
+        // 续写一个字都没补上：卡片上那半截原样留着，「继续」还能再点，别假装收完了。
+        if (seed && acc.trim() === seed.trim()) {
+          patchCard(id, (c) => ({
+            ...c,
+            status: "pending",
+            stopped: true,
+            message: "这一次没有补出新的段落，可以再点一次「继续」。",
+          }));
+          return;
+        }
+        const card: RewriteCard = {
+          scope: opts.scope,
+          action: opts.action,
+          from: opts.from,
+          to: opts.to,
+          beforeText: opts.source,
+          rewritten: acc,
+          status: "pending",
+          stopped,
+        };
+        patchCard(id, () => card);
+        if (modeRef.current === "auto" && !stopped) {
+          toast("全自动：已直接写入文档，可在修改历史里撤销这次修改。", "success");
+          await applyRewrite(id, card, opts.label);
+        }
+      } catch (e) {
+        const err = e as Error & { needsSetup?: boolean };
+        if (err.needsSetup) setSettingsOpen(true);
+        patchCard(id, (c) => ({
+          ...c,
+          status: "failed",
+          message: err.message ?? String(e),
+        }));
+      } finally {
+        activeRequestRef.current = null;
+        setBusyBoth(false);
+      }
+    },
+    [activeProviderId, applyRewrite, patchCard, push, setBusyBoth],
+  );
+
+  /**
    * 跑一条快捷指令：有选区就改选区，没有选区就改整篇（而不是报错让用户先选）。
    *
    * @param action 主进程内置的语气键（`扩写`/`缩写`/`润色`/`换语气:…`/`翻译:…`）。
@@ -459,84 +639,60 @@ export function AIPanel({
         return;
       }
       const label = `${scope === "document" ? "全文" : ""}${action.split(":")[0] ?? action}`;
-      const id = uid();
-      push({
-        id,
-        t: "rewrite",
-        label,
-        card: { scope, from, to, beforeText: source, rewritten: "", status: "streaming" },
-      });
-      setBusyBoth(true);
-      const requestId = uid();
-      activeRequestRef.current = requestId;
-      let acc = "";
-      try {
-        await aiStreamTransform({
-          action,
-          text: source,
-          instruction: scope === "document" ? FULL_DOC_REWRITE_NOTE : undefined,
-          providerId: activeProviderId,
-          requestId,
-          onDelta: (chunk) => {
-            acc += chunk;
-            const shown = acc;
-            setItems((prev) =>
-              prev.map((it) =>
-                it.id === id && it.t === "rewrite"
-                  ? { ...it, card: { ...it.card, rewritten: shown } }
-                  : it,
-              ),
-            );
-          },
-        });
-        if (!acc.trim()) {
-          patchCard(id, (c) => ({ ...c, status: "failed", message: "没有收到内容。" }));
-          return;
-        }
-        patchCard(id, (c) => ({ ...c, status: "pending" }));
-        if (modeRef.current === "auto") {
-          toast("全自动：已直接写入文档，可在修改历史里撤销这次修改。", "success");
-          await applyRewrite(
-            id,
-            { scope, from, to, beforeText: source, rewritten: acc, status: "pending" },
-            label,
-          );
-        }
-      } catch (e) {
-        const err = e as Error & { needsSetup?: boolean };
-        if (err.needsSetup) setSettingsOpen(true);
-        patchCard(id, (c) => ({
-          ...c,
-          status: "failed",
-          message: err.message ?? String(e),
-        }));
-      } finally {
-        activeRequestRef.current = null;
-        setBusyBoth(false);
-      }
+      await runRewrite({ action, label, scope, from, to, source });
     },
-    [activeProviderId, applyRewrite, editor, note, patchCard, push, setBusyBoth],
+    [editor, note, runRewrite],
+  );
+
+  /** 改写卡上的「继续」：在半截结果后面把剩下的写完。 */
+  const continueRewrite = useCallback(
+    async (id: string, card: RewriteCard, label: string) => {
+      if (busyRef.current || !card.rewritten.trim()) return;
+      await runRewrite({
+        action: card.action,
+        label,
+        scope: card.scope,
+        from: card.from,
+        to: card.to,
+        source: card.beforeText,
+        cardId: id,
+        continuePartial: card.rewritten,
+      });
+    },
+    [runRewrite],
   );
 
   /* --------------------------- chat ------------------------------- */
 
-  const sendChat = useCallback(
-    async (raw: string) => {
-      const text = raw.trim();
-      if (!text || busyRef.current) return;
-      if (modeRef.current !== "chat") {
-        await askAgent(text);
-        return;
+  /**
+   * 跑一次聊天，增量流进指定气泡；给了 `partial` 就是在半截回答后面继续写。
+   *
+   * @param opts.prompt 用户这一轮说的话（续写时原样再送一次）。
+   * @param opts.itemId 复用已有气泡（点「继续」时），不给就新起一问一答。
+   * @param opts.partial 暂停留下的半截回答。
+   */
+  const runChat = useCallback(
+    async (opts: { prompt: string; itemId?: string; partial?: string }) => {
+      const id = opts.itemId ?? uid();
+      if (!opts.itemId) {
+        push({ id: uid(), t: "msg", role: "user", text: opts.prompt });
+        push({ id, t: "msg", role: "assistant", text: "", pending: true, prompt: opts.prompt });
+      } else {
+        setItems((prev) =>
+          prev.map((it) =>
+            it.id === id && it.t === "msg" ? { ...it, pending: true, stopped: false } : it,
+          ),
+        );
       }
       setBusyBoth(true);
-      push({ id: uid(), t: "msg", role: "user", text });
-      const id = uid();
-      push({ id, t: "msg", role: "assistant", text: "", pending: true });
       const requestId = uid();
       activeRequestRef.current = requestId;
-      let acc = "";
+      let acc = opts.partial ?? "";
+      const text = opts.partial
+        ? `${opts.prompt}\n\n接着刚才写到的地方继续写完，不要重复已经写好的内容。已经写好的是：\n${opts.partial}`
+        : opts.prompt;
       try {
-        await aiStreamTransform({
+        const { stopped } = await aiStreamTransform({
           action: "chat",
           text,
           providerId: activeProviderId,
@@ -549,10 +705,17 @@ export function AIPanel({
             );
           },
         });
+        // 暂停留下的半截留在原地等「继续」；没收到字才算真的停空了。
+        const canResume = stopped && Boolean(acc.trim());
         setItems((prev) =>
           prev.map((it) =>
             it.id === id && it.t === "msg"
-              ? { ...it, text: acc || "（已停止，未收到内容）", pending: false }
+              ? {
+                  ...it,
+                  text: acc || "（已停止，未收到内容）",
+                  pending: false,
+                  stopped: canResume || undefined,
+                }
               : it,
           ),
         );
@@ -571,7 +734,20 @@ export function AIPanel({
         setBusyBoth(false);
       }
     },
-    [activeProviderId, askAgent, push, setBusyBoth],
+    [activeProviderId, push, setBusyBoth],
+  );
+
+  const sendChat = useCallback(
+    async (raw: string) => {
+      const text = raw.trim();
+      if (!text || busyRef.current) return;
+      if (modeRef.current !== "chat") {
+        await askAgent(text);
+        return;
+      }
+      await runChat({ prompt: text });
+    },
+    [askAgent, runChat],
   );
 
   const stopStream = useCallback(() => {
@@ -760,6 +936,16 @@ export function AIPanel({
                           </>
                         )}
                       </button>
+                      {it.stopped && it.prompt && (
+                        <button
+                          type="button"
+                          className="msg-btn"
+                          title="接着刚才停下的地方继续写"
+                          onClick={() => void runChat({ prompt: it.prompt!, itemId: it.id, partial: it.text })}
+                        >
+                          <Play size={11} /> 继续
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
@@ -838,7 +1024,18 @@ export function AIPanel({
                       </span>
                     )}
                     {c.status === "failed" && (
-                      <span className="ai-card-status bad">未写入</span>
+                      <span className="ai-card-status bad">
+                        {c.stopped ? "已暂停" : "未写入"}
+                      </span>
+                    )}
+                    {c.stopped && c.instruction && (
+                      <button
+                        className="primary"
+                        title="接着上一次停下的地方继续写"
+                        onClick={() => void continuePlan(it.id, c, it.label)}
+                      >
+                        <Play size={12} /> 继续
+                      </button>
                     )}
                     {(c.status === "pending" || c.status === "failed") && (
                       <button className="ghost" onClick={() => dismiss(it.id)}>
@@ -888,7 +1085,18 @@ export function AIPanel({
                       <Check size={12} /> 已写入文档
                     </span>
                   )}
-                  {c.status === "failed" && <span className="ai-card-status bad">未写入</span>}
+                  {c.status === "failed" && (
+                    <span className="ai-card-status bad">{c.stopped ? "已暂停" : "未写入"}</span>
+                  )}
+                  {(c.status === "pending" || c.status === "failed") && c.stopped && (
+                    <button
+                      className="primary"
+                      title="接着上一次停下的地方继续写"
+                      onClick={() => void continueRewrite(it.id, c, it.label)}
+                    >
+                      <Play size={12} /> 继续
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -1030,8 +1238,8 @@ export function AIPanel({
           />
           <div className="composer-row">
             {busy ? (
-              <button className="primary btn-stop" onClick={stopStream} title="停止生成">
-                <Square size={11} /> 停止
+              <button className="primary btn-stop" onClick={stopStream} title="暂停生成（已经生成的内容会留着，可以点「继续」接着写）">
+                <Square size={11} /> 暂停
               </button>
             ) : (
               <button

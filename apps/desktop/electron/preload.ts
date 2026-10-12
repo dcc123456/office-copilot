@@ -13,6 +13,16 @@ interface AIResult {
   message?: string;
 }
 
+/** 流式回抛的事件：`kind:"done"` 且 `stopped` 表示是用户按了暂停，不是模型写完了。 */
+export interface AIStreamEvent {
+  requestId: string;
+  kind: "delta" | "done" | "error";
+  text?: string;
+  message?: string;
+  needsSetup?: boolean;
+  stopped?: boolean;
+}
+
 interface OpenResult {
   ok: boolean;
   canceled?: boolean;
@@ -106,25 +116,8 @@ const api = {
     ipcRenderer.invoke("ai:stream-start", payload),
   aiStreamCancel: (requestId: string): Promise<{ ok: true }> =>
     ipcRenderer.invoke("ai:stream-cancel", requestId),
-  onAIStream: (
-    cb: (ev: {
-      requestId: string;
-      kind: "delta" | "done" | "error";
-      text?: string;
-      message?: string;
-      needsSetup?: boolean;
-    }) => void,
-  ): (() => void) => {
-    const listener = (
-      _e: unknown,
-      ev: {
-        requestId: string;
-        kind: "delta" | "done" | "error";
-        text?: string;
-        message?: string;
-        needsSetup?: boolean;
-      },
-    ) => cb(ev);
+  onAIStream: (cb: (ev: AIStreamEvent) => void): (() => void) => {
+    const listener = (_e: unknown, ev: AIStreamEvent) => cb(ev);
     ipcRenderer.on("ai:stream", listener);
     return () => ipcRenderer.off("ai:stream", listener);
   },

@@ -4,6 +4,7 @@ import {
   buildOutline,
   coerceProposal,
   normalise,
+  paragraphTexts,
   planEdit,
   revert,
   runOps,
@@ -266,6 +267,8 @@ export interface ProposalOutcome {
   before: Block[];
   message?: string;
   needsSetup?: boolean;
+  /** 用户按了暂停：半截内容不算失败，界面要给「继续」把剩下的补完。 */
+  stopped?: boolean;
   warnings: string[];
 }
 
@@ -362,7 +365,8 @@ function decodeJsonString(frag: string): string {
  * @param opts.providerId 指定服务商；留空用当前生效的那个。
  * @param opts.requestId 本次请求 id，用于把增量认回正确的界面卡片，也让「停止」能取消。
  * @param opts.onDelta 每段增量到达时调用（按收到的顺序）。
- * @returns 收完（或「停止」打断）时 resolve；配置缺失、网络失败、超时都 reject。
+ * @returns 收完时 `{ stopped: false }`；被「停止」打断时 `{ stopped: true }`（已收到的增量照常留在调用方）；
+ *   配置缺失、网络失败、超时都 reject。
  */
 export function aiStreamTransform(opts: {
   action: string;
@@ -372,7 +376,7 @@ export function aiStreamTransform(opts: {
   providerId?: string | null;
   requestId: string;
   onDelta: (chunk: string) => void;
-}): Promise<void> {
+}): Promise<{ stopped: boolean }> {
   return new Promise((resolve, reject) => {
     const fail = (message: string, needsSetup?: boolean) => {
       const err = new Error(message) as Error & { needsSetup?: boolean };
@@ -384,7 +388,7 @@ export function aiStreamTransform(opts: {
       if (ev.kind === "delta") opts.onDelta(ev.text ?? "");
       else if (ev.kind === "done") {
         off();
-        resolve();
+        resolve({ stopped: Boolean(ev.stopped) });
       } else {
         off();
         fail(ev.message ?? "调用失败", ev.needsSetup);
@@ -421,7 +425,9 @@ export function aiStreamTransform(opts: {
  * @param opts.selection 当前选区文字，会一并送出。
  * @param opts.onDelta 模型的逐字增量；界面用它显示"正在输出"。
  * @param opts.requestId 本次请求 id，界面用它把「停止」接到这条流上。
- * @returns 方案与送出去时的大纲快照；解析失败或调用失败时 `ok` 为 false 并带原因。
+ * @param opts.continueFrom 续写：上一次暂停时已收到的改动与那半截原文，本次只补剩下的部分。
+ * @returns 方案与送出去时的大纲快照；解析失败或调用失败时 `ok` 为 false 并带原因，
+ *   被暂停打断时 `stopped` 为 true（已经收到的那部分照样可以用）。
  */
 export async function requestProposal(opts: {
   editor: Editor;
@@ -430,12 +436,17 @@ export async function requestProposal(opts: {
   selection?: string;
   onDelta?: (chunk: string) => void;
   requestId?: string;
+  continueFrom?: { ops: AiOp[]; rawTail: string };
 }): Promise<ProposalOutcome> {
   const before = blocksOf(opts.editor.state.doc);
-  const userMessage = buildUserMessage(opts.instruction, before, opts.selection);
+  const instruction = opts.continueFrom
+    ? continuationInstruction(opts.instruction, opts.continueFrom, before.length)
+    : opts.instruction;
+  const userMessage = buildUserMessage(instruction, before, opts.selection);
   let acc = "";
+  let stopped = false;
   try {
-    await aiStreamTransform({
+    const r = await aiStreamTransform({
       action: "agent",
       text: userMessage,
       system: SYSTEM_PROMPT,
@@ -446,6 +457,7 @@ export async function requestProposal(opts: {
         opts.onDelta?.(chunk);
       },
     });
+    stopped = r.stopped;
   } catch (e) {
     const err = e as Error & { needsSetup?: boolean };
     return {
@@ -458,6 +470,15 @@ export async function requestProposal(opts: {
   }
   const parsed = extractJson(acc);
   if (parsed.value === null) {
+    if (stopped) {
+      return {
+        ok: false,
+        stopped: true,
+        before,
+        message: "已暂停生成，这一段还没写出可用的改动。点「继续」让我接着写完。",
+        warnings: [],
+      };
+    }
     // 把模型回的前一小段贴出来：解析失败的原因（它压根没回 JSON、还是回歪了）一眼能看出来。
     const peek = acc.replace(/\s+/g, " ").trim().slice(0, 160);
     return {
@@ -467,18 +488,89 @@ export async function requestProposal(opts: {
       warnings: [],
     };
   }
-  const coerced = coerceProposal(parsed.value, before.length);
-  // 截断的输出只抢救到前一半：明说少了多少，别让文档悄悄短一截。
-  const warnings = parsed.truncated
+  // 续写时前面已经插入的段落也算进可引用段数，否则模型接着排的编号会被当成越界丢掉。
+  const prior = opts.continueFrom?.ops ?? [];
+  const coerced = coerceProposal(parsed.value, before.length + insertedParagraphCount(prior));
+  if (!coerced.proposal) {
+    const errors = stopped ? [`已暂停生成。${coerced.errors.join("；")}`] : coerced.errors;
+    return { ok: false, before, message: errors.join("；"), warnings: errors, stopped };
+  }
+  const proposal: Proposal = prior.length
+    ? { summary: coerced.proposal.summary, ops: [...prior, ...coerced.proposal.ops] }
+    : coerced.proposal;
+  // 截断或被暂停的输出只抢救到前一半：明说少了多少，别让文档悄悄短一截。
+  const warnings = stopped
     ? [
-        `模型输出被截断，只收到前 ${coerced.proposal?.ops.length ?? 0} 条修改，可以再说「继续」让它往下写。`,
+        `已暂停生成，目前收到 ${proposal.ops.length} 条修改，点「继续」把剩下的补完。`,
         ...coerced.errors,
       ]
-    : coerced.errors;
-  if (!coerced.proposal) {
-    return { ok: false, before, message: warnings.join("；"), warnings };
-  }
-  return { ok: true, proposal: coerced.proposal, before, warnings };
+    : parsed.truncated
+      ? [
+          `模型输出被截断，只收到前 ${proposal.ops.length} 条修改，可以再说「继续」让它往下写。`,
+          ...coerced.errors,
+        ]
+      : coerced.errors;
+  return { ok: true, proposal, before, warnings, stopped };
+}
+
+/**
+ * 把"上一次停在半路"改写成一条接着写的指令。
+ *
+ * @param instruction 用户原话，续写时原样带上，模型才知道整体要做什么。
+ * @param from 已收到的改动与那半截原文。
+ * @param blockCount 送出去时文档的段数。
+ * @returns 拼好的指令（仍然要求一份完整 JSON，只是内容只补剩下的部分）。
+ */
+function continuationInstruction(
+  instruction: string,
+  from: { ops: AiOp[]; rawTail: string },
+  blockCount: number,
+): string {
+  const tail = from.rawTail.replace(/\s+/g, " ").trim().slice(-400);
+  return (
+    `${instruction}\n\n` +
+    `上一条方案写到一半被打断了，已经收下 ${from.ops.length} 条改动，它停在这句话中间：\n…${tail}\n\n` +
+    `不要重复已经给出的改动，只输出剩下的部分，仍然是一份完整的 {"summary":"…","ops":[…]}。` +
+    `新增段落的 after 从 ${nextInsertAfter(from.ops, blockCount)} 往上接着排。`
+  );
+}
+
+/** 续写的下一条插入该用哪个 after：排在已给出插入编号的后面，没插入过就是文档末尾。 */
+function nextInsertAfter(ops: AiOp[], blockCount: number): number {
+  let last = blockCount - 1;
+  for (const o of ops) if (o.op === "insertParagraph" && o.after > last) last = o.after;
+  return last + 1;
+}
+
+/**
+ * 全文改写时追加的约束：落地走 `alignRewrite`，段数对不上就整批放弃，
+ * 所以必须一开始就说清"一段对一段"，别让模型自己合并段落。
+ */
+export const FULL_DOC_REWRITE_NOTE =
+  "下面这份是整篇文档。请按原有段落逐段改写：保持段落数量与顺序，一段都不合并、不新增、不删除；只用换行分段，不要编号、不要解释、不要代码块围栏。";
+
+/**
+ * 组装快捷指令改写时的附加说明（主进程把它拼在原文前面）。
+ *
+ * @param scope document 时要求段数一一对应；selection 不加额外约束。
+ * @param resume 暂停后的续写进度（docEdit 的 `rewriteResume`）：`kept` 是留下不动的段落，
+ *   `remaining` 还要模型补写的段数。给了它，任务就从"改写整篇"变成"只补第 kept+1 段起的剩下几段"。
+ * @returns 说明文字；没有要补的约束时返回 undefined，走主进程内置语气原样。
+ */
+export function rewriteInstruction(
+  scope: "selection" | "document",
+  resume?: { kept: string[]; remaining: number },
+): string | undefined {
+  const rule = scope === "document" ? FULL_DOC_REWRITE_NOTE : "";
+  if (!resume) return rule || undefined;
+  const done = resume.kept.length;
+  const head = done ? `前 ${done} 段已经改好、我会自己留着：\n${resume.kept.join("\n")}\n\n` : "";
+  return `${rule}\n\n${head}上一次改写在某一段中间被打断，那段残句不算数，我从头重发原文。请只改写剩下的 ${resume.remaining} 段（从第 ${done + 1} 段起），正好 ${resume.remaining} 行，每段一行；不要重复上面已经改好的段落，也不要写解释和代码块围栏。`.trim();
+}
+
+/** 这些改动会新增多少段（`after` 的可引用段数要跟着长）。 */
+function insertedParagraphCount(ops: AiOp[]): number {
+  return ops.reduce((n, o) => (o.op === "insertParagraph" ? n + Math.max(1, paragraphTexts(o.text).length) : n), 0);
 }
 
 export interface CommitResult {

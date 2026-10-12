@@ -5,6 +5,7 @@ import {
   planEdit,
   revert,
   rewritableBlocks,
+  rewriteResume,
   runOps,
   type Block,
   type DiagramResolver,
@@ -350,5 +351,52 @@ describe("alignRewrite：快捷指令没选区时对整篇逐段改写", () => {
       "paragraph:第三段改写",
     ]);
     expect(lines(revert(plan.after, plan.inverses).after)).toEqual(lines(blocks));
+  });
+});
+
+describe("rewriteResume：暂停后续写时只补剩下的段落", () => {
+  it("断在段中间的那半截丢掉重写，段数才不会对不上", () => {
+    const source = "第一段\n第二段\n第三段";
+    const r = rewriteResume(source, "第一段改写\n第二段改写\n第三段（半");
+    expect(r.kept).toEqual(["第一段改写", "第二段改写"]);
+    expect(r.remaining).toBe(1);
+  });
+
+  it("半截只有一句残句时无段可留，等于整篇重来", () => {
+    const r = rewriteResume("第一段\n第二段", "第一段改写（写到一半");
+    expect(r.kept).toEqual([]);
+    expect(r.remaining).toBe(2);
+  });
+
+  it("半截看起来收满了也照样丢掉末段，宁可重写一段也不多要一段", () => {
+    const r = rewriteResume("第一段\n第二段\n第三段", "甲\n乙\n丙");
+    expect(r.kept).toEqual(["甲", "乙"]);
+    expect(r.remaining).toBe(1);
+  });
+
+  it("留下的段落 + 模型补的那一段拼回去，落地时段数正好齐全", () => {
+    const source = "第一段\n第二段\n第三段";
+    const r = rewriteResume(source, "第一段改写\n第二段改写\n第三段公");
+    const merged = `${r.kept.join("\n")}\n第三段改写`;
+    const aligned = alignRewrite(doc(...source.split("\n")), merged);
+    expect(aligned.errors).toEqual([]);
+    expect(aligned.ops).toEqual([
+      { op: "setText", index: 0, text: "第一段改写" },
+      { op: "setText", index: 1, text: "第二段改写" },
+      { op: "setText", index: 2, text: "第三段改写" },
+    ]);
+    // 反过来看不丢掉残句的接法：段数照样对得上，但第三段是"半截 + 重写"的缝合怪，
+    // 会当成新文字写进文档——所以续写必须先丢掉可能被切断的那一段。
+    expect(alignRewrite(doc(...source.split("\n")), "第一段改写\n第二段改写\n第三段公第三段改写").ops[2]).toEqual({
+      op: "setText",
+      index: 2,
+      text: "第三段公第三段改写",
+    });
+  });
+
+  it("半截里有空行也不影响计数：折叠口径与 alignRewrite 同源", () => {
+    const r = rewriteResume("第一段\n第二段\n第三段", "第一段改写\n\n   \n第二段改");
+    expect(r.kept).toEqual(["第一段改写"]);
+    expect(r.remaining).toBe(2);
   });
 });

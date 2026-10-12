@@ -740,6 +740,25 @@ export function alignRewrite(blocks: Block[], rewritten: string): { ops: AiOp[];
   return { ops, errors: [] };
 }
 
+/**
+ * 暂停后续写时的改写进度：哪几段可以放心留下，还差几段没写。
+ *
+ * 断流那一下很可能落在段落中间，最后那段是半截话。直接把它和续写结果首尾相接，
+ * 要么拼成一段（段数少一，落地整批放弃），要么留个残缺段落，所以最后一段一律丢掉，
+ * 让模型从那里重写——宁可重复改一段，也不能把用户的段落改坏（AGENTS §2.3）。
+ *
+ * @param source 送出去改写的原文，段间用换行分隔（与 `alignRewrite` 同一口径）。
+ * @param partial 暂停时已经收到的半截改写。
+ * @returns `kept` 是可以留下的完整段落；`remaining` 是还要模型补写的段数，已经写完时为 0。
+ */
+export function rewriteResume(
+  source: string,
+  partial: string,
+): { kept: string[]; remaining: number } {
+  const kept = paragraphTexts(partial).slice(0, -1);
+  return { kept, remaining: Math.max(0, paragraphTexts(source).length - kept.length) };
+}
+
 function blockFromNew(nb: NewBlock): Block {
   if (nb.type === "table") {
     return {

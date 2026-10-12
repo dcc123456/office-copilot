@@ -113,6 +113,8 @@ interface OfficeCopilotAPI {
       text?: string;
       message?: string;
       needsSetup?: boolean;
+      /** `kind:"done"` 时为 true 表示用户按了暂停，不是模型写完了。 */
+      stopped?: boolean;
     }) => void,
   ) => () => void;
   getSettings: () => Promise<AppSettings>;

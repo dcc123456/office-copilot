@@ -13,7 +13,8 @@ interface TransformRequest {
 
 type StreamEvent =
   | { requestId: string; kind: "delta"; text: string }
-  | { requestId: string; kind: "done" }
+  /** `stopped` 区分"用户按了暂停"和"模型写完了"：界面据此给出「继续」，半截内容不算失败。 */
+  | { requestId: string; kind: "done"; stopped?: boolean }
   | {
       requestId: string;
       kind: "error";
@@ -127,7 +128,7 @@ export function registerAIHandlers(ipc: IpcMain): void {
         .then(() => send({ requestId, kind: "done" }))
         .catch((err: unknown) => {
           if (entry.canceled) {
-            send({ requestId, kind: "done" });
+            send({ requestId, kind: "done", stopped: true });
             return;
           }
           const aborted = err instanceof Error && err.name === "AbortError";

@@ -36,6 +36,7 @@ interface StreamEvent {
   text?: string;
   message?: string;
   needsSetup?: boolean;
+  stopped?: boolean;
 }
 
 /**
@@ -125,6 +126,76 @@ describe("改文档的 agent 走流式通道", () => {
     expect(out.ok).toBe(true);
     expect(out.proposal?.ops).toHaveLength(2);
     expect(out.warnings.join()).toContain("截断");
+  });
+
+  it("按暂停后留下的半截方案照样可用，并告诉用户能继续", async () => {
+    stubStream([
+      {
+        requestId: "",
+        kind: "delta",
+        text: '{"summary":"写三段","ops":[{"op":"insertParagraph","after":0,"text":"甲"},{"op":"insertParagraph","after":1,"text":"乙"},',
+      },
+      { requestId: "", kind: "done", stopped: true },
+    ]);
+    const out = await requestProposal({
+      editor: editorWith(["现有的一段"]),
+      instruction: "再写三段",
+    });
+    expect(out.ok).toBe(true);
+    expect(out.stopped).toBe(true);
+    expect(out.proposal?.ops).toHaveLength(2);
+    expect(out.warnings.join()).toContain("暂停");
+  });
+
+  it("暂停得太早、一条改动都还没写出时不算解析失败", async () => {
+    stubStream([
+      {
+        requestId: "",
+        kind: "delta",
+        text: '{"summary":"写三段","ops":[{"op":"insertParagraph","after":0,"text":"甲',
+      },
+      { requestId: "", kind: "done", stopped: true },
+    ]);
+    const out = await requestProposal({
+      editor: editorWith(["现有的一段"]),
+      instruction: "再写三段",
+    });
+    expect(out.ok).toBe(false);
+    expect(out.stopped).toBe(true);
+    expect(out.message).toContain("继续");
+    expect(out.message).not.toContain("可解析");
+  });
+
+  it("续写只补剩下的部分：前面收到的改动留着，编号按落地过程中的段数放行", async () => {
+    const { sent } = stubStream([
+      {
+        requestId: "",
+        kind: "delta",
+        text: '{"summary":"接着写","ops":[{"op":"insertParagraph","after":2,"text":"丁"},{"op":"insertParagraph","after":3,"text":"戊"}]}',
+      },
+      { requestId: "", kind: "done" },
+    ]);
+    const out = await requestProposal({
+      editor: editorWith(["甲段"]),
+      instruction: "写五段",
+      continueFrom: {
+        ops: [
+          { op: "insertParagraph", after: 0, text: "乙" },
+          { op: "insertParagraph", after: 1, text: "丙" },
+        ],
+        rawTail: '{"summary":"写五段","ops":[{"op":"insertParagraph","after":1,"text":"丙"',
+      },
+    });
+    // 指令里必须交代"别重复、从几号接着排"，否则模型会把前面那段再写一遍。
+    expect(String(sent.text)).toContain("不要重复已经给出的改动");
+    expect(String(sent.text)).toContain("after 从 2");
+    expect(out.proposal?.ops).toEqual([
+      { op: "insertParagraph", after: 0, text: "乙" },
+      { op: "insertParagraph", after: 1, text: "丙" },
+      { op: "insertParagraph", after: 2, text: "丁" },
+      { op: "insertParagraph", after: 3, text: "戊" },
+    ]);
+    expect(out.warnings).toEqual([]);
   });
 
   it("还没配模型时把 needsSetup 透出来，界面好拉开设置", async () => {
