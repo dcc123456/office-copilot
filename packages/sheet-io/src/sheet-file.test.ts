@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
 import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
+import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
 import type { SheetModel } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
@@ -264,5 +265,45 @@ describe("打开失败时的错误码（验收 A6）", () => {
     const error = await SheetFile.fromBytes(new Uint8Array([1, 2, 3, 4]), { fileName: "bad.xlsx" }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(SheetOpenError);
     expect((error as SheetOpenError).reason).toBe("not-a-zip");
+  });
+});
+
+describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时按 partPath 写回）", () => {
+  it("载荷里没有 sourceXml，按载荷写回的那格读回一致", async () => {
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const payload = sheetPayloadOf(sheet);
+    expect("sourceXml" in payload).toBe(false);
+
+    // 渲染层能碰到的只有这个对象：改一格数字，再追加一格纯文本
+    const edited = payload.cells["C2"];
+    if (!edited) throw new Error("夹具缺少 C2");
+    edited.value = 777;
+    payload.cells["A7"] = { address: "A7", colIndex: 0, rowIndex: 6, kind: "string", value: "载荷写入" };
+    payload.lastRowIndex = 6;
+
+    // 保存的那一步：主进程重新从磁盘打开同一份包，把载荷按 partPath 配对写回
+    const targetFile = await openSample();
+    const target = (await targetFile.sheetAt(0)) as SheetModel;
+    applySheetPayload(target, payload);
+    targetFile.writeSheet(target);
+    const bytes = await targetFile.toBytes();
+    const parts = await partTexts(bytes);
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="C2" s="1"><v>777</v></c>');
+
+    const reopened = await SheetFile.fromBytes(bytes, { fileName: "sample.xlsx" });
+    const readBack = (await reopened.sheetAt(0)) as SheetModel;
+    expect(readBack.cells["C2"]?.value).toBe(777);
+    expect(readBack.cells["A7"]?.value).toBe("载荷写入");
+    expect(readBack.lastRowIndex).toBe(6);
+  });
+
+  it("警告与未建模部件清单必须一路带进载荷，不许在跨界处丢（spec §零.7）", async () => {
+    const file = await openSample();
+    const workbook = await file.toWorkbook();
+    const payload = workbookPayload(workbook.fileName, workbook.sheets, workbook.warnings, workbook.unsupported);
+    expect(payload.fileName).toBe("sample.xlsx");
+    expect(payload.sheets.map((sheet) => sheet.name)).toEqual(["销售", "空表"]);
+    expect(payload.unsupported.map((item) => item.reason)).toContain("externalLinks");
   });
 });
