@@ -48,6 +48,50 @@ describe("planEdit", () => {
     expect(plan.after.some((b) => b.text === "第三节")).toBe(false);
   });
 
+  it("新建空文档里的连续插入按落地过程中的编号排队，段序不能乱", () => {
+    // 模型看到空文档只能自己编号：after=-1、0、1、2…，每个编号指"写到这里为止的第几段"。
+    const before = doc("");
+    const proposal: Proposal = {
+      summary: "写小说",
+      ops: [
+        { op: "insertParagraph", after: -1, text: "第一章 启程" },
+        { op: "insertParagraph", after: 0, text: "夜色沉进河谷。" },
+        { op: "insertParagraph", after: 1, text: "他推开木门。" },
+        { op: "insertParagraph", after: 2, text: "门后没有灯。" },
+      ],
+    };
+    const plan = planEdit(before, proposal);
+    expect(plan.skipped).toEqual([]);
+    expect(plan.after.map((b) => b.text)).toEqual([
+      "第一章 启程",
+      "夜色沉进河谷。",
+      "他推开木门。",
+      "门后没有灯。",
+      "",
+    ]);
+  });
+
+  it("有文字的文档里，超出大纲的 after 指的是刚插入的那一段", () => {
+    const before = doc("第一段", "第二段");
+    const proposal: Proposal = {
+      summary: "结尾补两段",
+      ops: [
+        { op: "insertParagraph", after: 1, text: "补在第二段后" },
+        { op: "insertParagraph", after: 2, text: "补在刚插入那段后" },
+        { op: "insertParagraph", after: 0, text: "插在原第一段后" },
+      ],
+    };
+    const plan = planEdit(before, proposal);
+    expect(plan.skipped).toEqual([]);
+    expect(plan.after.map((b) => b.text)).toEqual([
+      "第一段",
+      "插在原第一段后",
+      "第二段",
+      "补在第二段后",
+      "补在刚插入那段后",
+    ]);
+  });
+
   it("revert undoes the whole change and nothing else", () => {
     const before = doc("第一节", "第二节", "第三节");
     const plan = planEdit(before, {
@@ -212,6 +256,44 @@ describe("coerceProposal", () => {
     const r = coerceProposal({ ops: [{ op: "deleteBlock", index: 0 }] }, 1);
     expect(r.proposal?.summary).toBeTruthy();
     expect(r.proposal?.ops).toHaveLength(1);
+  });
+
+  it("连续插入的编号递增不卡原文档段数", () => {
+    // 写一整篇小说时模型一条一段地编号；只按原文档段数校验的话，48 条会被判成越权丢弃。
+    const ops = Array.from({ length: 50 }, (_, i) => ({
+      op: "insertParagraph",
+      after: i - 1,
+      text: `第 ${i + 1} 段正文`,
+    }));
+    const r = coerceProposal({ summary: "写小说", ops }, 1);
+    expect(r.errors).toEqual([]);
+    expect(r.proposal?.ops).toHaveLength(50);
+  });
+
+  it("段落样式接受带单位的磅值", () => {
+    const r = coerceProposal(
+      {
+        summary: "s",
+        ops: [
+          { op: "insertParagraph", after: 0, text: "正文", style: { indentFirst: "24pt", lineHeight: "1.7" } },
+        ],
+      },
+      1,
+    );
+    expect(r.errors).toEqual([]);
+    expect(r.proposal?.ops[0]).toEqual({
+      op: "insertParagraph",
+      after: 0,
+      text: "正文",
+      style: { indentFirst: 24, lineHeight: "1.7" },
+    });
+
+    // "2cm" 不是段落格式的单位，宁可不写也不能猜。
+    const unit = coerceProposal(
+      { summary: "s", ops: [{ op: "setStyle", index: 0, style: { spacingBefore: "12 磅", indentRight: "2cm" } }] },
+      1,
+    );
+    expect(unit.proposal?.ops[0]).toEqual({ op: "setStyle", index: 0, style: { spacingBefore: 12 } });
   });
 
   it("normalises ragged tables away instead of half-building them", () => {

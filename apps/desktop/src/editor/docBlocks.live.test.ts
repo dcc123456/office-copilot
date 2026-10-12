@@ -1508,6 +1508,28 @@ describe("多行正文落到真实文档", () => {
     expect(textsOf(editor)).toEqual(["原句"]);
   });
 
+  it("模型逐条编号写 12 段小说：段序不乱，撤销后回到原样", () => {
+    // 真实模型写长文就发这种编号（after=-1、0、1、2…），一条被丢弃或插错位整篇就毁了。
+    const ops = Array.from({ length: 12 }, (_, i) => ({
+      op: "insertParagraph" as const,
+      after: i - 1,
+      text: `第 ${i + 1} 段正文。`,
+      ...(i === 0 ? { style: { headingLevel: 1 } } : {}),
+    }));
+    const { editor, plan, exec } = runProposal([para([])], ops);
+    expect(exec.ok).toBe(true);
+    expect(plan.skipped).toEqual([]);
+    expect(textsOf(editor)).toEqual([
+      ...Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 段正文。`),
+      "",
+    ]);
+
+    const back = revert(blocksOf(editor.state.doc), plan.inverses);
+    expect(back.ok).toBe(true);
+    expect(executeOps(editor, back.applied, back.after).ok).toBe(true);
+    expect(textsOf(editor)).toEqual([""]);
+  });
+
   it("段内连续空白折叠后仿真与落地一致，不再放弃写入", () => {
     const { exec } = runProposal([para([text("原句")])], [
       { op: "setText", index: 0, text: "  甲   乙  " },

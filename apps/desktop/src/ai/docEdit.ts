@@ -299,7 +299,8 @@ export function parseStylePatch(raw: unknown): StylePatch | null {
       continue;
     }
     if (isNumStyleKey(key)) {
-      if (typeof v === "number" && Number.isFinite(v)) set(key, v);
+      const pt = parsePointValue(v);
+      if (pt !== null) set(key, pt);
       continue;
     }
     if (COLOR_STYLE_KEYS.has(key)) {
@@ -314,6 +315,21 @@ export function parseStylePatch(raw: unknown): StylePatch | null {
 
 function isNumStyleKey(k: keyof StylePatch): k is NumStyleKey {
   return (PARAGRAPH_NUM_KEYS as readonly string[]).includes(k);
+}
+
+/**
+ * 读模型给的段落磅值：接受 24、"24"、"24pt"、"24 磅"，其余写法（px/cm/字符/缩进 2 字符）
+ * 一律拒收——段落的间距与缩进在编辑器里只有磅这一个口径，猜错单位会把版式直接写歪，
+ * 换算永远是 docx-io 在进出口做（AGENTS §2.1）。
+ *
+ * @param v 提案 style 里的原始取值。
+ * @returns 磅数；读不懂就返回 null，表示这个字段不写。
+ */
+function parsePointValue(v: unknown): number | null {
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  if (typeof v !== "string") return null;
+  const match = /^(-?\d+(?:\.\d+)?)(?:\s*)(pt|磅)?$/i.exec(v.trim());
+  return match ? Number(match[1]) : null;
 }
 
 function isBoolStyleKey(k: keyof StylePatch): k is BoolStyleKey {
@@ -336,7 +352,13 @@ export interface CoercionResult {
   errors: string[];
 }
 
-/** Turn whatever the model produced into a validated proposal against `blockCount`. */
+/**
+ * 校验并收敛模型的提案。
+ *
+ * @param raw 模型返回的 JSON 对象。
+ * @param blockCount 送出去那份大纲的段数（原文档有多少段）。
+ * @returns 可用的 proposal 与被忽略的条目；`after` 的可引用段数会随本条提案已插入的段落一起增长。
+ */
 export function coerceProposal(raw: unknown, blockCount: number): CoercionResult {
   const errors: string[] = [];
   if (!isObj(raw)) return { proposal: null, errors: ["提案不是有效的 JSON 对象。"] };
@@ -346,10 +368,18 @@ export function coerceProposal(raw: unknown, blockCount: number): CoercionResult
   if (!Array.isArray(opsRaw)) return { proposal: null, errors: ["提案缺少 ops 数组。"] };
 
   const ops: AiOp[] = [];
+  // 模型写连续插入时按"接在刚插入那一段后面"递增编号（after=0,1,2…），这些段落此刻还不存在，
+  // 但落地时会被创建。范围只按原文档段数卡的话，一篇几千字的小说只剩开头三段活下来。
+  let addressable = blockCount;
   opsRaw.forEach((entry, i) => {
-    const parsed = coerceOp(entry, blockCount);
+    const parsed = coerceOp(entry, addressable);
     if (parsed.error) errors.push(`第 ${i + 1} 条操作被忽略：${parsed.error}`);
-    else if (parsed.op) ops.push(parsed.op);
+    else if (parsed.op) {
+      ops.push(parsed.op);
+      if (parsed.op.op === "insertParagraph") {
+        addressable += Math.max(1, paragraphTexts(parsed.op.text).length);
+      }
+    }
   });
 
   if (!ops.length) errors.push("没有任何可执行的修改。");
@@ -865,9 +895,12 @@ export function planEdit(blocks: Block[], proposal: Proposal, diagrams?: Diagram
   // its indexes mean original indexes. Inserts and deletes shift later blocks,
   // hence this translation table: pos[original] == current position (-1 == gone).
   const pos: number[] = working.map((_, i) => i);
+  // 新建文档里没有一行可读的文字，模型只能给它"将要写出的段落"编号（after=-1、0、1、2…）。
+  // 这时 after 一律按落地过程中的当前位置解释，否则第 2 条会去插那段空白占位符，整篇顺序全乱。
+  const isBlankDoc = !working.some((b) => b.text.trim());
 
   for (const ai of proposal.ops) {
-    for (const core of resolveAiOp(ai, working, pos, diagrams, skipped)) {
+    for (const core of resolveAiOp(ai, working, pos, diagrams, skipped, isBlankDoc)) {
       const deleting = core.kind === "deleteBlock" ? findAddress(working, core.addr) : -1;
       const r = applyCore(working, core);
       if (!r.ok) {
@@ -930,6 +963,7 @@ function resolveAiOp(
   pos: readonly number[],
   diagrams: DiagramResolver | undefined,
   skipped: string[],
+  isBlankDoc: boolean,
 ): CoreOp[] {
   const originalIndex = (index: number, verb: string): Block | null => {
     const cur = pos[index];
@@ -951,7 +985,12 @@ function resolveAiOp(
 
   const anchorAfter = (after: number): Anchor | null => {
     if (after < 0) return { at: "start" };
-    if (after >= pos.length) return { at: "end" };
+    // 编号超出原大纲，或文档本来是空的：指的是落地过程中的位置，也就是刚插入的那一段。
+    if (isBlankDoc || after >= pos.length) {
+      if (after >= blocks.length) return { at: "end" };
+      const addr = addressOf(blocks, after);
+      return addr ? { at: "after", after: addr } : null;
+    }
     const cur = pos[after]!;
     if (cur < 0) {
       skipped.push(`插入位置的第 ${after + 1} 段已被本次改动删除`);
