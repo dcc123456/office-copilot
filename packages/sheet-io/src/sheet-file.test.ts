@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
+import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import type { SheetModel } from "./model.js";
 
@@ -149,6 +150,39 @@ describe("回写保真（验收 A1：空改动不许动任何部件）", () => {
     const reopened = await SheetFile.fromBytes(await file.toBytes(), { fileName: "sample.xlsx" });
     const reopenedSheet = (await reopened.sheetAt(0)) as SheetModel;
     expect(reopenedSheet.cells["J2"]?.value).toBe(3);
+  });
+
+  it("手改的日期复用已有样式，自定义格式才往 cellXfs 追加（§2.1 落盘侧 + 实测 P3 的位置索引）", async () => {
+    const before = await partTexts(await buildSampleWorkbookBytes());
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const parsed = parseUserCellText("2026-02-01");
+    // 内建日期格式 14 在夹具里已有（`s="5"`），复用即可，不该新建样式
+    sheet.cells["F2"] = { address: "F2", colIndex: 5, rowIndex: 1, kind: parsed.kind, value: parsed.value, numberFormat: parsed.numberFormat };
+    // 自定义中文年月是夹具里没有的格式：追加一条 numFmt + 一条 xf，落在末尾
+    sheet.cells["F3"] = {
+      address: "F3",
+      colIndex: 5,
+      rowIndex: 2,
+      kind: "number",
+      value: parsed.value,
+      numberFormat: { numFmtId: 165, formatCode: 'yyyy"年"m"月"', isDateLike: true },
+    };
+    file.writeSheet(sheet);
+    const written = await file.toBytes();
+    const parts = await partTexts(written);
+
+    // 前 6 条 xf 必须逐字不变，否则用户已有格式会整体错位
+    expect(xfsOf(parts["xl/styles.xml"]).slice(0, 6)).toEqual(xfsOf(before["xl/styles.xml"]));
+    expect(xfsOf(parts["xl/styles.xml"]).length).toBe(7);
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="F2" s="5"><v>46054</v></c>');
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="F3" s="6"><v>46054</v></c>');
+    expect(parts["xl/styles.xml"]).toContain('<numFmt numFmtId="165" formatCode="yyyy&quot;年&quot;m&quot;月&quot;"/>');
+
+    const reopened = await SheetFile.fromBytes(written, { fileName: "sample.xlsx" });
+    const reopenedSheet = (await reopened.sheetAt(0)) as SheetModel;
+    expect(reopenedSheet.cells["F2"]?.numberFormat).toMatchObject({ numFmtId: 14, isDateLike: true });
+    expect(cellDisplayText(reopenedSheet.cells["F3"] as SheetModel["cells"][string])).toBe("2026年2月");
   });
 
   it("新增字符串只追加、样式表前 6 条一个字节都不许变（实测 §二 P3 的位置索引风险）", async () => {

@@ -42,6 +42,11 @@ const FIRST_CUSTOM_NUMFMT_ID = 164;
 /** 一条 `cellXfs/xf` 的组成引用。 */
 export interface CellStyleParts {
   numFmtId?: number;
+  /**
+   * 自定义格式码（`numFmtId >= 164` 时用）。传了就先把格式码追加/复用到 `<numFmts>`，
+   * 再把得到的 id 写进 `xf`；不传则只用 `numFmtId`（内建 id 不需要格式码）。
+   */
+  formatCode?: string;
   fontId?: number;
   fillId?: number;
   borderId?: number;
@@ -171,8 +176,10 @@ export class StyleTable {
    */
   appendCellStyle(parts: CellStyleParts): number {
     const fontId = parts.font ? this.ensureFont(parts.font) : (parts.fontId ?? 0);
+    // 给了格式码就先把码落到 `<numFmts>`（已有同码则复用 id），否则 Excel 读不到自定义格式。
+    const numFmtId = parts.formatCode !== undefined ? this.appendNumberFormat(parts.formatCode) : (parts.numFmtId ?? 0);
     const wanted = {
-      numFmtId: parts.numFmtId ?? 0,
+      numFmtId,
       fontId,
       fillId: parts.fillId ?? 0,
       borderId: parts.borderId ?? 0,
@@ -189,7 +196,7 @@ export class StyleTable {
       `borderId="${wanted.borderId}"`,
       `xfId="0"`,
     ];
-    if (parts.numFmtId !== undefined) attrs.push('applyNumberFormat="1"');
+    if (parts.numFmtId !== undefined || parts.formatCode !== undefined) attrs.push('applyNumberFormat="1"');
     if (parts.font !== undefined) attrs.push('applyFont="1"');
     if (parts.fillId !== undefined) attrs.push('applyFill="1"');
     if (parts.borderId !== undefined) attrs.push('applyBorder="1"');

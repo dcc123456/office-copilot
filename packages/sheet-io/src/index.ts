@@ -43,3 +43,11 @@ export { argbToSheetColor, sheetColorToArgb, type FontSpec, type SheetColor } fr
 export { parseSheet, recalculateSheetExtent, rowFingerprints, serializeSheetXml, type ParseSheetInput } from "./xlsx-sheet.js";
 export { SharedStringTable } from "./xlsx-strings.js";
 export { StyleTable, type CellStyleParts } from "./xlsx-styles.js";
+export { cellDisplayText, formatNumberForDisplay, parseUserCellText, type ParsedCellInput } from "./cell-text.js";
+export {
+  applySheetPayload,
+  sheetPayloadOf,
+  workbookPayload,
+  type SheetPayload,
+  type WorkbookPayload,
+} from "./sheet-dto.js";

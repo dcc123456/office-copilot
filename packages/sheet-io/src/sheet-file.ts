@@ -219,12 +219,36 @@ export class SheetFile {
   /**
    * 把一张表的当前内容登记为待写入。
    *
-   * @param sheet 已被上层（手动编辑或 op 落地）改过的表；调用前需先 `recalculateSheetExtent`。
+   * @param sheet 已被上层（手动编辑或 op 落地）改过的表；调用前不需自己算维度。
    */
   writeSheet(sheet: SheetModel): void {
+    this.resolveNumberFormatStyles(sheet);
     recalculateSheetExtent(sheet);
     this.rewrittenParts.set(sheet.partPath, serializeSheetXml(sheet, this.sharedStrings));
     this.loadedSheets.set(sheet.partPath, sheet);
+  }
+
+  /**
+   * 把上层表达的"显示意图"收敛成 `cellXfs` 位置索引（只追加或复用，**绝不重排**，实测 §二 P3）。
+   *
+   * 渲染层只带 `numberFormat`（它在 IO 层读到的语义），不自己数样式索引；
+   * 已经是目标格式的格原样带过（`s` 不动），所以在表里改一个数字格式不会牵连其它格。
+   * 读不懂的格（`rawXml` 原样回写的）不碰。
+   *
+   * @param sheet 待写入的表；就地补 `cell.styleIndex`。
+   */
+  private resolveNumberFormatStyles(sheet: SheetModel): void {
+    for (const cell of Object.values(sheet.cells)) {
+      if (!cell.numberFormat || cell.rawXml) continue;
+      const current = this.styles.numberFormatFor(cell.styleIndex);
+      if (current.numFmtId === cell.numberFormat.numFmtId && current.formatCode === cell.numberFormat.formatCode) continue;
+      cell.styleIndex = this.styles.appendCellStyle(
+        cell.numberFormat.formatCode !== undefined
+          ? { formatCode: cell.numberFormat.formatCode }
+          : { numFmtId: cell.numberFormat.numFmtId },
+      );
+      cell.numberFormat = this.styles.numberFormatFor(cell.styleIndex);
+    }
   }
 
   /**
