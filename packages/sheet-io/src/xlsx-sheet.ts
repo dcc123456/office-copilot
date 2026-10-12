@@ -7,7 +7,15 @@
  * `<dimension>`，其余字节原样保留（`AGENTS.md` §2.4 / spec §零.6）。
  */
 import { formatA1, parseA1, parseRange } from "./address.js";
-import type { CellScalarValue, SheetCell, SheetColumn, SheetMerge, SheetModel, SheetRowMeta } from "./model.js";
+import type {
+  CellScalarValue,
+  SheetCell,
+  SheetColumn,
+  SheetLike,
+  SheetMerge,
+  SheetModel,
+  SheetRowMeta,
+} from "./model.js";
 import type { StyleTable } from "./xlsx-styles.js";
 import type { SharedStringTable } from "./xlsx-strings.js";
 import { type Element, children, escapeAttr, escapeText, firstChild, isElement, parseDocument, serialize, text } from "./xml.js";
@@ -132,14 +140,39 @@ export function serializeSheetXml(sheet: SheetModel, sharedStrings: SharedString
 /**
  * 表内所有格子的值指纹（阶段 3 的内容寻址撤销要用，spec D3）。
  *
- * @param sheet 目标表。
- * @returns 行号 → 该行内容指纹；插入/删除行会让指纹整体位移，所以撤销按指纹而不是按地址重定位。
+ * @param sheet 目标表（载荷也行，只读 `cells`）。
+ * @returns 行号 → 该行内容指纹。串里带的是**列号**而不是 A1 地址：插入一行会把整表下移，
+ *   地址跟着变，用地址当身份就等于承认"位移之后的行不是原来那行"，撤销会认错。
  */
-export function rowFingerprints(sheet: SheetModel): Record<number, string> {
+export function rowFingerprints(sheet: SheetLike): Record<number, string> {
   const byRow = groupCellsByRow(sheet);
   const acc: Record<number, string> = {};
   for (const [rowIndex, rowCells] of byRow) {
-    acc[rowIndex] = rowCells.map((cell) => `${cell.address}=${cell.value ?? ""}`).join("|");
+    acc[rowIndex] = rowCells.map((cell) => `${cell.colIndex}=${cell.value ?? ""}`).join("|");
+  }
+  return acc;
+}
+
+/**
+ * 列方向的内容指纹（与 `rowFingerprints` 对称，供列宽与列插删的撤销定位）。
+ *
+ * @param sheet 目标表（载荷也行，只读 `cells`）。
+ * @returns 列号 → 该列内容指纹，串里带行号，所以插入列不会让指纹认错。
+ */
+export function colFingerprints(sheet: SheetLike): Record<number, string> {
+  const byCol = new Map<number, SheetCell[]>();
+  for (const cell of Object.values(sheet.cells)) {
+    const bucket = byCol.get(cell.colIndex);
+    if (bucket) bucket.push(cell);
+    else byCol.set(cell.colIndex, [cell]);
+  }
+  const acc: Record<number, string> = {};
+  for (const [colIndex, colCells] of byCol) {
+    acc[colIndex] = colCells
+      .slice()
+      .sort((a, b) => a.rowIndex - b.rowIndex)
+      .map((cell) => `${cell.rowIndex}=${cell.value ?? ""}`)
+      .join("|");
   }
   return acc;
 }
@@ -169,7 +202,7 @@ const DIMENSION_PATTERN = /<dimension(?:\s[^>]*)?\/>/;
  *
  * @param sheet 原地更新的表（调用方改完 `cells` 后必须调它，否则 `<dimension>` 与实际格子不一致）。
  */
-export function recalculateSheetExtent(sheet: SheetModel): void {
+export function recalculateSheetExtent(sheet: SheetLike): void {
   let lastColIndex = -1;
   let lastRowIndex = -1;
   for (const cell of Object.values(sheet.cells)) {
@@ -298,7 +331,7 @@ function parseCell(
   return cell;
 }
 
-function groupCellsByRow(sheet: SheetModel): Map<number, SheetCell[]> {
+function groupCellsByRow(sheet: SheetLike): Map<number, SheetCell[]> {
   const byRow = new Map<number, SheetCell[]>();
   for (const cell of Object.values(sheet.cells)) {
     const bucket = byRow.get(cell.rowIndex);

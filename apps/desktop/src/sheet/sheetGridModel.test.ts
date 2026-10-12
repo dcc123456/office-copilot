@@ -4,13 +4,11 @@ import {
   ROW_HEADER_WIDTH_PX,
   addressAtPoint,
   buildSheetLayout,
-  withColumnWidth,
   displayTextOf,
   moveAddress,
   selectionLabel,
   selectionRectOf,
   visibleSlotRange,
-  withCellText,
 } from "./sheetGridModel.js";
 
 /** 手工摆一张最小表：A1 文字、B1 数字、C1 带日期样式，另有一列一行被隐藏。 */
@@ -76,38 +74,6 @@ describe("网格几何（阶段 2：位置与单位的对应关系）", () => {
   });
 });
 
-describe("输入落地（§2.3 不许拍平已有格式）", () => {
-  it("数字输入保留原格的样式索引", () => {
-    const next = withCellText(sampleSheet(), "B1", "300");
-    expect(next.cells["B1"]).toMatchObject({ kind: "number", value: 300, styleIndex: 1 });
-    expect(next.cells["B1"]?.numberFormat).toBeUndefined();
-  });
-
-  it("日期输入带出数字格式并放大已用区域", () => {
-    const next = withCellText(sampleSheet(), "D9", "2026-02-01");
-    expect(next.cells["D9"]).toMatchObject({ kind: "number", value: 46054, colIndex: 3, rowIndex: 8 });
-    expect(next.cells["D9"]?.numberFormat).toMatchObject({ numFmtId: 14, isDateLike: true });
-    expect(next.lastColIndex).toBe(3);
-    expect(next.lastRowIndex).toBe(8);
-  });
-
-  it("清空只删内容不删格式：带样式的格退化成只有格式的格，无样式的格整格删掉", () => {
-    const styled = withCellText(sampleSheet(), "A1", "");
-    expect(styled.cells["A1"]).toMatchObject({ kind: "blank", styleIndex: 4, styleOnly: true });
-    expect(displayTextOf(styled.cells["A1"])).toBe("");
-    const plain = withCellText(sampleSheet(), "D1", "");
-    expect(plain.cells["D1"]).toBeUndefined();
-  });
-
-  it("改过的格不许留着旧公式与旧原文", () => {
-    const withFormula = sampleSheet();
-    withFormula.cells["B1"] = { ...withFormula.cells["B1"]!, formula: "SUM(A1:A2)", cachedValue: 120, rawXml: "<c r=\"B1\"/>" };
-    const next = withCellText(withFormula, "B1", "5");
-    expect(next.cells["B1"]?.formula).toBeUndefined();
-    expect(next.cells["B1"]?.rawXml).toBeUndefined();
-  });
-});
-
 describe("显示与选区", () => {
   it("日期格显示成日期而不是序列号，空格显示成空串", () => {
     const sheet = sampleSheet();
@@ -130,7 +96,7 @@ describe("显示与选区", () => {
   });
 });
 
-describe("点选与列宽拖动（都只认 IO 包给的 px）", () => {
+describe("点选（位置只按 IO 包给的 px 算）", () => {
   it("坐标落在哪格就选哪格，超出画布夹到最后一格", () => {
     const layout = buildSheetLayout(sampleSheet());
     // 第一列 89px 宽、第一行 20px 高、第二行 30px 高
@@ -140,18 +106,5 @@ describe("点选与列宽拖动（都只认 IO 包给的 px）", () => {
       colIndex: layout.colIndexes[layout.colIndexes.length - 1],
       rowIndex: layout.rowIndexes[layout.rowIndexes.length - 1],
     });
-  });
-
-  it("拖动中间一列时把 <col> 范围劈成三段，相邻列宽度不受牵连", () => {
-    const wide: SheetPayload = { ...sampleSheet(), columns: [{ minColIndex: 0, maxColIndex: 4, widthChars: 12, customWidth: true }] };
-    const next = withColumnWidth(wide, 2, 64);
-    const ranges = next.columns
-      .map((column) => [column.minColIndex, column.maxColIndex, column.widthChars] as const)
-      .sort((a, b) => a[0] - b[0]);
-    expect(ranges).toEqual([
-      [0, 1, 12],
-      [2, 2, 2158 / 256], // 64px 换回字符正好是 Excel 默认的 8.43
-      [3, 4, 12],
-    ]);
   });
 });

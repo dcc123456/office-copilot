@@ -31,7 +31,7 @@ import type {
   SectionGeometry,
   StyleEdit,
 } from "@office-copilot/docx-io";
-import { readOnlyReason, type SheetPayload, type WorkbookPayload } from "@office-copilot/sheet-io";
+import { readOnlyReason, runSheetOps, type SheetCoreOp, type WorkbookPayload } from "@office-copilot/sheet-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
@@ -50,6 +50,7 @@ import { HistoryPanel } from "./components/HistoryPanel.js";
 import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
+import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
 import { ToastHost, toast } from "./components/ui/Toast.js";
 import { usePanelResize } from "./hooks/usePanelResize.js";
@@ -280,26 +281,70 @@ export function App() {
   );
 
   /**
-   * 表格视图改了一张表：只替换当前表签那一张，其余原样带回。
+   * 表格改动的唯一落地口（spec 阶段 3）：op 先在 `sheet-io` 里核对现场，落成的部分换进当前表签，
+   * 再写一条修改历史。跳过的条目原样报给用户，不猜位置也不静默覆盖（`AGENTS.md` §2.4/§2.5）。
    *
-   * @param next 改过的那张表；`partPath` 不变，保存时主进程按它配对写回。
+   * @param ops 视图交出的一批 op，都指向当前这张表。
+   * @param summary 一句话说明这次改了什么，进 `userData/modlog/<文档名>.json`。
    */
-  const changeSheet = useCallback(
-    (next: SheetPayload) => {
-      setSheetWorkbook((current) =>
-        current
-          ? {
-              ...current,
-              sheets: current.sheets.map((sheet, index) =>
-                index === sheetIndex ? next : sheet,
-              ),
-            }
-          : current,
-      );
+  const commitSheetOps = useCallback(
+    (ops: SheetCoreOp[], summary: string) => {
+      const sheet = sheetWorkbook?.sheets[sheetIndex];
+      if (!sheetWorkbook || !sheet) return;
+      const result = runSheetOps(sheet, ops);
+      if (result.skipped.length) toast(result.skipped.map((item) => item.reason).join("\n"), "error");
+      if (!result.ops.length) return;
+      setSheetWorkbook({
+        ...sheetWorkbook,
+        sheets: sheetWorkbook.sheets.map((tab, index) => (index === sheetIndex ? result.after : tab)),
+      });
       setDirty(true);
+      const docKey = filePath ?? "未命名文档";
+      void window.officeCopilot
+        .appendModification({ docKey, record: sheetEditRecordOf(result, summary) })
+        .then((saved) => {
+          // 历史没写进去不 rollback 用户的改动，只说一声——与文档那条 AI 改动一致。
+          if (!saved.ok) toast(`改动已落地，但历史记录保存失败：${saved.message ?? "未知错误"}`, "error");
+        });
     },
-    [sheetIndex],
+    [filePath, sheetIndex, sheetWorkbook],
   );
+
+  /**
+   * 撤销最近一次表格改动：从修改历史里取最新一条没撤销的记录，按内容寻址把逆操作倒回去。
+   *
+   * 只碰表格那些记录（`isSheetEditRecord` 认形状），文档侧的撤销走 ProseMirror 自己的历史，两条路不共用一个栈。
+   */
+  const undoLastSheetEdit = useCallback(async () => {
+    if (!sheetWorkbook) return;
+    const docKey = filePath ?? "未命名文档";
+    const records = await window.officeCopilot.listModifications(docKey);
+    const record = pickLatestSheetEdit(records);
+    if (!record) {
+      toast("没有可撤销的表格改动。");
+      return;
+    }
+    const index = sheetWorkbook.sheets.findIndex((tab) => tab.partPath === record.partPath);
+    const sheet = index >= 0 ? sheetWorkbook.sheets[index] : undefined;
+    if (!sheet) {
+      toast("这条记录对应的工作表已经不在这份工作簿里了。", "error");
+      return;
+    }
+    const outcome = undoSheetEdit(sheet, record);
+    if (!outcome.appliedCount) {
+      toast(outcome.reason ?? "撤销失败。", "error");
+      return;
+    }
+    setSheetWorkbook({
+      ...sheetWorkbook,
+      sheets: sheetWorkbook.sheets.map((tab, slot) => (slot === index ? outcome.after : tab)),
+    });
+    setDirty(true);
+    await window.officeCopilot.patchModification({ docKey, id: record.id, patch: { undone: true, undoneAt: Date.now() } });
+    if (outcome.failed.length) {
+      toast(`部分撤销（${outcome.appliedCount}/${record.inverses.length}）：${outcome.failed.join("；")}`, "error");
+    }
+  }, [filePath, sheetWorkbook]);
 
   const openPath = useCallback(
     async (p: string, guardDirty = false) => {
@@ -1113,7 +1158,8 @@ export function App() {
               workbook={sheetWorkbook}
               activeIndex={sheetIndex}
               onSelectSheet={setSheetIndex}
-              onChangeSheet={changeSheet}
+              onCommitOps={commitSheetOps}
+              onUndo={() => void undoLastSheetEdit()}
             />
           ) : null}
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}

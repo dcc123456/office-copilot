@@ -2,16 +2,14 @@
  * 网格里"位置 ↔ 数据"的纯函数层（spec 阶段 2 · 提交 7）。
  *
  * 之所以独立一个文件：桌面端的 vitest 是 `environment: "node"`，没有 jsdom，
- * 组件本身测不了；把几何、换算、编辑落地这些真正会出错的部分收成纯函数，
+ * 组件本身测不了；把几何、可见窗口、键盘步进这些真正会出错的部分收成纯函数，
  * 就能在 node 里钉死，组件只剩装配（`AGENTS.md` §3.3）。
+ * 改数据不在这里——阶段 3 起，落地一律走 `@office-copilot/sheet-io` 的 op。
  */
 import {
   cellDisplayText,
   columnWidthCharsToPx,
-  columnWidthPxToChars,
   formatA1,
-  parseA1,
-  parseUserCellText,
   rowHeightPtToPx,
   type A1Address,
   type A1Range,
@@ -132,49 +130,6 @@ export function displayTextOf(cell: SheetCell | undefined): string {
 }
 
 /**
- * 用户在网格里输入的一行文字如何落到表上。
- *
- * 保留原格的样式（`styleIndex`/`attrs`）是硬约束：`AGENTS.md` §2.3 不许把局部格式拍平，
- * 只清掉与旧值绑定的东西（公式、缓存值、原文、共享字符串索引）。
- * 清空内容时，原本带格式的格退化成"只有格式的格"，与 Excel 行为一致。
- *
- * @param sheet 当前表的载荷。
- * @param address A1 地址（与 `colIndex/rowIndex` 同源，由本函数算出，调用方不必自己数）。
- * @param text 输入框里的原始文字。
- * @returns 新载荷（`cells` 复制一份），并把已用区域放大到这一格。
- */
-export function withCellText(sheet: SheetPayload, address: string, text: string): SheetPayload {
-  const parsedAddress = parseA1(address);
-  if (!parsedAddress) return sheet;
-  const parsed = parseUserCellText(text);
-  const previous = sheet.cells[address];
-  const cells = { ...sheet.cells };
-
-  if (parsed.kind === "blank" && (previous?.styleIndex === undefined || previous?.rawXml)) {
-    delete cells[address];
-  } else {
-    const next: SheetCell = {
-      address,
-      colIndex: parsedAddress.colIndex,
-      rowIndex: parsedAddress.rowIndex,
-      kind: parsed.kind,
-      value: parsed.value,
-      ...(previous ? { styleIndex: previous.styleIndex, attrs: previous.attrs } : {}),
-      ...(parsed.kind === "blank" ? { styleOnly: true } : {}),
-      ...(parsed.numberFormat ? { numberFormat: parsed.numberFormat } : {}),
-    };
-    cells[address] = next;
-  }
-
-  return {
-    ...sheet,
-    cells,
-    lastColIndex: Math.max(sheet.lastColIndex, parsedAddress.colIndex),
-    lastRowIndex: Math.max(sheet.lastRowIndex, parsedAddress.rowIndex),
-  };
-}
-
-/**
  * 由按下点与拖拽点组成归一化选区。
  *
  * @param anchor 起点（鼠标按下或键盘锚点）。
@@ -232,36 +187,6 @@ export function addressAtPoint(layout: SheetLayout, x: number, y: number): A1Add
     colIndex: layout.colIndexes[colSlot] ?? 0,
     rowIndex: layout.rowIndexes[rowSlot] ?? 0,
   };
-}
-
-/**
- * 拖动某一列的边界后改写这一列的宽度。
- *
- * `<col min max>` 是一段范围，只改其中一列必须把范围劈成三段（左段原样、中间这列新宽度、右段原样），
- * 否则会把相邻列的宽度一起牵连掉。
- *
- * @param sheet 当前表的载荷。
- * @param colIndex 被拖的真实列号。
- * @param widthPx 拖出来的像素宽度。
- * @returns 新载荷；`columns` 换了一份数组，其余字段原样。
- */
-export function withColumnWidth(sheet: SheetPayload, colIndex: number, widthPx: number): SheetPayload {
-  const widthChars = columnWidthPxToChars(widthPx);
-  const covering = sheet.columns.find((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex);
-  const others = sheet.columns.filter((column) => column !== covering);
-  const rebuilt: SheetPayload["columns"] = [];
-  if (covering) {
-    if (covering.minColIndex < colIndex) {
-      rebuilt.push({ ...covering, minColIndex: covering.minColIndex, maxColIndex: colIndex - 1 });
-    }
-    rebuilt.push({ ...covering, minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
-    if (covering.maxColIndex > colIndex) {
-      rebuilt.push({ ...covering, minColIndex: colIndex + 1, maxColIndex: covering.maxColIndex });
-    }
-  } else {
-    rebuilt.push({ minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
-  }
-  return { ...sheet, columns: [...others, ...rebuilt] };
 }
 
 /** 前缀和里找 `x` 落在哪一段；段号即槽位下标，越界夹到最后一段。 */

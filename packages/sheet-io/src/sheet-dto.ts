@@ -6,10 +6,10 @@
  * 渲染层要的是格子内容；保存时主进程重新从磁盘打开、把内容按 `applySheetPayload` 写回，
  * 于是原文永远不过 IPC，也不会被渲染层的副本污染。
  */
-import type { SheetModel, UnsupportedFeature } from "./model.js";
+import type { SheetLike, SheetModel, UnsupportedFeature } from "./model.js";
 
-/** 一张表去掉 XML 原文后的可结构化克隆形状（其余字段全是 JSON 安全值）。 */
-export type SheetPayload = Omit<SheetModel, "sourceXml">;
+/** 一张表去掉 XML 原文后的可结构化克隆形状（其余字段全是 JSON 安全值）；结构化 op 也在这一层上做。 */
+export type SheetPayload = SheetLike;
 
 /** 一个工作簿的跨界形状。 */
 export interface WorkbookPayload {

@@ -4,6 +4,7 @@ import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
 import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
+import { revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
 import type { SheetModel } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
@@ -296,6 +297,36 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
     expect(readBack.cells["C2"]?.value).toBe(777);
     expect(readBack.cells["A7"]?.value).toBe("载荷写入");
     expect(readBack.lastRowIndex).toBe(6);
+  });
+
+  it("op 改完再撤销：写出去的文件读回来与原来一致（阶段 3 · C15/C17 的落盘证据）", async () => {
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const payload = sheetPayloadOf(sheet);
+    const originalValue = payload.cells["C2"]?.value;
+    const applied = runSheetOps(payload, [setCellTextOp(payload, "C2", "9999")!, setColumnWidthOp(payload, 1, 103)!]);
+    expect(applied.ok).toBe(true);
+
+    // 保存那一步与桌面主进程一致：重新从磁盘打开、按 partPath 写回载荷
+    const editedFile = await openSample();
+    const editedModel = (await editedFile.sheetAt(0)) as SheetModel;
+    applySheetPayload(editedModel, applied.after);
+    editedFile.writeSheet(editedModel);
+    const editedBytes = await editedFile.toBytes();
+    const reopened = await SheetFile.fromBytes(editedBytes, { fileName: "sample.xlsx" });
+    expect((await reopened.sheetAt(0))?.cells["C2"]?.value).toBe(9999);
+
+    // 撤销后第二次保存：磁盘上已经是改过的那份，从它出发写回逆操作的结果
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    const undoneFile = await SheetFile.fromBytes(editedBytes, { fileName: "sample.xlsx" });
+    const undoneModel = (await undoneFile.sheetAt(0)) as SheetModel;
+    applySheetPayload(undoneModel, reverted.after);
+    undoneFile.writeSheet(undoneModel);
+    const backAgain = await SheetFile.fromBytes(await undoneFile.toBytes(), { fileName: "sample.xlsx" });
+    const readBack = await backAgain.sheetAt(0);
+    expect(readBack?.cells["C2"]?.value).toBe(originalValue);
+    expect(readBack?.columns).toEqual(payload.columns);
   });
 
   it("警告与未建模部件清单必须一路带进载荷，不许在跨界处丢（spec §零.7）", async () => {

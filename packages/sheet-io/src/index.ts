@@ -48,7 +48,7 @@ export {
   columnWidthPxToChars,
   rowHeightPtToPx,
 } from "./geometry.js";
-export { parseSheet, recalculateSheetExtent, rowFingerprints, serializeSheetXml, type ParseSheetInput } from "./xlsx-sheet.js";
+export { colFingerprints, parseSheet, recalculateSheetExtent, rowFingerprints, serializeSheetXml, type ParseSheetInput } from "./xlsx-sheet.js";
 export { SharedStringTable } from "./xlsx-strings.js";
 export { StyleTable, type CellStyleParts } from "./xlsx-styles.js";
 export { cellDisplayText, formatNumberForDisplay, parseUserCellText, type ParsedCellInput } from "./cell-text.js";
@@ -62,3 +62,17 @@ export {
   type SheetPayload,
   type WorkbookPayload,
 } from "./sheet-dto.js";
+export {
+  revertSheetOps,
+  runSheetOps,
+  setCellTextOp,
+  setColumnWidthOp,
+  type SetCellValueOp,
+  type SetColumnWidthOp,
+  type SheetAxis,
+  type SheetCellTarget,
+  type SheetCoreOp,
+  type SheetOpsResult,
+  type SheetSkippedOp,
+  type SheetTrackAddress,
+} from "./sheet-edit.js";

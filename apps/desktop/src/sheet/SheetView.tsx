@@ -1,11 +1,23 @@
 /**
- * 表格视图（spec 阶段 2）：虚拟滚动的网格、选区、就地编辑、列宽拖动与表签。
+ * 表格视图（spec 阶段 2/3）：虚拟滚动的网格、选区、就地编辑、列宽拖动与表签。
  *
- * 这里只做装配：几何、落地与单位换算分别在 `sheetGridModel` 与 `@office-copilot/sheet-io`，
- * 组件里不出现第二套换算，也不碰 Node 能力（`AGENTS.md` §3.3 / §5.2）。
+ * 这里只做装配：几何与单位换算在 `sheetGridModel` 与 `@office-copilot/sheet-io`，
+ * 改动一律收成 op 交给上层落地（组件自己不写载荷，也不碰 Node 能力，`AGENTS.md` §3.3 / §5.2）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { formatA1, indexToColName, rangeContains, readOnlyReason, type A1Address, type A1Range, type SheetPayload, type WorkbookPayload } from "@office-copilot/sheet-io";
+import {
+  formatA1,
+  indexToColName,
+  rangeContains,
+  readOnlyReason,
+  setCellTextOp,
+  setColumnWidthOp,
+  type A1Address,
+  type A1Range,
+  type SheetCoreOp,
+  type SheetPayload,
+  type WorkbookPayload,
+} from "@office-copilot/sheet-io";
 import {
   COLUMN_HEADER_HEIGHT_PX,
   OVERSCAN_ROWS,
@@ -17,8 +29,6 @@ import {
   selectionLabel,
   selectionRectOf,
   visibleSlotRange,
-  withCellText,
-  withColumnWidth,
 } from "./sheetGridModel.js";
 import { startPointerDrag } from "../hooks/usePointerDrag.js";
 import "../styles/sheet.css";
@@ -29,8 +39,15 @@ export interface SheetViewProps {
   /** 当前表签。 */
   activeIndex: number;
   onSelectSheet: (index: number) => void;
-  /** 当前表被改过后的新载荷。 */
-  onChangeSheet: (sheet: SheetPayload) => void;
+  /**
+   * 把一批 op 交给上层：那里核对现场、替换当前表、记一条修改历史（spec 阶段 3）。
+   *
+   * @param ops 待落地的 op，都指向当前表。
+   * @param summary 一句话说明这次改了什么，显示在修改历史里。
+   */
+  onCommitOps: (ops: SheetCoreOp[], summary: string) => void;
+  /** 撤销最近一次表格改动（Cmd/Ctrl+Z）。 */
+  onUndo: () => void;
 }
 
 /** 表格里没选中任何格时的初始位置。 */
@@ -45,7 +62,7 @@ const RESIZE_HOTZONE_PX = 6;
  * @param props 见 `SheetViewProps`。
  * @returns 一张表的网格；工作簿里没有任何表时给出空态而不是崩溃。
  */
-export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet }: SheetViewProps) {
+export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, onUndo }: SheetViewProps) {
   const sheet = workbook.sheets[activeIndex];
   const layout = useMemo(() => (sheet ? buildSheetLayout(sheet) : undefined), [sheet]);
   /** 大表只读（spec D19）：阈值与理由都在 `sheet-io`，这里只按它拦住所有写入路径，不做第二处状态。 */
@@ -124,7 +141,8 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
     (text: string, move: "down" | "right" | "none") => {
       if (!sheet || !layout || isReadOnly) return;
       const address = formatA1(active);
-      onChangeSheet(withCellText(sheet, address, text));
+      const op = setCellTextOp(sheet, address, text);
+      if (op) onCommitOps([op], text.trim() ? `把 ${address} 改成 ${text.trim()}` : `清空 ${address}`);
       setEditing(null);
       const next = moveAddress(
         active,
@@ -137,7 +155,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
       setAnchor(next);
       scrollToAddress(next);
     },
-    [active, isReadOnly, layout, onChangeSheet, scrollToAddress, sheet],
+    [active, isReadOnly, layout, onCommitOps, scrollToAddress, sheet],
   );
 
   /**
@@ -172,6 +190,12 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
    */
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!layout || editing) return;
+    // 撤销走的是修改历史里的逆操作（内容寻址），不是浏览器那个文本框的原生 undo。
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z" && !event.shiftKey) {
+      event.preventDefault();
+      onUndo();
+      return;
+    }
     const maxCol = (layout.colIndexes.length || 1) - 1;
     const maxRow = (layout.rowIndexes.length || 1) - 1;
     const steps: Record<string, [number, number]> = {
@@ -451,6 +475,9 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
   /**
    * 开始拖列宽：热区上按下后由指针捕获跟随。
    *
+   * 拖动过程中改的只是本地预览；松手才发一条 op——按鼠标移动一次记一条的话，
+   * 一次拖拽会在修改历史里留下几十条，撤销一次只退一像素。
+   *
    * @param event 热区上的指针事件。
    * @param colIndex 真实列号。
    * @param startWidthPx 起拖时的宽度（px）。
@@ -459,17 +486,19 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
     event.preventDefault();
     event.stopPropagation();
     const startX = event.clientX;
+    const preview = { widthPx: startWidthPx };
     setResizing({ colIndex, widthPx: startWidthPx });
     const el = event.currentTarget;
     startPointerDrag(el, event.pointerId, {
       move: (moveEvent) => {
-        setResizing({ colIndex, widthPx: Math.max(20, startWidthPx + (moveEvent.clientX - startX)) });
+        preview.widthPx = Math.max(20, startWidthPx + (moveEvent.clientX - startX));
+        setResizing({ colIndex, widthPx: preview.widthPx });
       },
       end: () => {
-        setResizing((current) => {
-          if (current && sheet) onChangeSheet(withColumnWidth(sheet, colIndex, current.widthPx));
-          return null;
-        });
+        setResizing(null);
+        if (!sheet) return;
+        const op = setColumnWidthOp(sheet, colIndex, preview.widthPx);
+        if (op) onCommitOps([op], `把 ${indexToColName(colIndex)} 列宽调到 ${Math.round(preview.widthPx)} px`);
       },
     });
   }
