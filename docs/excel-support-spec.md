@@ -225,15 +225,47 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
    单开组件反而要把状态再传回 store，遂合并。
 2. **插入/删除行列与撤销重做顺延到阶段 3**。理由：`AGENTS.md` §2.5 要求每个 op 发自己的逆操作、撤销按内容寻址，
    这套机制属于阶段 3 的 `SheetCoreOp`；在本阶段手搓一条撤销栈就是造第二个撤销栈（§3 禁止平行基建）。
-   所以"完成判定"里的"开→改→**撤销**→存"只做到"改→存→重开内容一致"，**撤销那一步未实现**，不是实现失败。
+   所以"完成判定"里的"开→改→**撤销**→存"只做到"改→存→重开内容一致"，**撤销那一步未实现**，不是实现失败。（阶段 3 的 `3d1c357` 补上了这一步，见下一节。）
 3. 不做新建空白工作簿：本阶段只读写**已存在**的 `.xlsx`。从零造一个合法包（`[Content_Types].xml`/`workbook.xml`/rels/`styles.xml`）
    与"读回一致"是两件事，混进来会让本阶段的红线（不损用户文件）变得不可测。
 4. `sheet:open` 通道与 `openSheetFile`（preload + `global.d.ts`）在偏差 1 的对话框改造后成为死代码，随即删除（§3.5）。
 
-### 阶段 3 · 结构化 op + 撤销/modlog 接入
+### 阶段 3 · 结构化 op + 撤销/modlog 接入（`3d1c357`）
 
 **目标**：把"改单元格/改行列/改格式"收敛成 CoreOp 集合，每个 op 有逆操作，走 `planEdit/runOps/revert` 同一条链路，落 `userData/modlog`。
 **完成判定**：`sheetEdit.test.ts` 覆盖：op→模拟→落地→撤销内容一致；插入行后再撤销不牵连用户后续手工编辑；无法安全回滚时明确报"部分撤销"。
+
+**实际结果**（与计划的差别都在这儿，不是"按计划做完"）：
+
+- op 层落在 **`packages/sheet-io/src/sheet-edit.ts`**，本阶段先有两种：`setCellValue`、`setColumnWidth`（插删行列见偏差 2）。
+  形状与 Word 的 `CoreOp` 同构：`before`/`after` 都存进 op，逆操作就是两者交换；`runSheetOps` 是唯一落地入口，
+  `revertSheetOps` 就是把逆队列倒序再走一遍同一个入口。
+- **现场核对**（对不上就整条跳过并报理由，绝不猜位置）：
+  ① 行/列按**内容指纹**寻址——`rowFingerprints` 是 `列号=值|…`，新增的 `colFingerprints` 是 `行号=值|…`。
+  为什么不用 A1 地址：地址会随插删漂移，拿它当身份等于宣布"挪过位置的那一行不是原来那一行"，撤销就再也落不回去；
+  单测「插入行把内容整体下移后，撤销仍命中原来那一行」把这条钉死。
+  ② 空白行/列没有可认的内容，记伪指纹 `∅` 只按位置回，真正拦住写错地方的是"这格现在装的是什么"或"`<col>` 分段形状"的比较。
+  ③ 逆操作的落点按**落地之后**的样子重新寻址——这次改动本身就改了行指纹，沿用旧指纹会认不出自己刚写的那一行。
+  ④ 富文本 run 与 `rawXml` 只比"在不在"：把红字拍平成纯文本是 §2.3 禁止的事，现场多出或少掉这类结构就不许覆盖。
+- 改列宽只动被拖的那一列：`<col min max>` 是一段范围，落地时劈成左段/本列/右段三段，撤销把三段整体换回；
+  输出的分段按列号排序，与 Excel 自己写出的 `<cols>` 顺序一致（否则同一份文件两次保存会产出不同字节序）。
+- 桌面装配：`SheetView` 不再自己改载荷，编辑框与列宽拖拽各交出**一条 op**（一次拖拽只发一条，拖动过程中的宽度是本地预览——
+  按鼠标移动记的话一次拖拽会在历史里留几十条，撤销只退一像素），由 `App.commitSheetOps` 落地并把逆操作写进 modlog。
+  存储与通道**全部复用**文档那四条（`modlog:append/patch/list/remove`，`electron/modlog.ts` 一字未改，CAP 仍是 60），
+  没有新建第二份历史；`sheetHistory.ts` 只做表格专属的事：认形状、挑最近一条没撤销的、把逆操作倒回去。
+  Cmd/Ctrl+Z → `pickLatestSheetEdit` + `undoSheetEdit`，认不出的一律不碰并 toast「部分撤销（x/y）」——文案与 Word 那条一致。
+- **落盘证据**（§6.3 要求的"真实产物"）：`sheet-file.test.ts`「op 改完再撤销：写出去的文件读回来与原来一致」——
+  改 C2 + 加宽 B 列 → 写盘 → 重开读到 9999 → 撤销 → **从改过的那份**再写盘 → 重开时值与 `<cols>` 都回到原样。
+
+**偏差**（都是主动选择，不是遗漏）：
+
+1. 计划的落点是 `apps/desktop/src/ai/sheetEdit.ts`，实际落在 `packages/sheet-io`：§5.1 的依赖方向（apps → packages）
+   决定了阶段 4 的 `packages/sheet-tools` 要产出**同一批** op，落在渲染层就必然被复制第二套（§3.3/§3.4）。
+2. 行列插入/删除的 op 不在本提交：C16 的字面要求是"插删之后撤销早期改动不牵连手工编辑"，本阶段先把 op 层与内容寻址做对、
+   并用手工构造的位移表把这条语义测住；插删作为**同类 op** 在下一条提交补（补完 C16 才升 `[x]`）。
+3. 撤销入口只有键盘，没有工具栏按钮，也没进「修改历史」面板：那个面板目前仍归文档那条（表签视图里不渲染），
+   所以**表格改动在面板里看不到**，只在按 Cmd/Ctrl+Z 时被读出来。等阶段 4 的 AI 提案也记进同一份历史时一起做，
+   否则会变成两条 UI 各挑一次记录。
 
 ### 阶段 4 · AI 工具层：分析 + 整理 + 计算
 
@@ -271,8 +303,9 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 2 | store 与网格组件 | **实际**：`src/sheet/sheetGridModel.ts`（纯函数：几何、可见窗口、键盘步进、点→地址、改列宽）+ `src/sheet/SheetView.tsx`（单一组件，编辑框内联）；计划的 `sheetStore.ts`/`SheetGrid.tsx`/`CellEditor.tsx` 三件套未建，见阶段 2 偏差 1 | `ab27d0e` + `c8c3f3b`（计划"提交 7"） |
 | 2 | 样式（唯一 CSS 体系，不新增入口） | `src/styles/sheet.css`（由组件自己引入，与 `footnotePane.css` 同款先例） | `c8c3f3b`（计划"提交 7"） |
 | 2 | 列宽拖拽走 pointer capture；浮层用 fixed + `useAnchoredMenu` | 复用 `hooks/usePointerDrag.ts`；本阶段网格无浮层，`useAnchoredMenu` 无对应实现（阶段 4 有菜单时再落），见 D20 | `c8c3f3b`（计划"提交 8"） |
-| 3 | `SheetCoreOp` 类型、`planEdit/runOps/revert` 的表格实现、行内容指纹 | `src/ai/sheetEdit.ts` | 提交 9 |
-| 3 | 撤销与修改历史接入（复用 modlog，不新建存储） | `electron/modlog.ts` 现有通道 | 提交 9 |
+| 3 | `SheetCoreOp` 类型、`planEdit/runOps/revert` 的表格实现、行内容指纹 | **实际**：`packages/sheet-io/src/sheet-edit.ts`（+ 新增 `colFingerprints` 于 `xlsx-sheet.ts`）；计划的 `apps/desktop/src/ai/sheetEdit.ts` 未建，见阶段 3 偏差 1 | `3d1c357`（提交 9） |
+| 3 | 撤销与修改历史接入（复用 modlog，不新建存储） | **实际**：`apps/desktop/src/sheet/sheetHistory.ts`（认形状、挑最近一条、倒回逆操作）+ `App.tsx` 的 `commitSheetOps`/`undoLastSheetEdit`；`electron/modlog.ts` 与 preload 通道一字未改 | `3d1c357`（提交 9） |
+| 3 | 行列插入/删除的 op（C16 的字面要求） | `packages/sheet-io/src/sheet-edit.ts` 补两种 op + 视图入口 | 待做 |
 | 4 | 分析引擎（列类型推断、缺失统计、分组聚合、去重键、异常值） | `packages/sheet-io/src/analysis/**` | 提交 10 |
 | 4 | 公式子集求值（D4 的函数白名单）+ 缓存值写入 | `packages/sheet-io/src/formula/**` | 提交 11 |
 | 4 | 工具 schema 与 JSON 工具定义 | `packages/sheet-tools/src/index.ts` | 提交 12 |
@@ -321,9 +354,19 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### C. 可撤销性与历史（对应 `AGENTS.md` §2.5）
 
-15. `[ ]` 每个 `SheetCoreOp` 都发出自己的逆操作；撤销按行内容指纹定位。
-16. `[ ]` 插入/删除行列后再撤销早期改动，**不牵连**用户在这期间的手工编辑（用一条专门单测钉死）。
-17. `[ ]` 无法安全回滚时明确报"部分撤销"；modlog 仍每文档 ≤60 条、路径不变。
+15. `[x]` 每个 `SheetCoreOp` 都发出自己的逆操作；撤销按行内容指纹定位。
+    **实测**（`3d1c357`）：`packages/sheet-io/src/sheet-edit.test.ts` 13 条 + 桌面 `sheetHistory.test.ts` 5 条。
+    其中「落地后撤销，格子与已用区域都回到原样」「新写的格被撤销后整格消失，已用区域缩回原大小」钉住逆操作本身；
+    「插入行把内容整体下移后，撤销仍命中原来那一行」钉内容寻址；`sheet-file.test.ts` 那条把整条链路做到真实 `.xlsx` 上（改→写盘→重开→撤销→再写盘→读回原样）。
+16. `[~]` 插入/删除行列后再撤销早期改动，**不牵连**用户在这期间的手工编辑（用一条专门单测钉死）。
+    **已到位**：位移后的撤销有专门单测（上一条），"之后的手工编辑不牵连"在两层各钉一条——
+    `sheet-edit.test.ts` 现场被改过时报"认不出这一行"、`sheetHistory.test.ts` 撤销 A1 不把手工改过的 A2 退回去。
+    **未到位**：**插入/删除行列的 op 本身还没写**（阶段 3 偏差 2），上面的位移是用手工构造下移后的表来模拟的，
+    不是真按 op 插出来的。补上 op 才升 `[x]`。
+17. `[x]` 无法安全回滚时明确报"部分撤销"；modlog 仍每文档 ≤60 条、路径不变。
+    **实测**：`App.undoLastSheetEdit` 里 `outcome.failed.length` 时 toast「部分撤销（x/y）：理由…」，与 Word 那条（`ai/agent.ts` 的同款文案）一致；
+    存储走 `electron/modlog.ts` 现有四条通道，`CAP = 60` 与 `userData/modlog/<slug(docKey)>.json` 一字未改（没有新建第二份历史，D18 因此仍是 `[x]`）。
+    **未到位**：这条只能靠单测与代码路径证明——面板上看不到表格记录（阶段 3 偏差 3），真实 app 里按 Cmd+Z 的观感未验证（E26）。
 
 ### D. UI 与工程（对应 `AGENTS.md` §3/§4/§5）
 
@@ -334,7 +377,10 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
     5 000 行 × 20 列 = 10 万格 → 打开 11ms + 解析 190ms，堆 185MB；20 000 行 = 40 万格 → 746ms，546MB；
     **50 000 行 × 20 列 = 100 万格 → 合计 2.04s（parse 1.89s），堆 1.2GB**，`zip` 29.2MB。
     结论：解析这一侧勉强踩在"≤2s"的线上，真正的瓶颈是**跨界载荷把 100 万个格子整个 structured-clone 过 IPC**，渲染层与主进程各存一份。
-    **未到位**：按 §风险表定的"超阈值（约 20 万格）明确提示只读"这条保护还没实现，`SheetView` 目前也会把整表 `cells` 都装进 state。列为阶段 3 的第一件事。
+    **已到位**（`8ca38b1`，比原计划提前）：阈值判定只在 `sheet-io` 一处（`readOnlyReason` + `EDITABLE_CELL_LIMIT = 20 万格`），
+    超阈值打开时把理由 toast 出来，`App` 的两个写入口（存 / 另存）先拦住，`SheetView` 里编辑框、删除键、列宽热区一律不接，名称框挂「只读」标记；
+    `sheet-dto.test.ts` 4 条钉住"到上限仍可编辑 / 超一个就只读 / 数字不带千分位"。
+    **仍未到位**：只读**不改变数据量**——整表 `cells` 仍然要经 IPC 进渲染层 state，100 万格那份的堆占用与滚动流畅度没在真实 app 里量过（E26）。
     虚拟滚动的渲染侧口径由两条钉住：`sheetGridModel.test.ts` 的 `visibleSlotRange`（窗口起止、夹在有效区间）与 Chromium 探针实测的槽位窗口；小表（几十行）本来就全量渲染，这是对的，不该出现空洞。
 20. `[x]` 列宽拖拽用 `usePointerDrag` 的 pointer capture，热区带 `-webkit-app-region: no-drag`；浮层用 fixed + `useAnchoredMenu` 不出屏。
     **实测**：`SheetView.tsx` 的列宽拖拽与选区拖拽都走 `startPointerDrag`；探针里 `getComputedStyle('.sheet-col-resize').webkitAppRegion === "no-drag"`、`cursor === "col-resize"`。本阶段网格里没有浮层控件（右键菜单/公式面板属阶段 4），故 `useAnchoredMenu` 这条暂无对应实现，不是遗漏。
@@ -381,10 +427,13 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 1 | — | A8 | `[!] BLOCKED` | 本机 WPS 无可视通道（`AGENTS.md` §8），替代证据 = 自读一致 + OOXML 结构断言 + 第三方 exceljs 交叉读（上一条） |
 | 2 | `bbf23c5` `ab27d0e` `c8c3f3b` | A5 | `[~]` | 写回内容正确性有单测钉住；`.bak` 与 `.tmp→rename` 在主进程里，本机没有 electron 进程级"写到一半中断"的测试，按代码推断 |
 | 2 | 同上 | D18、D20–D23 | `[x]` | 没新建第二套撤销栈（行列操作与撤销整体顺延阶段 3）；pointer capture + `no-drag` 热区、3 条具名 IPC 通道、JSDoc、死代码（`sheet:open`/`openSheetFile`）清理逐条见 §六 C/D |
-| 2 | 同上 | D19 | `[~]` | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；**"超约 20 万格提示只读"这条保护还没实现**，列为阶段 3 第一件事 |
+| 2 | `bbf23c5` `ab27d0e` `c8c3f3b` + `8ca38b1` | D19 | `[~]` | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；"超约 20 万格提示只读"的保护已在 `8ca38b1` 落地（判定单点在 `sheet-io`，写入口全拦）；但只读不减数据量，5 万行那份在真实 app 里的滚动/编辑手感仍未量（见 E26） |
 | 2 | 同上 | E24–E25、E27 | `[x]` | 根 `pnpm build` EXIT=0；逐包核对 sheet-io **41** / desktop **416**；夹具现生成、探针产物只在 `tmp/` |
 | 2 | 同上 | E26 | `[ ]` | 本机无 electron 的 CDP harness，"起真实 app 手工走一遍开→改→存"还没做到；真实 Chromium 探针只覆盖了计算样式与几何，不冒充可视验收 |
-| 3 | — | C15–C17 | `[ ]` | |
+| 3 | `3d1c357` | C15、C17 | `[x]` | 13 + 5 条单测钉住逆操作与内容寻址，另有「改→写盘→重开→撤销→再写盘→读回原样」落在真实 `.xlsx` 上；"部分撤销（x/y）"文案落地，modlog 存储与 60 条上限一字未改 |
+| 3 | `3d1c357` | C16 | `[~]` | 位移后撤销、不牵连手工编辑两层各钉一条（模拟位移）；**插入/删除行列的 op 还没写**，补完才升 `[x]` |
+| 3 | `3d1c357` | E24–E25 | `[x]` | `pnpm build` EXIT=0、`pnpm test` EXIT=0；逐包核对 sheet-io **59** / desktop **416**（37 个文件）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 3 | `3d1c357` | E26 | `[ ]` | 同上——表格的撤销只有键盘入口，Cmd/Ctrl+Z 在真实 app 里的观感未验证；菜单那条 `role: "undo"` 与网格自己的 handler 谁先吃到这次按键也没测 |
 | 4 | — | B9–B14 | `[ ]` | |
 | 5 | — | D5 落地 | `[ ]` | |
 | 6 | — | D18/E24–E28 | `[ ]` | |
