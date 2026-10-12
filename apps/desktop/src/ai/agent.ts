@@ -100,30 +100,114 @@ export interface ProposalOutcome {
   warnings: string[];
 }
 
+/**
+ * 走主进程的流式通道问模型一次，边收边把增量交给 `onDelta`。
+ *
+ * 界面靠它把"AI 正在输出"变成看得见的东西：loading 态 + 逐字滚出来的正文。
+ * 失败一律 reject，错误对象上带 `needsSetup`（还没配模型时界面要拉开设置）。
+ *
+ * @param opts.action 主进程侧的内置语气键（`chat`/`扩写`…）；给了 `system` 时只用作日志。
+ * @param opts.text 送给模型的用户消息（agent 路径就是大纲 + 指令）。
+ * @param opts.system 覆盖内置系统提示词，文档编辑 agent 必须传它。
+ * @param opts.instruction 拼在原文前面的一段说明，选区改写用。
+ * @param opts.providerId 指定服务商；留空用当前生效的那个。
+ * @param opts.requestId 本次请求 id，用于把增量认回正确的界面卡片，也让「停止」能取消。
+ * @param opts.onDelta 每段增量到达时调用（按收到的顺序）。
+ * @returns 收完（或「停止」打断）时 resolve；配置缺失、网络失败、超时都 reject。
+ */
+export function aiStreamTransform(opts: {
+  action: string;
+  text: string;
+  system?: string;
+  instruction?: string;
+  providerId?: string | null;
+  requestId: string;
+  onDelta: (chunk: string) => void;
+}): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const fail = (message: string, needsSetup?: boolean) => {
+      const err = new Error(message) as Error & { needsSetup?: boolean };
+      if (needsSetup) err.needsSetup = true;
+      reject(err);
+    };
+    const off = window.officeCopilot.onAIStream((ev) => {
+      if (ev.requestId !== opts.requestId) return;
+      if (ev.kind === "delta") opts.onDelta(ev.text ?? "");
+      else if (ev.kind === "done") {
+        off();
+        resolve();
+      } else {
+        off();
+        fail(ev.message ?? "调用失败", ev.needsSetup);
+      }
+    });
+    window.officeCopilot
+      .aiStreamStart({
+        requestId: opts.requestId,
+        action: opts.action,
+        text: opts.text,
+        instruction: opts.instruction,
+        system: opts.system,
+        providerId: opts.providerId ?? undefined,
+      })
+      .then((r) => {
+        if (!r.ok) {
+          off();
+          fail(r.message ?? "调用失败", r.needsSetup);
+        }
+      })
+      .catch((e: unknown) => {
+        off();
+        fail(e instanceof Error ? e.message : String(e));
+      });
+  });
+}
+
+/**
+ * 问模型要一份修改方案：大纲 + 指令送出去，回来的 JSON 校验成 Proposal。
+ *
+ * @param opts.editor 当前编辑器（大纲按它现算）。
+ * @param opts.instruction 用户原话。
+ * @param opts.providerId 指定服务商。
+ * @param opts.selection 当前选区文字，会一并送出。
+ * @param opts.onDelta 模型的逐字增量；界面用它显示"正在输出"。
+ * @param opts.requestId 本次请求 id，界面用它把「停止」接到这条流上。
+ * @returns 方案与送出去时的大纲快照；解析失败或调用失败时 `ok` 为 false 并带原因。
+ */
 export async function requestProposal(opts: {
   editor: Editor;
   instruction: string;
   providerId?: string | null;
   selection?: string;
+  onDelta?: (chunk: string) => void;
+  requestId?: string;
 }): Promise<ProposalOutcome> {
   const before = blocksOf(opts.editor.state.doc);
   const userMessage = buildUserMessage(opts.instruction, before, opts.selection);
-  const r = await window.officeCopilot.aiTransform({
-    action: "agent",
-    text: userMessage,
-    system: SYSTEM_PROMPT,
-    providerId: opts.providerId ?? undefined,
-  });
-  if (!r.ok) {
+  let acc = "";
+  try {
+    await aiStreamTransform({
+      action: "agent",
+      text: userMessage,
+      system: SYSTEM_PROMPT,
+      providerId: opts.providerId ?? null,
+      requestId: opts.requestId ?? crypto.randomUUID(),
+      onDelta: (chunk) => {
+        acc += chunk;
+        opts.onDelta?.(chunk);
+      },
+    });
+  } catch (e) {
+    const err = e as Error & { needsSetup?: boolean };
     return {
       ok: false,
       before,
-      message: r.message,
-      needsSetup: r.needsSetup,
+      message: err.message ?? String(e),
+      needsSetup: err.needsSetup,
       warnings: [],
     };
   }
-  const raw = extractJson(r.text);
+  const raw = extractJson(acc);
   if (raw === null) {
     return {
       ok: false,

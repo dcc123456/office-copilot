@@ -24,9 +24,16 @@ import {
 import { SettingsModal } from "../components/SettingsModal.js";
 import { DiffView, InlineDiff } from "./DiffView.js";
 import { describeCoreOp, type Block, type CoreOp } from "./docEdit.js";
-import { commitOps, commitSelectionRewrite, requestProposal, simulateProposal } from "./agent.js";
+import {
+  aiStreamTransform,
+  commitOps,
+  commitSelectionRewrite,
+  requestProposal,
+  simulateProposal,
+} from "./agent.js";
 import { toast } from "../components/ui/Toast.js";
 import type { AppSettings, ProviderConfig } from "../global.js";
+import "../styles/aiPanel.css";
 
 /* ------------------------------------------------------------------ */
 /* Thread model                                                         */
@@ -46,6 +53,8 @@ interface PlanCard {
   notes: string[];
   status: CardStatus;
   message?: string;
+  /** 流式阶段模型已经吐出的文字，卡片边收边滚动显示。 */
+  raw?: string;
 }
 
 interface RewriteCard {
@@ -125,56 +134,6 @@ const MODES: Array<{ id: AiMode; label: string; icon: typeof MessageSquare; titl
     hint: "全自动：AI 直接写入文档，改动记录在修改历史里，可单独撤销。",
   },
 ];
-
-/* ------------------------------------------------------------------ */
-/* Streaming helper (chat + selection rewrites)                        */
-/* ------------------------------------------------------------------ */
-
-function aiStreamTransform(
-  action: string,
-  text: string,
-  instruction: string | undefined,
-  providerId: string | null,
-  requestId: string,
-  onDelta: (chunk: string) => void,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const fail = (message: string, needsSetup?: boolean) => {
-      const err = new Error(message) as Error & { needsSetup?: boolean };
-      if (needsSetup) err.needsSetup = true;
-      reject(err);
-    };
-    const off = window.officeCopilot.onAIStream((ev) => {
-      if (ev.requestId !== requestId) return;
-      if (ev.kind === "delta") onDelta(ev.text ?? "");
-      else if (ev.kind === "done") {
-        off();
-        resolve();
-      } else {
-        off();
-        fail(ev.message ?? "调用失败", ev.needsSetup);
-      }
-    });
-    window.officeCopilot
-      .aiStreamStart({
-        requestId,
-        action,
-        text,
-        instruction,
-        providerId: providerId ?? undefined,
-      })
-      .then((r) => {
-        if (!r.ok) {
-          off();
-          fail(r.message ?? "调用失败", r.needsSetup);
-        }
-      })
-      .catch((e: unknown) => {
-        off();
-        fail(e instanceof Error ? e.message : String(e));
-      });
-  });
-}
 
 /* ------------------------------------------------------------------ */
 /* Panel                                                               */
@@ -296,6 +255,12 @@ export function AIPanel({
     [editor, docKey, onChanged, patchCard],
   );
 
+  /** 从会话里摘掉一张卡片（用户放弃、或模型其实没要改任何东西）。 */
+  const dismiss = useCallback(
+    (id: string) => setItems((prev) => prev.filter((it) => it.id !== id)),
+    [],
+  );
+
   const askAgent = useCallback(
     async (instruction: string, label = "AI 修改") => {
       const trimmed = instruction.trim();
@@ -306,25 +271,51 @@ export function AIPanel({
       }
       setBusyBoth(true);
       push({ id: uid(), t: "msg", role: "user", text: trimmed });
+      // 卡片先挂出来：流式阶段逐字显示模型的输出，收完才换成改动清单与 diff。
+      const id = uid();
+      push({
+        id,
+        t: "plan",
+        label,
+        card: { summary: "", ops: [], before: [], after: [], inverses: [], notes: [], status: "streaming", raw: "" },
+      });
+      const requestId = uid();
+      activeRequestRef.current = requestId;
       try {
         const out = await requestProposal({
           editor,
           instruction: trimmed,
           providerId: activeProviderId,
           selection: selectionText(),
+          requestId,
+          onDelta: (chunk) =>
+            patchCard(id, (c) => {
+              const plan = c as PlanCard;
+              return { ...plan, raw: (plan.raw ?? "") + chunk };
+            }),
         });
         if (!out.ok || !out.proposal) {
           if (out.needsSetup) setSettingsOpen(true);
-          note(out.message ?? "AI 没有给出修改方案。");
+          patchCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            message: out.message ?? "AI 没有给出修改方案。",
+          }));
           return;
         }
         if (!out.proposal.ops.length) {
+          dismiss(id);
           note(`检查过了，没有需要改的地方：${out.proposal.summary}`);
           return;
         }
         const plan = simulateProposal(editor, out.proposal);
         if (!plan.ok) {
-          note(`方案无法应用：${plan.message ?? "请换个说法再试。"}`);
+          patchCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            summary: out.proposal!.summary,
+            message: `方案无法应用：${plan.message ?? "请换个说法再试。"}`,
+          }));
           return;
         }
         const card: PlanCard = {
@@ -336,8 +327,7 @@ export function AIPanel({
           notes: [...out.warnings, ...plan.skipped],
           status: "pending",
         };
-        const id = uid();
-        push({ id, t: "plan", label, card });
+        patchCard(id, () => card);
         if (modeRef.current === "auto") {
           toast("全自动：已直接写入文档，可在修改历史里撤销这次修改。", "success");
           await applyPlan(id, card);
@@ -345,16 +335,23 @@ export function AIPanel({
       } catch (e) {
         const err = e as Error & { needsSetup?: boolean };
         if (err.needsSetup) setSettingsOpen(true);
-        note("调用失败：" + (err.message ?? String(e)));
+        patchCard(id, (c) => ({
+          ...c,
+          status: "failed",
+          message: "调用失败：" + (err.message ?? String(e)),
+        }));
       } finally {
+        activeRequestRef.current = null;
         setBusyBoth(false);
       }
     },
     [
       activeProviderId,
       applyPlan,
+      dismiss,
       editor,
       note,
+      patchCard,
       push,
       selectionText,
       setBusyBoth,
@@ -417,16 +414,22 @@ export function AIPanel({
       activeRequestRef.current = requestId;
       let acc = "";
       try {
-        await aiStreamTransform(action, text, undefined, activeProviderId, requestId, (chunk) => {
-          acc += chunk;
-          const shown = acc;
-          setItems((prev) =>
-            prev.map((it) =>
-              it.id === id && it.t === "rewrite"
-                ? { ...it, card: { ...it.card, rewritten: shown } }
-                : it,
-            ),
-          );
+        await aiStreamTransform({
+          action,
+          text,
+          providerId: activeProviderId,
+          requestId,
+          onDelta: (chunk) => {
+            acc += chunk;
+            const shown = acc;
+            setItems((prev) =>
+              prev.map((it) =>
+                it.id === id && it.t === "rewrite"
+                  ? { ...it, card: { ...it.card, rewritten: shown } }
+                  : it,
+              ),
+            );
+          },
         });
         if (!acc.trim()) {
           patchCard(id, (c) => ({ ...c, status: "failed", message: "没有收到内容。" }));
@@ -453,11 +456,6 @@ export function AIPanel({
     [activeProviderId, applyRewrite, editor, note, patchCard, push, setBusyBoth],
   );
 
-  const dismiss = useCallback(
-    (id: string) => setItems((prev) => prev.filter((it) => it.id !== id)),
-    [],
-  );
-
   /* --------------------------- chat ------------------------------- */
 
   const sendChat = useCallback(
@@ -476,12 +474,18 @@ export function AIPanel({
       activeRequestRef.current = requestId;
       let acc = "";
       try {
-        await aiStreamTransform("chat", text, undefined, activeProviderId, requestId, (chunk) => {
-          acc += chunk;
-          const shown = acc;
-          setItems((prev) =>
-            prev.map((it) => (it.id === id && it.t === "msg" ? { ...it, text: shown } : it)),
-          );
+        await aiStreamTransform({
+          action: "chat",
+          text,
+          providerId: activeProviderId,
+          requestId,
+          onDelta: (chunk) => {
+            acc += chunk;
+            const shown = acc;
+            setItems((prev) =>
+              prev.map((it) => (it.id === id && it.t === "msg" ? { ...it, text: shown } : it)),
+            );
+          },
         });
         setItems((prev) =>
           prev.map((it) =>
@@ -707,21 +711,33 @@ export function AIPanel({
                   <div className="ai-card-head">
                     <Sparkles size={13} />
                     <span className="ai-card-title">{it.label}方案</span>
-                    <span className="ai-card-count">{c.ops.length} 处改动</span>
+                    {c.status === "streaming" ? (
+                      <span className="ai-card-streaming">
+                        <Loader2 size={12} className="spin" /> 正在输出…
+                      </span>
+                    ) : (
+                      <span className="ai-card-count">{c.ops.length} 处改动</span>
+                    )}
                   </div>
-                  <div className="ai-card-summary">{c.summary}</div>
-                  <ul className="op-list">
-                    {c.ops.map((op, i) => (
-                      <li key={i}>{describeCoreOp(op)}</li>
-                    ))}
-                  </ul>
-                  <DiffView before={c.before} after={c.after} />
-                  {c.notes.length > 0 && (
-                    <div className="ai-card-notes">
-                      {c.notes.map((n, i) => (
-                        <div key={i}>· {n}</div>
-                      ))}
-                    </div>
+                  {c.status === "streaming" ? (
+                    <div className="ai-card-stream">{c.raw || "正在等模型回话…"}</div>
+                  ) : (
+                    <>
+                      <div className="ai-card-summary">{c.summary}</div>
+                      <ul className="op-list">
+                        {c.ops.map((op, i) => (
+                          <li key={i}>{describeCoreOp(op)}</li>
+                        ))}
+                      </ul>
+                      <DiffView before={c.before} after={c.after} />
+                      {c.notes.length > 0 && (
+                        <div className="ai-card-notes">
+                          {c.notes.map((n, i) => (
+                            <div key={i}>· {n}</div>
+                          ))}
+                        </div>
+                      )}
+                    </>
                   )}
                   {c.message && <div className="ai-card-message">{c.message}</div>}
                   <div className="ai-card-actions">
