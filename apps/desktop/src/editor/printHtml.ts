@@ -72,12 +72,13 @@ export function buildPrintHtml(opts: {
     link?.color && /^#[0-9a-f]{6}$/i.test(link.color) ? link.color : "#0563c1";
   const linkRule = link?.underline === false ? "none" : "underline";
 
-  // 纸上的分栏用 CSS multi-column：`column-fill: auto` + 正文区实高，才和 Word
-  // 一样"第一栏排满再排第二栏"，而不是把内容平衡成两截短栏。
+  // 纸上的分栏用 CSS multi-column：`column-fill: auto` 才和 Word 一样"第一栏排满再排
+  // 第二栏"，而不是把内容平衡成两截短栏。这里**不能**给容器定高——定高之后 Blink 会把
+  // 装不下的内容横向溢出成第三、第四栏再被页面裁掉，整份文档只剩第一页（实测见
+  // docs/word-parity-spec.md §8.13）。跨页断栏交给打印分页自己发生。
   const columnRule =
     columns && columns.count > 1
-      ? `column-count: ${columns.count}; column-gap: ${columns.gapPx}px; ` +
-        `column-fill: auto; height: ${pageHeightPx - marginTopPx - marginBottomPx}px;`
+      ? `column-count: ${columns.count}; column-gap: ${columns.gapPx}px; column-fill: auto;`
       : "";
 
   // 页面边框：每条边一个绝对定位的空盒子，靠 border-top / border-left 画出线来。
@@ -136,14 +137,16 @@ export function buildPrintHtml(opts: {
     .page {
       position: relative;
       width: ${pageWidthPx}px;
-      height: ${pageHeightPx}px;
+      /* 只能是 min-height：定高 + overflow:hidden 会让 Blink 把这整块当成不可断的
+         裁剪容器，第二页以后的正文直接消失（一份 60 段的文档只出 1 页）。 */
+      min-height: ${pageHeightPx}px;
       padding: ${marginTopPx}px ${marginRightPx}px ${marginBottomPx}px ${marginLeftPx}px;
       page-break-after: always;
       break-after: page;
-      overflow: hidden;
     }
     .page:last-child { page-break-after: auto; }
-    .pgb { position: absolute; margin: 0; padding: 0; background: none; }
+    /* 页面边框固定定位：Word 的边框是每页一条，Chromium 打印时固定元素逐页重画。 */
+    .pgb { position: fixed; margin: 0; padding: 0; background: none; }
     .ph { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;
            top: ${headerPx}px; font-size: 10px; color: #666; }
     .pf { position: absolute; left: ${marginLeftPx}px; right: ${marginRightPx}px;

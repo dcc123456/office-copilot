@@ -19,8 +19,16 @@ describe("打印 / PDF 导出的分栏", () => {
     expect(html).toContain("column-count: 2");
     expect(html).toContain("column-gap: 30px");
     expect(html).toContain("column-fill: auto");
-    // 正文区高度 = 页高 - 上下页边距，`column-fill: auto` 要有实高才肯填满一栏再换栏。
-    expect(html).toContain("height: 931px");
+    // 定高会把装不下的内容横向溢出成第三、第四栏再被裁掉（实测只剩第一页），所以
+    // 正文区一条高度都不给，跨页断栏交给打印分页。
+    expect(html).toContain(".ProseMirror { outline: none; column-count: 2;");
+    expect(html).not.toContain("column-fill: auto; height");
+  });
+
+  it("页面盒子只给 min-height，不用 overflow:hidden 裁掉第二页", () => {
+    const html = buildPrintHtml(base);
+    expect(html).toContain("min-height: 1123px;");
+    expect(html).not.toContain("overflow: hidden");
   });
 
   it("单栏（或没设过分栏）时不写任何列样式", () => {
@@ -52,6 +60,8 @@ describe("打印 / PDF 导出的页面边框", () => {
     );
     // 关掉的左/下边不产生任何盒子。
     expect(html.match(/class="pgb"/g)).toHaveLength(2);
+    // 固定定位：Word 的页面边框每页一条，Chromium 打印时固定元素逐页重画。
+    expect(html).toContain(".pgb { position: fixed;");
   });
 
   it("没设边框或四条边都关掉时纸上什么都不画", () => {
