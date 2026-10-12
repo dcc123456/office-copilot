@@ -40,6 +40,14 @@ export {
   utcDateToSerial,
 } from "./datetime.js";
 export { argbToSheetColor, sheetColorToArgb, type FontSpec, type SheetColor } from "./color.js";
+export {
+  COLUMN_PADDING_PX,
+  DEFAULT_MAX_DIGIT_WIDTH_PX,
+  DEFAULT_SHEET_ROW_HEIGHT_PT,
+  columnWidthCharsToPx,
+  columnWidthPxToChars,
+  rowHeightPtToPx,
+} from "./geometry.js";
 export { parseSheet, recalculateSheetExtent, rowFingerprints, serializeSheetXml, type ParseSheetInput } from "./xlsx-sheet.js";
 export { SharedStringTable } from "./xlsx-strings.js";
 export { StyleTable, type CellStyleParts } from "./xlsx-styles.js";
