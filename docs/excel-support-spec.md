@@ -199,6 +199,37 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 **完成判定**：`pnpm dev:desktop` 手工走通"开→改→撤销→存→重新打开内容一致"；打开/保存/文件关联（`fileAssociations` 加 `xlsx`）
 与"最近文件"打通；保存后读回断言一致；类型检查 + 全量测试绿。
 
+**实际结果**（`bbf23c5` 主进程按扩展名分派 + `sheet:*` 通道 → `ab27d0e` 几何与输入的纯函数层 → `c8c3f3b` 网格组件 + CSS + App 装配；
+前置是 `dcd6a1f`/`e060525`/`7a0f606` 三个 `sheet-io` 提交）：
+
+- **打开**：单个"打开"对话框同时接受 `.docx` 与 `.xlsx`，主进程只回**路径**，渲染层按扩展名分派（`App.tsx:314`）。
+  改这个形态的原因：先前让 `file:open` 返回"docx 载荷 | sheet 载荷"联合，而 TS 的 `"workbook" in r` **排除不掉属性可选的那个成员**，
+  11 处 `TS2339`；只回路径 + 按扩展名分派后类型自然收敛。拖拽入窗、`addRecent` 最近文件、`fileAssociations`
+  （`apps/desktop/package.json:66` 新增 xlsx 一条）、`electron/main.ts:37` 的 `OPENABLE_EXT` 都走同一条路。
+- **查看**：虚拟网格 + 列头/行头**双轴**同步（transform 挂在内层 `*-track` 上：`overflow:hidden` 的容器一被 transform，裁剪盒就跟着走，表头会飘）
+  + 合并区覆盖层（带锚点文本，数字靠右）+ 表页签 + 名称框 + 只读编辑栏 + 公式重算提示。列宽/行高换算只在 `sheet-io`（`7a0f606`），渲染层拿到的已是 px（`AGENTS.md` §2.1）。
+- **编辑**：打字/Enter/Tab/F2/Delete/Backspace/Home/Ctrl+Home/PageUp/PageDown、拖拽选区、列宽拖拽
+  （`startPointerDrag` + 热区 `-webkit-app-region: no-drag`，§5.6）。几何与键盘步进全收在纯函数层 `src/sheet/sheetGridModel.ts`
+  （`ab27d0e`）——桌面 vitest 是 `environment:"node"`，不纯就根本测不到。
+- **保存**：`sheet:save` / `sheet:save-as` 在主进程**重开底包**、按 `partPath` 配对，配不上就整批不写（§2.4），先出 `.bak` 再 `.tmp → rename`；
+  `sourceXml` 不过 IPC（`sheet-dto.test.ts`）。
+- **门禁**：`sheet-io` 41 + desktop 416 单测绿，根 `pnpm build` 全包过。类型检查由 build 覆盖（§8）。
+- **可视验证做到了哪一步**：本机没有 electron 的 CDP harness，所以用真实 Chromium 探针（连到用户已在跑的 vite dev，**没有** kill 它，§8）
+  把这个组件的**实际计算样式与几何**量了出来，并因此发现一个真缺陷——画布 885px < 视口 1154px，右边露一条空白；
+  于是 `TRAILING_COLUMNS` 8 → 24（表头 12 → 28 列，画布 1909px）。**这替代不了 E26 那条"起真实 app 手工走一遍"**，那条仍是 `[ ]`。
+
+**与执行计划的偏差（记录，不算违背 §1.4）**：
+
+1. 落点名换了：计划里的 `sheetStore.ts` + `SheetGrid.tsx` + `CellEditor.tsx` 三件套，实际是 `sheetGridModel.ts`（纯函数）
+   + `SheetView.tsx`（一个组件，编辑框内联）。三件套是按"store / 视图 / 编辑器各一"预判的切法；真写起来编辑态只有"一格的文本 + 光标"，
+   单开组件反而要把状态再传回 store，遂合并。
+2. **插入/删除行列与撤销重做顺延到阶段 3**。理由：`AGENTS.md` §2.5 要求每个 op 发自己的逆操作、撤销按内容寻址，
+   这套机制属于阶段 3 的 `SheetCoreOp`；在本阶段手搓一条撤销栈就是造第二个撤销栈（§3 禁止平行基建）。
+   所以"完成判定"里的"开→改→**撤销**→存"只做到"改→存→重开内容一致"，**撤销那一步未实现**，不是实现失败。
+3. 不做新建空白工作簿：本阶段只读写**已存在**的 `.xlsx`。从零造一个合法包（`[Content_Types].xml`/`workbook.xml`/rels/`styles.xml`）
+   与"读回一致"是两件事，混进来会让本阶段的红线（不损用户文件）变得不可测。
+4. `sheet:open` 通道与 `openSheetFile`（preload + `global.d.ts`）在偏差 1 的对话框改造后成为死代码，随即删除（§3.5）。
+
 ### 阶段 3 · 结构化 op + 撤销/modlog 接入
 
 **目标**：把"改单元格/改行列/改格式"收敛成 CoreOp 集合，每个 op 有逆操作，走 `planEdit/runOps/revert` 同一条链路，落 `userData/modlog`。
@@ -235,11 +266,11 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 1 | reader：`sharedStrings`（含 `<r>` run）、`sheetData`、`dimension`、`mergeCells`、`cols/rows`、`styles.xml` numFmt 定位 | `src/xlsx-sheet.ts` `src/xlsx-styles.ts` | 提交 4 |
 | 1 | writer：`replaceSheetDoc` + **未建模部件原样回写** + `getSnapshot/restoreSnapshot` | `src/sheet-file.ts` | 提交 5 |
 | 1 | 往返单测（真实夹具 + 手工最小样本） | `src/*.test.ts` | 随各提交 |
-| 2 | 主进程按扩展名分派；新增 `sheet:*` handler；原子写 + `.bak` | `electron/fileHandlers.ts` `electron/main.ts:32`（`DOCX_EXT` 旁路）、`package.json fileAssociations` | 提交 6 |
-| 2 | preload 白名单加 `sheet:*`（同时改类型，禁万能 invoke） | `electron/preload.ts:222/224` | 提交 6 |
-| 2 | store 与网格组件 | `src/sheet/sheetStore.ts` `SheetGrid.tsx` `CellEditor.tsx` | 提交 7 |
-| 2 | 样式（唯一 CSS 体系，不新增入口） | `src/styles/sheet.css`（在既有入口引入） | 提交 7 |
-| 2 | 列宽拖拽走 pointer capture；浮层走 fixed + `useAnchoredMenu` | 复用 `hooks/usePointerDrag.ts` `hooks/useAnchoredMenu.ts` | 提交 8 |
+| 2 | 主进程按扩展名分派；新增 `sheet:*` handler；原子写 + `.bak` | `electron/fileHandlers.ts` `electron/sheetHandlers.ts` `electron/main.ts:37`（`DOCX_EXT` 改成 `OPENABLE_EXT`）、`package.json fileAssociations` | `bbf23c5`（计划"提交 6"） |
+| 2 | preload 白名单加 `sheet:*`（同时改类型，禁万能 invoke） | `electron/preload.ts:98-103`（三条具名通道）+ `src/global.d.ts` | `bbf23c5`；`sheet:open` 后因死代码删除，见阶段 2 偏差 4 |
+| 2 | store 与网格组件 | **实际**：`src/sheet/sheetGridModel.ts`（纯函数：几何、可见窗口、键盘步进、点→地址、改列宽）+ `src/sheet/SheetView.tsx`（单一组件，编辑框内联）；计划的 `sheetStore.ts`/`SheetGrid.tsx`/`CellEditor.tsx` 三件套未建，见阶段 2 偏差 1 | `ab27d0e` + `c8c3f3b`（计划"提交 7"） |
+| 2 | 样式（唯一 CSS 体系，不新增入口） | `src/styles/sheet.css`（由组件自己引入，与 `footnotePane.css` 同款先例） | `c8c3f3b`（计划"提交 7"） |
+| 2 | 列宽拖拽走 pointer capture；浮层用 fixed + `useAnchoredMenu` | 复用 `hooks/usePointerDrag.ts`；本阶段网格无浮层，`useAnchoredMenu` 无对应实现（阶段 4 有菜单时再落），见 D20 | `c8c3f3b`（计划"提交 8"） |
 | 3 | `SheetCoreOp` 类型、`planEdit/runOps/revert` 的表格实现、行内容指纹 | `src/ai/sheetEdit.ts` | 提交 9 |
 | 3 | 撤销与修改历史接入（复用 modlog，不新建存储） | `electron/modlog.ts` 现有通道 | 提交 9 |
 | 4 | 分析引擎（列类型推断、缺失统计、分组聚合、去重键、异常值） | `packages/sheet-io/src/analysis/**` | 提交 10 |
@@ -268,8 +299,11 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
    **实测**：`46053 → 2026-01-31`（`datetime.test.ts` 锚定真实样本序列号，含 1900 闰年 bug 的 `dayParts<=60` 分支）；自定义 `numFmtId=164` 与内建 `14` 都判成日期而值仍是序列号；`grep -rn "\bserial\b|serialTo|ToSerial|25569|epochDays" apps packages`（排除 `dist/`）在 `packages/sheet-io` **之外零命中**（本机实跑 exit 1），§零.2 的单点成立。
 4. `[~]` 公式写回后 **Excel/WPS 打开能重算**（读回断言 `<f>` 存在且合法，`<v>` 为缓存值）；无法本地求值的函数在 UI 明示"需 Excel 重算"，不许显示过期数字当作结果。
    **阶段 1 到位的部分**：`<f>`+`<v>` 成对读写，跨簿引用 `'[1]Sheet1'!$A$2` 不被改写或多余转义；exceljs 读回公式 `SUM(C2:C6)` 与缓存值 `660`。
-   **未到位**：“UI 明示需 Excel 重算”属阶段 2/4，本阶段没有 UI。
-5. `[ ]` 保存走 `.tmp → rename`，原地写回保留 `.bak`；保存中断不会留下半个文件。
+   **阶段 2 到位**：选中带公式的格时，编辑栏下方出现 `.sheet-recalc-hint`「公式显示的是文件里的缓存值，需在 Excel / WPS 里重算」（`SheetView.tsx`），显示的是缓存值而不是我们算的结果。
+   **仍未到位**：Excel/WPS 真的重算这一半本机无法验证（§8：WPS 无可视通道），保持 BLOCKED。
+5. `[~]` 保存走 `.tmp → rename`，原地写回保留 `.bak`；保存中断不会留下半个文件。
+   **已证**：写回内容正确性有单测钉住（`sheet-file.test.ts`「跨界载荷」一条：改 `C2` → 重开底包 → `applySheetPayload` → `writeSheet` → 断言 `<c r="C2" s="1"><v>777</v></c>`，并在配不上 `partPath` 时整批不写）。
+   **未证**：`electron/sheetHandlers.ts:saveSheetDoc` 里的 `.bak` 与 `.tmp → rename` 是主进程代码路径，本机没有 electron 进程级测试去模拟写到一半被中断，所以"中断不留半个文件"按代码推断而非实测。
 6. `[x]` `.xlsm` / 含外部连接的包：按阶段 1 的结论明确拒绝或原样保留，二者之一并有测试，不许"看起来成功"。
    **实测结论**：含 VBA 宏（`xl/vbaProject.bin` 或宏 content-type）**明确拒绝**并给出可读消息；外部链接/透视表/图表/绘图**原样保留**并记进 `unsupported` 交给 UI 提示。各有单测（宏拒绝、`externalLinks` 部件逐字节 + `[1]` 引用活着）。
 7. `[x]` 单位/颜色换算单点：全仓 grep 不出现第二处 serial/numFmt/颜色换算实现（§零.2）。
@@ -293,12 +327,23 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### D. UI 与工程（对应 `AGENTS.md` §3/§4/§5）
 
-18. `[ ]` 没有复制出第二套撤销栈 / LLM 客户端 / 设置存储 / 样式体系 / SQLite 连接。
-19. `[ ]` 网格滚动与编辑在 5 万行 × 20 列的工作簿上不卡死（虚拟滚动的验收口径：初始打开 ≤ 2s，滚动不重建全部 DOM；具体阈值在阶段 2 实测后写回本节）。
-20. `[ ]` 列宽拖拽用 `usePointerDrag` 的 pointer capture，热区带 `-webkit-app-region: no-drag`；浮层用 fixed + `useAnchoredMenu` 不出屏。
-21. `[ ]` 渲染层只经 `window.officeCopilot` 的白名单通道访问主进程；无 `nodeIntegration` 变化。
-22. `[ ]` 新函数有中文 JSDoc（作用/入参含单位语义/失败语义）；命名有含义，无 `data/res/temp/flag`。
-23. `[ ]` 无孤儿文件、无注释掉的代码块、无未被调用的导出。
+18. `[x]` 没有复制出第二套撤销栈 / LLM 客户端 / 设置存储 / 样式体系 / SQLite 连接。
+    **阶段 2 实测**：撤销栈一条都没有新建——行列插入/删除与撤销重做整体顺延到阶段 3（见"阶段 2 实际结果"的偏差说明），样式只新增 `src/styles/sheet.css` 一个文件并由组件自己引入（与 `footnotePane.css` 等同款先例一致）。
+19. `[~]` 网格滚动与编辑在 5 万行 × 20 列的工作簿上不卡死。
+    **实测数字**（一次性探针 `tmp/sheet-scale.mjs`，node 24 / Apple Silicon，纯 IO 侧不含渲染）：
+    5 000 行 × 20 列 = 10 万格 → 打开 11ms + 解析 190ms，堆 185MB；20 000 行 = 40 万格 → 746ms，546MB；
+    **50 000 行 × 20 列 = 100 万格 → 合计 2.04s（parse 1.89s），堆 1.2GB**，`zip` 29.2MB。
+    结论：解析这一侧勉强踩在"≤2s"的线上，真正的瓶颈是**跨界载荷把 100 万个格子整个 structured-clone 过 IPC**，渲染层与主进程各存一份。
+    **未到位**：按 §风险表定的"超阈值（约 20 万格）明确提示只读"这条保护还没实现，`SheetView` 目前也会把整表 `cells` 都装进 state。列为阶段 3 的第一件事。
+    虚拟滚动的渲染侧口径由两条钉住：`sheetGridModel.test.ts` 的 `visibleSlotRange`（窗口起止、夹在有效区间）与 Chromium 探针实测的槽位窗口；小表（几十行）本来就全量渲染，这是对的，不该出现空洞。
+20. `[x]` 列宽拖拽用 `usePointerDrag` 的 pointer capture，热区带 `-webkit-app-region: no-drag`；浮层用 fixed + `useAnchoredMenu` 不出屏。
+    **实测**：`SheetView.tsx` 的列宽拖拽与选区拖拽都走 `startPointerDrag`；探针里 `getComputedStyle('.sheet-col-resize').webkitAppRegion === "no-drag"`、`cursor === "col-resize"`。本阶段网格里没有浮层控件（右键菜单/公式面板属阶段 4），故 `useAnchoredMenu` 这条暂无对应实现，不是遗漏。
+21. `[x]` 渲染层只经 `window.officeCopilot` 的白名单通道访问主进程；无 `nodeIntegration` 变化。
+    **实测**：新增的是 `sheet:read` / `sheet:save` / `sheet:save-as` 三条具名通道，`preload.ts` 里逐条写返回类型（没有万能 `invoke`），`contextIsolation` 与 `nodeIntegration` 一字未改；`sourceXml` 不过 IPC（`sheet-dto.test.ts` 断言载荷里没有 `sourceXml` 键）。
+22. `[x]` 新函数有中文 JSDoc（作用/入参含单位语义/失败语义）；命名有含义，无 `data/res/temp/flag`。
+    **实测**：`geometry.ts`（px/chars/pt 单位都写进注释）、`sheetGridModel.ts`、`sheetHandlers.ts`、`SheetView.tsx` 逐函数自查过；失败语义写明"配不上 `partPath` 就整批不写""没有底包就回可读消息"。
+23. `[x]` 无孤儿文件、无注释掉的代码块、无未被调用的导出。
+    **实测**：`sheet:open` 通道与 `openSheetFile`（preload + `global.d.ts`）在"打开对话框同时接受两种文件、只回路径"改造后成了死代码，随即删掉；探针产物（`apps/desktop/tmp/sheet-probe.*`、`tmp/sheet-scale.mjs`）不入库。
 
 ### E. 测试与门禁（对应 `AGENTS.md` §7）
 
@@ -332,9 +377,13 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | --- | --- | --- | --- | --- |
 | 0 | 本提交 | P1–P6 | `[x]`（P4 BLOCKED 已定替代证据，P6 顺延阶段 5） | 证据在 `tmp/xlsx-probe/run.log`（不入主干，`AGENTS.md` §7.3） |
 | 1 | `e5d5ba4` | A1–A3、A6、A7、E24–E25、E27 | `[x]` | 25 条单测绿；第三方 exceljs 交叉读回值/公式缓存/日期 numFmt/合并/冻结/数据验证/富文本/外部链接部件全部一致 |
-| 1 | `e5d5ba4` | A4 | `[~]` | `<f>`+`<v>` 读写已测；“UI 明示需 Excel 重算”待阶段 2/4 |
-| 1 | — | A5、A8 | `[ ]` / `[!] BLOCKED` | A5 的 `.tmp→rename` + `.bak` 在主进程侧（阶段 2）；A8 本机 WPS 无可视通道（`AGENTS.md` §8），替代证据即上一条 |
-| 2 | — | D19–D22 | `[ ]` | |
+| 1 | `e5d5ba4` | A4 | `[~]`（阶段 2 之后仍是 `[~]`） | `<f>`+`<v>` 读写已测；UI 的"需 Excel 重算"提示已在阶段 2 落地（`.sheet-recalc-hint`）；"Excel 真的重算"那一半仍 BLOCKED |
+| 1 | — | A8 | `[!] BLOCKED` | 本机 WPS 无可视通道（`AGENTS.md` §8），替代证据 = 自读一致 + OOXML 结构断言 + 第三方 exceljs 交叉读（上一条） |
+| 2 | `bbf23c5` `ab27d0e` `c8c3f3b` | A5 | `[~]` | 写回内容正确性有单测钉住；`.bak` 与 `.tmp→rename` 在主进程里，本机没有 electron 进程级"写到一半中断"的测试，按代码推断 |
+| 2 | 同上 | D18、D20–D23 | `[x]` | 没新建第二套撤销栈（行列操作与撤销整体顺延阶段 3）；pointer capture + `no-drag` 热区、3 条具名 IPC 通道、JSDoc、死代码（`sheet:open`/`openSheetFile`）清理逐条见 §六 C/D |
+| 2 | 同上 | D19 | `[~]` | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；**"超约 20 万格提示只读"这条保护还没实现**，列为阶段 3 第一件事 |
+| 2 | 同上 | E24–E25、E27 | `[x]` | 根 `pnpm build` EXIT=0；逐包核对 sheet-io **41** / desktop **416**；夹具现生成、探针产物只在 `tmp/` |
+| 2 | 同上 | E26 | `[ ]` | 本机无 electron 的 CDP harness，"起真实 app 手工走一遍开→改→存"还没做到；真实 Chromium 探针只覆盖了计算样式与几何，不冒充可视验收 |
 | 3 | — | C15–C17 | `[ ]` | |
 | 4 | — | B9–B14 | `[ ]` | |
 | 5 | — | D5 落地 | `[ ]` | |
