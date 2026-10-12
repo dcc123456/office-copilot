@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu, shell, ipcMain, clipboard } from "electron";
 import path from "node:path";
 import { registerFileHandlers } from "./fileHandlers.js";
+import { registerSheetHandlers } from "./sheetHandlers.js";
 import { registerAIHandlers } from "./aiHandlers.js";
 import { registerSettingsHandlers } from "./settingsStore.js";
 import { registerSnapshotHandlers } from "./snapshotStore.js";
@@ -29,18 +30,19 @@ const isDev = !!process.env.VITE_DEV_SERVER_URL;
 let mainWindow: BrowserWindow | null = null;
 const recent = makeRecentFiles();
 
-// ---- 从 Finder「打开方式」/ 双击 / 拖到 Dock 打开 .docx ----
+// ---- 从 Finder「打开方式」/ 双击 / 拖到 Dock 打开文档 ----
 // macOS 走 open-file 事件，Windows/Linux 把路径塞在 argv 里。
 // 冷启动时事件可能早于 whenReady，所以先暂存，等窗口就绪后由渲染进程来取。
-const DOCX_EXT = /\.docx$/i;
+// 渲染进程按扩展名分派：docx 走 fileHandlers，xlsx 走 sheetHandlers。
+const OPENABLE_EXT = /\.(docx|xlsx)$/i;
 let pendingOpenPath: string | null = null;
 
-function docxFromArgv(argv: string[]): string | null {
-  return argv.slice(1).find((a) => !a.startsWith("-") && DOCX_EXT.test(a)) ?? null;
+function openableFromArgv(argv: string[]): string | null {
+  return argv.slice(1).find((a) => !a.startsWith("-") && OPENABLE_EXT.test(a)) ?? null;
 }
 
 function queueOpenPath(p: string | null | undefined): void {
-  if (!p || !DOCX_EXT.test(p)) return;
+  if (!p || !OPENABLE_EXT.test(p)) return;
   pendingOpenPath = p;
   flushOpenPath();
 }
@@ -72,7 +74,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on("second-instance", (_event, argv) => {
-    const p = docxFromArgv(argv);
+    const p = openableFromArgv(argv);
     if (p) {
       queueOpenPath(p);
       return;
@@ -280,6 +282,7 @@ app.whenReady().then(async () => {
   rebuildMenu();
   mainWindow = createWindow();
   registerFileHandlers(ipcMain, () => mainWindow);
+  registerSheetHandlers(ipcMain, () => mainWindow);
   registerAIHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerSnapshotHandlers(ipcMain);
@@ -346,7 +349,7 @@ app.whenReady().then(async () => {
   );
 
   // 冷启动：Windows/Linux 双击文件时路径在 argv 里；macOS 走上面的 open-file。
-  queueOpenPath(docxFromArgv(process.argv));
+  queueOpenPath(openableFromArgv(process.argv));
   flushOpenPath();
 
   // Record every successful open/save into Recent.

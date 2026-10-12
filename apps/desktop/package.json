@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@office-copilot/docx-io": "workspace:*",
+    "@office-copilot/sheet-io": "workspace:*",
     "@tiptap/core": "^2.27.2",
     "@tiptap/extension-character-count": "^2.6.6",
     "@tiptap/extension-link": "^2.6.6",
@@ -59,6 +60,15 @@
         ],
         "name": "Word 文档",
         "description": "Microsoft Word 文档",
+        "role": "Editor",
+        "rank": "Alternate"
+      },
+      {
+        "ext": [
+          "xlsx"
+        ],
+        "name": "Excel 表格",
+        "description": "Microsoft Excel 工作簿",
         "role": "Editor",
         "rank": "Alternate"
       }

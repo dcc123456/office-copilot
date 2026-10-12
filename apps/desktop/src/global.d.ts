@@ -1,3 +1,29 @@
+import type { SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
+
+/** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
+export interface SheetOpenResult {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+  workbook?: WorkbookPayload;
+}
+
+/** 保存 `.xlsx` 的请求：表按打开时的顺序带回，`partPath` 用来在主进程重开的包里配对。 */
+export interface SheetSaveRequest {
+  path: string | null;
+  sheets: SheetPayload[];
+  defaultName?: string;
+}
+
+/** 保存结果：`ok:false + canceled` 表示用户在另存为对话框里取消了。 */
+export interface SheetSaveResult {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+}
+
 export interface ProviderConfig {
   id: string;
   name: string;
@@ -65,6 +91,10 @@ interface OfficeCopilotAPI {
     comments?: unknown;
     warnings?: string[];
   }>;
+  openSheetFile: () => Promise<SheetOpenResult>;
+  readSheet: (filePath: string) => Promise<SheetOpenResult>;
+  saveSheet: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
+  saveSheetAs: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveFile: (payload: {
     path: string | null;
     doc: unknown;

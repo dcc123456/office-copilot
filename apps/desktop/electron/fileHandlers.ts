@@ -14,6 +14,7 @@ import {
   type StyleEdit,
 } from "@office-copilot/docx-io";
 import type { PMDoc } from "@office-copilot/docx-io/src/pm-schema.js";
+import { fileExists } from "./fsutil.js";
 
 /** 两种部件的固定遍历顺序：脚注在前，与 Word 窗格里的排布一致。 */
 const FOOTNOTE_KINDS: readonly FootnoteKind[] = ["footnote", "endnote"];
@@ -377,20 +378,11 @@ async function previewStyles(
  * @returns 内存中的 `DocxFile`，调用方改完再决定要不要写回。
  */
 async function loadForEdit(filePath: string | null): Promise<DocxFile> {
-  if (!filePath || !(await exists(filePath))) {
+  if (!filePath || !(await fileExists(filePath))) {
     return DocxFile.fromBytes(await minimalDocxBytes());
   }
   const bytes = await fs.readFile(filePath);
   return DocxFile.fromBytes(bytes);
-}
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 async function minimalDocxBytes(): Promise<Uint8Array> {

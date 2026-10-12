@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { SessionRecord, SessionSummary, SessionTurn } from "./sessionStore.js";
+import type { SheetOpenResult, SheetSavePayload, SheetSaveResult } from "./sheetHandlers.js";
 
 interface AITransformPayload {
   action: string;
@@ -90,6 +91,15 @@ const api = {
   ): Promise<SaveResult> => ipcRenderer.invoke("file:save-as", payload),
   readDocx: (filePath: string): Promise<OpenResult> =>
     ipcRenderer.invoke("file:read-docx", filePath),
+
+  // 表格（.xlsx）：跨界 only 结构化格子，工作表 XML 原文留在主进程（spec 阶段 2）。
+  openSheetFile: (): Promise<SheetOpenResult> => ipcRenderer.invoke("sheet:open"),
+  readSheet: (filePath: string): Promise<SheetOpenResult> =>
+    ipcRenderer.invoke("sheet:read", filePath),
+  saveSheet: (payload: SheetSavePayload): Promise<SheetSaveResult> =>
+    ipcRenderer.invoke("sheet:save", payload),
+  saveSheetAs: (payload: SheetSavePayload): Promise<SheetSaveResult> =>
+    ipcRenderer.invoke("sheet:save-as", payload),
   /** Electron 32: File.path is removed; resolve a dropped File to its disk path. */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   writeDocx: (payload: { path: string; doc: unknown }): Promise<SaveResult> =>
