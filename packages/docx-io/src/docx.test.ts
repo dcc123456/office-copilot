@@ -207,6 +207,21 @@ describe("DocxFile", () => {
     expect(section?.columns?.widths).toEqual([]);
   });
 
+  it("reads a Word-authored landscape page as a wide page", async () => {
+    // Word 存横向 Letter 写的是 `w="15840" h="12240" orient="landscape"`——**长边在 w**，
+    // orient 只是标记（微软官方 "Change the print orientation" 明确要求交换宽高）。
+    // 曾经按 orient 把宽高对调，于是 Word 的横向文档在我们这里被读成竖版形状。
+    const docx = await DocxFile.fromBytes(
+      await makeDocx(["正文"], {
+        sectPr: `<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>`,
+      }),
+    );
+    const { section } = await docx.toProseMirror();
+    expect(section?.pageWidth).toBeCloseTo(1056, 4); // 15840 twips = 11in = 1056px
+    expect(section?.pageHeight).toBeCloseTo(816, 4);
+    expect(section!.pageWidth).toBeGreaterThan(section!.pageHeight);
+  });
+
   it("leaves columns unset when the source section has no w:cols", async () => {
     // Word 省略 `w:cols` 的单栏文档很常见。拿 `count: 1` 冒充"设过分栏"会让每次保存
     // 无谓地插进一个元素，UI 也没法区分"用户没选过栏"和"用户选了单栏"。
@@ -341,6 +356,26 @@ describe("DocxFile", () => {
     expect(once.indexOf("<w:pgMar")).toBeLessThan(once.indexOf("<w:pgBorders"));
     expect(once.indexOf("<w:pgBorders")).toBeLessThan(once.indexOf("<w:lnNumType"));
     expect(once.indexOf("<w:lnNumType")).toBeLessThan(once.indexOf("<w:cols"));
+    expect(twice).toBe(once);
+  });
+
+  it("writes a landscape page with the long side in w:w and orient=landscape", async () => {
+    // 用户在页面设置里选"横向"，画布的宽就是长边；存盘时必须把长边写进 `w:w`，
+    // 反过来写（旧实现按 orient 交换）会让 Word 显示"横向 + 竖版尺寸"，打印时整页被转倒。
+    const { once } = await saveTwice(["正文"], {
+      applyPageSetup: true,
+      sectPr: `<w:pgSz w:w="11906" w:h="16838"/>`,
+      editSection: (s) => ({ ...s, pageWidth: 16838 / 15, pageHeight: 11906 / 15 }),
+    });
+    expect(once).toContain('<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/>');
+  });
+
+  it("keeps a Word-authored landscape section byte-identical across re-saves", async () => {
+    const { once, twice } = await saveTwice(["正文"], {
+      applyPageSetup: true,
+      sectPr: `<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>`,
+    });
+    expect(once).toContain('<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>');
     expect(twice).toBe(once);
   });
 

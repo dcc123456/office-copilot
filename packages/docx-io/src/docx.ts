@@ -1167,10 +1167,11 @@ function readSectionGeometry(body: Element): SectionGeometry {
     pgMar?.attributes?.["w:footer"] as string | undefined,
     DEFAULT_MARGINS.footer,
   );
-  // Orientation swaps width/height for landscape.
-  const orient = pgSz?.attributes?.["w:orient"] as string | undefined;
-  const pageWidth = (orient === "landscape" ? h : w) * TWIP_TO_PX;
-  const pageHeight = (orient === "landscape" ? w : h) * TWIP_TO_PX;
+  // `w:orient` 只是"这页按横向排"的标记，页面尺寸仍以 `w:w`/`w:h` 为准：Word 存横向
+  // Letter 时写的就是 w=15840 h=12240（长边在 w）。所以读的时候不做任何交换，
+  // 谁大谁就是宽——按 orient 反着换会把 Word 的横向文档读成竖版形状。
+  const pageWidth = w * TWIP_TO_PX;
+  const pageHeight = h * TWIP_TO_PX;
   const ml = marginLeft * TWIP_TO_PX;
   const mr = marginRight * TWIP_TO_PX;
   const mt = marginTop * TWIP_TO_PX;
@@ -1461,14 +1462,11 @@ function buildSectPr(
   existing: Element | null,
   g: SectionGeometry,
 ): Element {
+  // 与 Word 一致：`w:w` 装的就是页面上看到的宽（横向时是长边），`w:orient` 只是标记。
   const orient: "portrait" | "landscape" =
     g.pageWidth > g.pageHeight ? "landscape" : "portrait";
-  const wTw = PX_TO_TWIP(
-    orient === "landscape" ? g.pageHeight : g.pageWidth,
-  );
-  const hTw = PX_TO_TWIP(
-    orient === "landscape" ? g.pageWidth : g.pageHeight,
-  );
+  const wTw = PX_TO_TWIP(g.pageWidth);
+  const hTw = PX_TO_TWIP(g.pageHeight);
   const pgSzAttrs: Record<string, string> = {
     "w:w": String(wTw),
     "w:h": String(hTw),
