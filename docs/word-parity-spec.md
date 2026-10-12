@@ -789,7 +789,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 ③ 页面边框 + 行号（`587a9c9` `96afc34`）；④ 首字下沉（`2cfe911` `d30939a`）；
 ⑤ 水印（`2044594` 数据层 + `1a44229` 桌面入口）；
 ⑥ 你实测"水印与分栏不可用"后的可用性修复（`d079287` 画布+PDF 画水印、`177f21b` 导出不再截成 1 页，
-判据与实测见 §8.13）。
+判据与实测见 §8.13）；⑦ 横向宽高约定按 Word 的写法改正 + 其余档位实跑（`57bcccd`，见 §8.14）。
 
 > ①的判据与实测（`bba064e`）：⑤.1 期间探针看到的"**打开后直接保存，`<w:sectPr>` 整块消失**"
 > 根因不在读侧丢弃，而在 `buildSectPr`：它用 `{ ...existing }` 复制解析出来的节点，而
@@ -1418,6 +1418,44 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
   与 PDF/Word 行为不一致，要改成真重排得换掉分页架构；③ 桌面原地保存仍没有 `.bak`（AGENTS §8
   安全红线第 4 条，仍等你决定）。
 - 提交：`d079287` + `177f21b` 已推送，`git ls-remote origin main` 分别与两者一致。
+
+### 8.14 排名 7 可用性修复 ②（页面设置其余档位实跑 + 横向宽高约定）验收记录（`57bcccd`）
+
+§8.13 修完水印与导出后，把页面设置剩下的档位一次跑完（`tmp/ps-audit-probe.mjs`，独立
+`--user-data-dir` + CDP 起真实 app，跑的是你那份文档的副本 `tmp/ps-audit.docx`），
+顺带挖出一个**方向**上的真 bug。
+
+- 实测数字（每一档都看三件事：改完画布动不动、重开对话框回显、存盘 XML）：
+  纸张 Letter + 方向横向 + 四边距(上2/下2/左4/右3cm) + 页眉页脚距边 1.2cm + 行号(每 2 行/起始 7/距正文 0.8cm)
+  → 画布 `.page-card-real` 从 `793.733 × 1122.53px` 变成 `1056 × 816px`，
+  编辑器宽度 553.727 → 791.398px，`--oc-margin-top` 96 → 75.6px、`--oc-margin-left` 120 → 151.2px、
+  `--oc-header/--oc-footer` 56.73/66.13 → 45.4/45.4px（全部等于 cm×96/2.54，没有第二处换算，§2.1）；
+  重开对话框回显 `Letter`、"横向"是 active、六项边距与行号四项逐字对得上（2/2/4/3/1.2/1.2、勾选/2/7/0.8）；
+  存盘 `<w:pgMar w:top="1134" w:right="1701" w:bottom="1134" w:left="2268" w:header="681" w:footer="681">`
+  （2cm=1134twips、3cm=1701、4cm=2268、1.2cm=681 ✓）、`<w:lnNumType w:countBy="2" w:distance="453" w:start="7"/>`
+  ✓；正文 195 段 5440 字一字不缺；控制台 0 条 error；截图 `tmp/ps-audit-canvas.png`。
+- **行号仍然是唯一"勾了看不到"的一项**：画布上 `[class*=line-num]` 0 个，PDF 里也没有——
+  与 §8.13 里水印修复前同一状态。这一项要不要做预览、做到哪一步（只画布 / 画布+PDF），等你定；
+  §8.7 当初的取舍是"逐行编号会把 `PagedLayout` 的分页测量打乱"，理由仍然成立。
+- 方向的真 bug（`57bcccd`）：`buildSectPr` 与 `readSection` 按 `w:orient` **交换**宽高，
+  也就是横向页写出 `w:w=12240 w:h=15840`（短边在 w）。微软官方
+  [How to: Change the print orientation](https://learn.microsoft.com/office/open-xml/word/how-to-change-the-print-orientation-of-a-word-processing-document)
+  明说"改方向不够，还必须交换宽高"——Word 自己存横向 Letter 是 `w:w="15840" w:h="12240" w:orient="landscape"`。
+  两头都错：我们存的横向文档在 Word 里是"横向标记 + 竖版尺寸"（打印按纸张方向转一次，正文会歪/超出），
+  而 **Word 存的横向文档在我们这里被读成竖版形状**。改法是进出口都不交换，`w:w` 就是屏幕上看到的宽，
+  `w:orient` 只当标记（`pageWidth > pageHeight` 推出来）。
+- 判据与实测：`tmp/ps-orient-probe.mjs` 真实 app 跑两遍（第二遍是**关掉重开**同一份文件）——
+  选 Letter + 横向 → 画布 `1056 × 816px`（编辑器 815.6px）→ 存盘
+  `<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>` → 重开画布仍是 `1056 × 816px`。
+  读写约定自此自洽，且与 Word 一致。
+- 为什么以前没暴露：方向此前**零测试覆盖**（`grep -l landscape packages/docx-io/src/*.test.ts` 空）。
+  补 3 条：读 Word 的横向页必须得到宽页、存横向时长边写进 `w:w`、横向文档二次保存字节一致。
+- 类型 + 测试：`pnpm build` EXIT=0（`grep -c "error TS"` = 0）；`pnpm test` EXIT=0，逐包
+  docx-io **293 → 296**（8 个文件）/ desktop 398（34 个文件）/ word-client 8 / word-tools 6 / server 2；
+  `apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
+- Word 实测：`[!] BLOCKED`（同 §8.12）。宽高约定是**官方文档 + 与 Word 产出样例的一致比对**，
+  不是亲眼看到 Word 渲染；`w:pgMar`/`w:lnNumType` 的 twips 数值是浏览器实跑 + 单位换算核对。
+- 提交：`57bcccd` 已推送，`git ls-remote origin main` = `57bcccd`。
 
 ## 附录 A：现状盘点（`path:line` 为证）
 
