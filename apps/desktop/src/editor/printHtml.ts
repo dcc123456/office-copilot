@@ -9,11 +9,18 @@
  * crisp PDFs without relying on our measurement.
  */
 
-import type { LinkStyle, SectionPageBorders } from "@office-copilot/docx-io";
+import type {
+  LinkStyle,
+  SectionPageBorders,
+  SectionWatermark,
+} from "@office-copilot/docx-io";
 import { borderLinesFor, borderSideToCss } from "./pageBorders.js";
+import { watermarkLayerFor } from "./pageWatermark.js";
+import { escapeHtml } from "./renderHeaderFooter.js";
 // 首字下沉那条 ::first-letter 规则只有全局一份才不会出现两份实现（§3.2）：纸上直接引
 // 画布用的同一份样式文本，而不是再抄一遍 initial-letter。
 import dropCapCss from "../styles/dropCap.css?raw";
+import pageWatermarkCss from "../styles/pageWatermark.css?raw";
 
 export function buildPrintHtml(opts: {
   bodyHtml: string;
@@ -37,6 +44,10 @@ export function buildPrintHtml(opts: {
    * 纸上什么都不画，和 Word 一致。
    */
   pageBorders?: SectionPageBorders | null;
+  /**
+   * 水印（存在页眉里的那个文字艺术形状）。null 或没设过时纸上什么都不画。
+   */
+  watermark?: SectionWatermark | null;
   link?: LinkStyle | null;
 }): string {
   const {
@@ -53,6 +64,7 @@ export function buildPrintHtml(opts: {
     footerPx,
     columns,
     pageBorders,
+    watermark,
     link,
   } = opts;
 
@@ -89,6 +101,27 @@ export function buildPrintHtml(opts: {
           return `<div class="pgb" style="left: ${px(line.x)}px; top: ${px(line.y)}px; ${box}"></div>`;
         })
         .join("")
+    : "";
+
+  // 水印：Word 把它放在页眉里，所以每一页都有一份。纸上靠 `position: fixed` 达到同样的
+  // 效果——Chromium 打印时固定元素每页重画一次。几何与画布共用 watermarkLayerFor。
+  const layer = watermark
+    ? watermarkLayerFor(watermark, {
+        pageWidth: pageWidthPx,
+        pageHeight: pageHeightPx,
+        marginTop: marginTopPx,
+        marginRight: marginRightPx,
+        marginBottom: marginBottomPx,
+        marginLeft: marginLeftPx,
+      })
+    : null;
+  const watermarkHtml = layer
+    ? `<div class="oc-page-watermark" style="left: ${px(layer.leftPx)}px; ` +
+      `top: ${px(layer.topPx)}px; width: ${px(layer.widthPx)}px; ` +
+      `height: ${px(layer.heightPx)}px; font-size: ${px(layer.fontSizePx)}px; ` +
+      `font-family: ${layer.fontFamily}; color: ${layer.color}; ` +
+      `opacity: ${layer.opacity}; transform: rotate(${layer.rotateDeg}deg);">` +
+      `${escapeHtml(layer.text)}</div>`
     : "";
 
   // Reuse the editor's stylesheet? We inline a minimal stylesheet that
@@ -137,6 +170,9 @@ export function buildPrintHtml(opts: {
     }
     /* The page-gap widgets from our editor shouldn't appear on paper. */
     .oc-page-gap { display: none !important; }
+    ${pageWatermarkCss}
+    /* 纸上的水印每页都要有一份（Word 是放在页眉里的），固定元素在 Chromium 打印时逐页重画。 */
+    .oc-page-watermark { position: fixed; }
     ${dropCapCss}
   `;
 
@@ -149,6 +185,7 @@ export function buildPrintHtml(opts: {
     <div class="ProseMirror">${bodyHtml}</div>
     ${footerHtml ? `<div class="pf">${footerHtml}</div>` : ""}
     ${borderHtml}
+    ${watermarkHtml}
   </section>
 </body></html>`;
 }

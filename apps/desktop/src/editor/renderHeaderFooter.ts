@@ -93,7 +93,8 @@ function markStyle(marks: PMMark[]): string {
   return parts.join(";");
 }
 
-function escapeHtml(s: string): string {
+/** 把用户写的文字变成 HTML 文本节点安全的串（页眉页脚与水印都往纸上拼字符串）。 */
+export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")

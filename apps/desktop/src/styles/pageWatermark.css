@@ -1,0 +1,14 @@
+/* 页面水印：Word 把它画成页眉里一个居中于页边距的文字艺术形状。编辑视图与
+   打印/PDF 共用这一份，位置/字号/旋转由 pageWatermark.ts 算好后写进内联样式。 */
+.oc-page-watermark {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  line-height: 1;
+  /* 水印在纸面之下、正文之下：既不能挡住点击，也不该盖住字。 */
+  pointer-events: none;
+  user-select: none;
+  z-index: 1;
+}

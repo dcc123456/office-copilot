@@ -478,6 +478,7 @@ export function App() {
         ? { count: section.columns.count, gapPx: section.columns.gap }
         : null,
       pageBorders: section?.pageBorders ?? null,
+      watermark: section?.watermark ?? null,
       link: linkStyle,
     });
     const defaultName = filePath

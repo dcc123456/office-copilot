@@ -65,6 +65,44 @@ describe("打印 / PDF 导出的页面边框", () => {
   });
 });
 
+describe("打印 / PDF 导出的水印", () => {
+  const watermark = {
+    text: "机密",
+    font: "宋体",
+    sizePt: null,
+    color: "#c0c0c0",
+    semiTransparent: true,
+    layout: "diagonal",
+  } as const;
+
+  it("纸上画一个固定定位的水印，几何与画布共用同一份换算", () => {
+    const html = buildPrintHtml({ ...base, watermark });
+    expect(html).toContain(
+      '<div class="oc-page-watermark" style="left: 85px; top: 483.5px; width: 624px; ' +
+        'height: 156px; font-size: 156px; font-family: "宋体"; color: #c0c0c0; ' +
+        'opacity: 0.5; transform: rotate(-45deg);">机密</div>',
+    );
+    // Word 的水印在页眉里，所以每页一份；纸上靠固定定位让 Chromium 逐页重画。
+    expect(html).toContain(".oc-page-watermark { position: fixed; }");
+  });
+
+  it("没设水印时不画盒子", () => {
+    expect(buildPrintHtml(base)).not.toContain('<div class="oc-page-watermark"');
+    expect(buildPrintHtml({ ...base, watermark: null })).not.toContain(
+      '<div class="oc-page-watermark"',
+    );
+  });
+
+  it("水印文字里的尖括号不会逃出文本节点", () => {
+    const html = buildPrintHtml({
+      ...base,
+      watermark: { ...watermark, text: "<img src=x>" },
+    });
+    expect(html).toContain("&lt;img src=x&gt;</div>");
+    expect(html).not.toContain("<img src=x></div>");
+  });
+});
+
 describe("打印 / PDF 导出的首字下沉", () => {
   it("纸上是画布那一条 ::first-letter 规则，不是第二份实现", () => {
     const html = buildPrintHtml(base);

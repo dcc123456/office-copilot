@@ -5,9 +5,11 @@ import type { SectionGeometry } from "@office-copilot/docx-io";
 import { HeaderFooterEditor } from "../editor/extensions/HeaderFooterEditor.js";
 import { renderHeaderFooterHtml } from "../editor/renderHeaderFooter.js";
 import { borderLinesFor, borderSideToCss } from "../editor/pageBorders.js";
+import { watermarkLayerFor } from "../editor/pageWatermark.js";
 import { useUiStore } from "../uiStore.js";
 import "../styles/pageColumns.css";
 import "../styles/pageBorders.css";
+import "../styles/pageWatermark.css";
 import "../styles/dropCap.css";
 
 /**
@@ -110,6 +112,16 @@ export function PageChrome({
    */
   const borderLines = useMemo(
     () => (g.pageBorders ? borderLinesFor(g.pageBorders, g) : []),
+    [g],
+  );
+
+  /**
+   * 水印在每一页上的那个文字盒子。Word 把它存在页眉部件里，画布上此前什么都不画，
+   * 所以用户勾完"启用水印"看不到任何变化。这里按同一份形状几何（居中于页边距、
+   * 468pt × 117pt、对角 -45°）画一层不可点的底纹，与打印输出共用一个实现。
+   */
+  const watermarkLayer = useMemo(
+    () => (g.watermark ? watermarkLayerFor(g.watermark, g) : null),
     [g],
   );
 
@@ -354,6 +366,30 @@ export function PageChrome({
                 }}
               />
             ))}
+            {/* 水印：每页一份，压在纸面上、正文下（.oc-page-watermark 的 z-index 比编辑器低）。 */}
+            {watermarkLayer &&
+              pages.map((p) => (
+                <div
+                  key={`wm-${p.i}`}
+                  className="oc-page-watermark"
+                  aria-hidden="true"
+                  style={
+                    {
+                      left: watermarkLayer.leftPx,
+                      top: p.y + watermarkLayer.topPx,
+                      width: watermarkLayer.widthPx,
+                      height: watermarkLayer.heightPx,
+                      fontSize: `${watermarkLayer.fontSizePx}px`,
+                      fontFamily: watermarkLayer.fontFamily,
+                      color: watermarkLayer.color,
+                      opacity: watermarkLayer.opacity,
+                      transform: `rotate(${watermarkLayer.rotateDeg}deg)`,
+                    } as CSSProperties
+                  }
+                >
+                  {watermarkLayer.text}
+                </div>
+              ))}
             {/* 分栏导引线：每页一组，位置见 columnGuides。 */}
             {columnGuides.map((offset, boundary) =>
               pages.map((p) => (
