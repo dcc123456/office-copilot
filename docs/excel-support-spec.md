@@ -390,6 +390,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
     **实测**：`geometry.ts`（px/chars/pt 单位都写进注释）、`sheetGridModel.ts`、`sheetHandlers.ts`、`SheetView.tsx` 逐函数自查过；失败语义写明"配不上 `partPath` 就整批不写""没有底包就回可读消息"。
 23. `[x]` 无孤儿文件、无注释掉的代码块、无未被调用的导出。
     **实测**：`sheet:open` 通道与 `openSheetFile`（preload + `global.d.ts`）在"打开对话框同时接受两种文件、只回路径"改造后成了死代码，随即删掉；探针产物（`apps/desktop/tmp/sheet-probe.*`、`tmp/sheet-scale.mjs`）不入库。
+    **阶段 3 补记**：`sheetGridModel.ts` 里被 op 层替换掉的 `withCellText`/`withColumnWidth` 连同它们的 5 条单测一起删（语义在 `sheet-io` 那边逐条重钉，不留第二份实现，§3.2/§3.5）；
+    `index.ts` 的表格 op 公开面从 12 个导出收到 4 个函数 + `SheetCoreOp`/`SheetOpsResult` 两个类型，其余成员类型都能从这两个结果类型上取到，没人 import 就不摆着。
 
 ### E. 测试与门禁（对应 `AGENTS.md` §7）
 

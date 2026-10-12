@@ -67,12 +67,6 @@ export {
   runSheetOps,
   setCellTextOp,
   setColumnWidthOp,
-  type SetCellValueOp,
-  type SetColumnWidthOp,
-  type SheetAxis,
-  type SheetCellTarget,
   type SheetCoreOp,
   type SheetOpsResult,
-  type SheetSkippedOp,
-  type SheetTrackAddress,
 } from "./sheet-edit.js";
