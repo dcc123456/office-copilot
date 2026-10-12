@@ -19,6 +19,31 @@ export interface AppSettings {
   authorName?: string;
 }
 
+/** 会话里的一轮文字（用户输入或 AI 回复），续聊时按顺序回填给模型。 */
+export interface SessionTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
+/** 会话列表上的一行，结构见 electron/sessionStore.ts 的 SessionSummary。 */
+export interface SessionSummary {
+  id: string;
+  title: string;
+  /** 最后一次改动的时间戳（毫秒）。 */
+  updatedAt: number;
+  /** 会话里的轮数。 */
+  turnCount: number;
+}
+
+/** 磁盘上的完整会话，结构见 electron/sessionStore.ts 的 SessionRecord。 */
+export interface SessionRecord {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  turns: SessionTurn[];
+}
+
 interface OfficeCopilotAPI {
   newFile: () => Promise<unknown>;
   openFile: () => Promise<{
@@ -96,6 +121,8 @@ interface OfficeCopilotAPI {
     instruction?: string;
     system?: string;
     providerId?: string;
+    /** 续聊时带上的历史轮次，主进程截到最近若干轮再上送。 */
+    history?: SessionTurn[];
   }) => Promise<{ ok: true; text: string } | { ok: false; message: string; needsSetup?: boolean }>;
   aiStreamStart: (payload: {
     requestId: string;
@@ -104,6 +131,7 @@ interface OfficeCopilotAPI {
     instruction?: string;
     system?: string;
     providerId?: string;
+    history?: SessionTurn[];
   }) => Promise<{ ok: true } | { ok: false; message: string; needsSetup?: boolean }>;
   aiStreamCancel: (requestId: string) => Promise<{ ok: true }>;
   onAIStream: (
@@ -145,6 +173,17 @@ interface OfficeCopilotAPI {
     patch: Record<string, unknown>;
   }) => Promise<{ ok: boolean; message?: string }>;
   removeModification: (payload: { docKey: string; id?: string }) => Promise<{ ok: boolean }>;
+  /** 会话历史列表（userData/sessions 下的文件，按更新时间从新到旧）。 */
+  listSessions: () => Promise<SessionSummary[]>;
+  /** 读一个会话的完整正文；id 不合法或文件不在时返回 null。 */
+  readSession: (id: string) => Promise<SessionRecord | null>;
+  /** 覆盖保存一个会话（不存在就新建）；内容为空时返回 ok:false。 */
+  saveSession: (payload: {
+    id: string;
+    title?: string;
+    turns?: SessionTurn[];
+  }) => Promise<{ ok: boolean; message?: string }>;
+  removeSession: (id: string) => Promise<{ ok: boolean }>;
   printToPdf: (
     html: string,
     defaultName?: string,

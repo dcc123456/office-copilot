@@ -5,6 +5,7 @@ import { registerAIHandlers } from "./aiHandlers.js";
 import { registerSettingsHandlers } from "./settingsStore.js";
 import { registerSnapshotHandlers } from "./snapshotStore.js";
 import { registerModlogHandlers } from "./modlog.js";
+import { registerSessionStoreHandlers } from "./sessionStore.js";
 import { registerPrintHandlers } from "./printHandlers.js";
 import { makeRecentFiles, registerRecentHandlers } from "./recentFiles.js";
 
@@ -283,6 +284,7 @@ app.whenReady().then(async () => {
   registerSettingsHandlers(ipcMain);
   registerSnapshotHandlers(ipcMain);
   registerModlogHandlers(ipcMain);
+  registerSessionStoreHandlers(ipcMain);
   registerPrintHandlers(ipcMain);
   registerRecentHandlers(ipcMain, recent, () => mainWindow, rebuildMenu);
 

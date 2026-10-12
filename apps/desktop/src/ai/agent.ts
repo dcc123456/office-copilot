@@ -16,6 +16,7 @@ import {
 import { describeCoreOp } from "./docEdit.js";
 import { diagramResolverFor } from "./diagramCanvas.js";
 import { blocksOf, executeOps, locateAll } from "../editor/docBlocks.js";
+import type { SessionTurn } from "../global.js";
 
 /**
  * The document-editing agent: ask the model for a JSON edit plan, validate it
@@ -364,6 +365,7 @@ function decodeJsonString(frag: string): string {
  * @param opts.instruction 拼在原文前面的一段说明，选区改写用。
  * @param opts.providerId 指定服务商；留空用当前生效的那个。
  * @param opts.requestId 本次请求 id，用于把增量认回正确的界面卡片，也让「停止」能取消。
+ * @param opts.history 这个会话里已经发生过的轮次，续聊时接上文用（主进程只取最近若干轮）。
  * @param opts.onDelta 每段增量到达时调用（按收到的顺序）。
  * @returns 收完时 `{ stopped: false }`；被「停止」打断时 `{ stopped: true }`（已收到的增量照常留在调用方）；
  *   配置缺失、网络失败、超时都 reject。
@@ -375,6 +377,7 @@ export function aiStreamTransform(opts: {
   instruction?: string;
   providerId?: string | null;
   requestId: string;
+  history?: SessionTurn[];
   onDelta: (chunk: string) => void;
 }): Promise<{ stopped: boolean }> {
   return new Promise((resolve, reject) => {
@@ -402,6 +405,7 @@ export function aiStreamTransform(opts: {
         instruction: opts.instruction,
         system: opts.system,
         providerId: opts.providerId ?? undefined,
+        history: opts.history,
       })
       .then((r) => {
         if (!r.ok) {

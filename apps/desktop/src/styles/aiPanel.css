@@ -49,3 +49,110 @@
     opacity: 0;
   }
 }
+/* 会话历史：挂在面板头部的浮层，用视口坐标浮在面板外（AGENTS §5.5）。 */
+.ai-session-wrap {
+  display: inline-flex;
+  align-items: center;
+}
+/* 面板拖到最窄时先让标题省略，别把头部按钮挤出 overflow: hidden 的边界。 */
+.ai-panel header > span.ai-header-title {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ai-session-pop {
+  /* 视口坐标由 useAnchoredMenu 给：面板有 overflow: hidden，absolute 会被裁掉。 */
+  position: fixed;
+  z-index: 41;
+  width: 250px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow-2);
+}
+/* 标题行钉在滚动区顶部：会话多了也够得着「新建会话」。 */
+.ai-session-head {
+  position: sticky;
+  top: -6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 2px -2px 6px;
+  padding: 2px 6px;
+  background: var(--bg-raised);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.ai-session-new {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.ai-session-new:hover:not(:disabled) {
+  background: var(--accent-tint);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.ai-session-new:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ai-session-empty {
+  padding: 6px 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.ai-session-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  border-radius: var(--radius-s);
+}
+.ai-session-row:hover {
+  background: var(--bg-muted);
+}
+.ai-session-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ai-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.ai-session-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.ai-session-del {
+  align-self: center;
+  opacity: 0;
+}
+.ai-session-row:hover .ai-session-del {
+  opacity: 1;
+}

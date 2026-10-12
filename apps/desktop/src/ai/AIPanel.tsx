@@ -19,6 +19,9 @@ import {
   Workflow,
   SpellCheck,
   MessageSquare,
+  MessageSquarePlus,
+  MessagesSquare,
+  Trash2,
   Zap,
   Play,
 } from "lucide-react";
@@ -46,7 +49,15 @@ import {
   streamedSummary,
 } from "./agent.js";
 import { toast } from "../components/ui/Toast.js";
-import type { AppSettings, ProviderConfig } from "../global.js";
+import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
+import type { AppSettings, ProviderConfig, SessionSummary, SessionTurn } from "../global.js";
+import {
+  listSessions,
+  newSessionId,
+  openSession,
+  removeSession,
+  saveSession,
+} from "./sessions.js";
 import "../styles/aiPanel.css";
 
 /* ------------------------------------------------------------------ */
@@ -105,6 +116,67 @@ type Item =
   | { id: string; t: "rewrite"; label: string; card: RewriteCard };
 
 const uid = () => crypto.randomUUID();
+
+/** 每个新会话开头的那句引导语：不进会话正文，存盘时要跳过。 */
+const WELCOME_ID = "welcome";
+
+const WELCOME_ITEM: Item = {
+  id: WELCOME_ID,
+  t: "msg",
+  role: "assistant",
+  text:
+    "选中文字后点快捷按钮就改那几段，不选中就是改整篇；也可以直接写下你的要求（比如「把第三节改成表格」「全文纠正错别字」）。默认是「半自动」：我先给 diff 预览，你确认后才写入文档；「全自动」直接改文档，「聊天」只给建议。每次改动都能在修改历史里看 diff 并单独撤销。",
+};
+
+/** 会话历史浮层宽度（px），须与 `styles/aiPanel.css` 的 `.ai-session-pop` 一致。 */
+const SESSION_POP_WIDTH = 250;
+
+/**
+ * 把面板上的一串会话记录折成"存盘的轮次"——会话历史只存文字，卡片存不下也不该存。
+ *
+ * 卡片按它当时的状态折成一句 assistant 的话：重开这个会话时看得懂当时发生了什么，
+ * 但不会给一张点了会改坏当前文档的旧卡片（文档早就变了）。
+ *
+ * @param items 面板线程里的全部条目。
+ * @returns 可持久化的轮次；引导语、还在流式的气泡和空文字都不算。
+ */
+function turnsOfItems(items: readonly Item[]): SessionTurn[] {
+  const turns: SessionTurn[] = [];
+  for (const it of items) {
+    if (it.id === WELCOME_ID) continue;
+    if (it.t === "msg") {
+      if (it.pending || !it.text.trim()) continue;
+      turns.push({ role: it.role, text: it.text });
+      continue;
+    }
+    if (it.t === "plan") {
+      const c = it.card;
+      if (c.status === "streaming") continue;
+      const result =
+        c.status === "applied"
+          ? "已写入文档"
+          : c.status === "dismissed"
+            ? "用户放弃了这个方案"
+            : c.status === "failed"
+              ? `未写入（${c.stopped ? "已暂停" : c.message ?? "失败"}）`
+              : `${c.ops.length} 处改动待确认`;
+      turns.push({ role: "assistant", text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}` });
+      continue;
+    }
+    const c = it.card;
+    if (c.status === "streaming") continue;
+    const result =
+      c.status === "applied"
+        ? "已写入文档"
+        : c.status === "dismissed"
+          ? "用户放弃了这次改写"
+          : c.status === "failed"
+            ? `未写入（${c.stopped ? "已暂停" : c.message ?? "失败"}）`
+            : "改写结果待确认";
+    turns.push({ role: "assistant", text: `【${it.label}】${result}\n${c.rewritten}` });
+  }
+  return turns;
+}
 
 const QUICK_ACTIONS = [
   { label: "扩写", action: "扩写" },
@@ -181,15 +253,7 @@ export function AIPanel({
   onOpenHistory?: () => void;
   onChanged: () => void;
 }) {
-  const [items, setItems] = useState<Item[]>([
-    {
-      id: "welcome",
-      t: "msg",
-      role: "assistant",
-      text:
-        "选中文字后点快捷按钮就改那几段，不选中就是改整篇；也可以直接写下你的要求（比如「把第三节改成表格」「全文纠正错别字」）。默认是「半自动」：我先给 diff 预览，你确认后才写入文档；「全自动」直接改文档，「聊天」只给建议。每次改动都能在修改历史里看 diff 并单独撤销。",
-    },
-  ]);
+  const [items, setItems] = useState<Item[]>([WELCOME_ITEM]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AiMode>("semi");
   const modeRef = useRef<AiMode>("semi");
@@ -202,9 +266,24 @@ export function AIPanel({
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  /** 会话历史浮层：面板有 `overflow: hidden`，只能用视口坐标挂浮层（AGENTS §5.5）。 */
+  const {
+    anchorRef: sessionsAnchorRef,
+    rect: sessionsRect,
+    open: sessionsOpen,
+    toggle: toggleSessionsMenu,
+    hide: hideSessionsMenu,
+  } = useAnchoredMenu(SESSION_POP_WIDTH, "right");
   const listRef = useRef<HTMLDivElement>(null);
   const activeRequestRef = useRef<string | null>(null);
   const busyRef = useRef(false);
+  /** 当前会话的编号，同时是 userData/sessions 下的文件名。 */
+  const sessionIdRef = useRef<string>(newSessionId());
+  /** 最近一次存盘的会话内容：一样就不重复写盘，免得效果循环。 */
+  const savedTurnsRef = useRef<string>("[]");
+  /** `items` 的镜像：发请求要接上文、按条目 id 排除自己，闭包里的 items 都是旧的。 */
+  const itemsRef = useRef<Item[]>(items);
 
   const setBusyBoth = useCallback((v: boolean) => {
     busyRef.current = v;
@@ -225,6 +304,26 @@ export function AIPanel({
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [items]);
+
+  /** `items` 的镜像：发请求时要接上文、按条目 id 排除自己，闭包里的 `items` 是旧的。 */
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  /**
+   * 会话内容一变就落盘（去抖 600ms）：切会话、关窗口都不丢，
+   * 又不会每来一个字就写一次文件。与磁盘上那份一致时直接跳过，避免自己触发自己。
+   */
+  useEffect(() => {
+    const turns = turnsOfItems(items);
+    const snapshot = JSON.stringify(turns);
+    if (!turns.length || snapshot === savedTurnsRef.current) return;
+    const timer = setTimeout(() => {
+      savedTurnsRef.current = snapshot;
+      void saveSession({ id: sessionIdRef.current, turns });
+    }, 600);
+    return () => clearTimeout(timer);
   }, [items]);
 
   const setModeBoth = useCallback((next: AiMode) => {
@@ -251,6 +350,59 @@ export function AIPanel({
     (text: string) => push({ id: uid(), t: "msg", role: "assistant", text }),
     [push],
   );
+
+  /** 拉开会话列表时现读一次盘：省掉开面板就去撞磁盘的开销。 */
+  const toggleSessions = useCallback(() => {
+    toggleSessionsMenu();
+    void listSessions().then(setSessions);
+  }, [toggleSessionsMenu]);
+
+  /**
+   * 起一个新会话：当前这份先存好，线程清回引导语。
+   *
+   * 正在流式输出时不给点（`busy`），否则半截内容会存成上一个会话的尾巴。
+   */
+  const startSession = useCallback(async () => {
+    if (busyRef.current) return;
+    const turns = turnsOfItems(items);
+    if (turns.length) await saveSession({ id: sessionIdRef.current, turns });
+    sessionIdRef.current = newSessionId();
+    savedTurnsRef.current = "[]";
+    setItems([WELCOME_ITEM]);
+    setSessions(await listSessions());
+  }, [items]);
+
+  /**
+   * 打开历史里的某个会话，接着聊。
+   *
+   * @param id 会话编号。
+   */
+  const loadSession = useCallback(async (id: string) => {
+    if (busyRef.current) return;
+    const record = await openSession(id);
+    if (!record) {
+      note("这个会话已经不在了，列表刷新一下。");
+      setSessions(await listSessions());
+      return;
+    }
+    sessionIdRef.current = record.id;
+    savedTurnsRef.current = JSON.stringify(record.turns);
+    setItems(
+      record.turns.map<Item>((t) => ({ id: uid(), t: "msg", role: t.role, text: t.text })),
+    );
+    hideSessionsMenu();
+  }, [note, hideSessionsMenu]);
+
+  /** 删掉一个历史会话；删的正是当前会话时就另起一份新的。 */
+  const dropSession = useCallback(async (id: string) => {
+    await removeSession(id);
+    if (id === sessionIdRef.current) {
+      sessionIdRef.current = newSessionId();
+      savedTurnsRef.current = "[]";
+      setItems([WELCOME_ITEM]);
+    }
+    setSessions(await listSessions());
+  }, []);
 
   const selectionText = useCallback(() => {
     const { from, to } = editor.state.selection;
@@ -691,12 +843,18 @@ export function AIPanel({
       const text = opts.partial
         ? `${opts.prompt}\n\n接着刚才写到的地方继续写完，不要重复已经写好的内容。已经写好的是：\n${opts.partial}`
         : opts.prompt;
+      // 接上文：把会话里已经说过的话按顺序送回模型。「继续」那半截已经在 `text` 里，
+      // 不能再作为历史重复一遍。上送多少轮由主进程截（AGENTS §2.9）。
+      const history = turnsOfItems(
+        opts.itemId ? itemsRef.current.filter((it) => it.id !== opts.itemId) : itemsRef.current,
+      );
       try {
         const { stopped } = await aiStreamTransform({
           action: "chat",
           text,
           providerId: activeProviderId,
           requestId,
+          history,
           onDelta: (chunk) => {
             acc += chunk;
             const shown = acc;
@@ -832,6 +990,69 @@ export function AIPanel({
       <aside className="ai-panel">
         <header>
           <span className="ai-header-title">AI 助手</span>
+          <div className="ai-session-wrap" ref={sessionsAnchorRef}>
+            <button
+              type="button"
+              className={"icon" + (sessionsOpen ? " open" : "")}
+              title="会话历史：新建会话、接着聊"
+              aria-expanded={sessionsOpen}
+              onClick={toggleSessions}
+            >
+              <MessagesSquare size={14} />
+            </button>
+            {sessionsOpen && sessionsRect && (
+              <>
+                <div className="ai-pop-overlay" onClick={hideSessionsMenu} />
+                <div
+                  className="ai-session-pop"
+                  style={{ left: sessionsRect.left, top: sessionsRect.top }}
+                >
+                  <div className="ai-session-head">
+                    <span>会话历史</span>
+                    <button
+                      type="button"
+                      className="ai-session-new"
+                      title="把当前这份存进历史，另起一个干净会话"
+                      disabled={busy}
+                      onClick={() => {
+                        hideSessionsMenu();
+                        void startSession();
+                      }}
+                    >
+                      <MessageSquarePlus size={12} />
+                      新建会话
+                    </button>
+                  </div>
+                  {!sessions.length && (
+                    <div className="ai-session-empty">还没有存过的会话。</div>
+                  )}
+                  {sessions.map((session) => (
+                    <div key={session.id} className="ai-session-row">
+                      <button
+                        type="button"
+                        className="ai-session-open"
+                        title="打开这个会话，接着聊"
+                        onClick={() => void loadSession(session.id)}
+                      >
+                        <span className="ai-session-title">{session.title}</span>
+                        <span className="ai-session-meta">
+                          {new Date(session.updatedAt).toLocaleString()} · {session.turnCount} 条
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="icon ai-session-del"
+                        title="删除这个会话"
+                        onClick={() => void dropSession(session.id)}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <button className="icon" title="修改历史" onClick={onOpenHistory}>
             <History size={14} />
           </button>

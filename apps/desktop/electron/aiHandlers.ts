@@ -9,7 +9,12 @@ interface TransformRequest {
   system?: string;
   /** Use a specific provider id (for switching from the UI); default uses the active one. */
   providerId?: string;
+  /** 续聊时带过来的历史轮次；上送前只保留最近 `HISTORY_TURNS` 轮（AGENTS §2.9）。 */
+  history?: Array<{ role: "user" | "assistant"; text: string }>;
 }
+
+/** 一次请求回填给模型的最近轮数：够接上文，又不至于把整段会话原文上送。 */
+const HISTORY_TURNS = 12;
 
 type StreamEvent =
   | { requestId: string; kind: "delta"; text: string }
@@ -39,7 +44,13 @@ const SYSTEM_BY_ACTION: Record<string, string> = {
   chat: "你是 Office Copilot 里的写作助手。回答简洁、中文，必要时分点。可以直接给出可粘贴到文档的成稿。",
 };
 
-function buildMessages(
+/**
+ * 组装发给模型的 messages：系统提示词 + 最近若干轮历史 + 本轮用户内容。
+ *
+ * @param req 渲染层送来的请求；`history` 是续聊带过来的历史轮次（最多取最近 12 轮，AGENTS §2.9）。
+ * @returns 按顺序排好的消息数组；无历史时就是「系统 + 本轮」两条。
+ */
+export function buildMessages(
   req: TransformRequest,
 ): Array<{ role: string; content: string }> {
   const system =
@@ -50,8 +61,14 @@ function buildMessages(
       : req.instruction
         ? `${req.instruction}\n\n原文：\n${req.text}`
         : req.text;
+  // 历史轮次夹在系统提示词与本轮之间：模型看得见上文，又不必重读整段会话。
+  const history = (req.history ?? []).slice(-HISTORY_TURNS).map((t) => ({
+    role: t.role,
+    content: t.text,
+  }));
   return [
     { role: "system", content: system },
+    ...history,
     { role: "user", content: userContent },
   ];
 }

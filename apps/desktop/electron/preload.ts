@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { SessionRecord, SessionSummary, SessionTurn } from "./sessionStore.js";
 
 interface AITransformPayload {
   action: string;
   text: string;
   instruction?: string;
   system?: string;
+  /** 已经发生过几轮的对话，续聊时按顺序回填给模型（主进程会截到最近若干轮）。 */
+  history?: SessionTurn[];
 }
 
 interface AIResult {
@@ -162,6 +165,18 @@ const api = {
     docKey: string;
     id?: string;
   }): Promise<{ ok: boolean }> => ipcRenderer.invoke("modlog:remove", payload),
+
+  // AI 会话历史：一个会话一个 JSON 文件，读写都在主进程（见 sessionStore.ts）。
+  listSessions: (): Promise<SessionSummary[]> => ipcRenderer.invoke("session:list"),
+  readSession: (id: string): Promise<SessionRecord | null> =>
+    ipcRenderer.invoke("session:read", id),
+  saveSession: (payload: {
+    id: string;
+    title?: string;
+    turns?: SessionTurn[];
+  }): Promise<{ ok: boolean; message?: string }> => ipcRenderer.invoke("session:save", payload),
+  removeSession: (id: string): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("session:remove", id),
 
   // Print / export PDF.
   printToPdf: (html: string, defaultName?: string) =>
