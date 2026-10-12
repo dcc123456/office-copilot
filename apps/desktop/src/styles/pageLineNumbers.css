@@ -1,0 +1,14 @@
+/* 行号：`w:lnNumType` 在编辑画布上的预览，住在正文左边的页边距里，不吃鼠标事件。 */
+.oc-line-number {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 4px;
+  font-size: 12px;
+  line-height: 1;
+  color: #8a8a8a;
+  pointer-events: none;
+  user-select: none;
+  z-index: 2;
+}

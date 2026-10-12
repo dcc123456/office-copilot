@@ -6,10 +6,17 @@ import { HeaderFooterEditor } from "../editor/extensions/HeaderFooterEditor.js";
 import { renderHeaderFooterHtml } from "../editor/renderHeaderFooter.js";
 import { borderLinesFor, borderSideToCss } from "../editor/pageBorders.js";
 import { watermarkLayerFor } from "../editor/pageWatermark.js";
+import {
+  lineNumberLabelsFor,
+  type LineNumberLabel,
+  type NumberedBlock,
+  type PageBand,
+} from "../editor/lineNumbers.js";
 import { useUiStore } from "../uiStore.js";
 import "../styles/pageColumns.css";
 import "../styles/pageBorders.css";
 import "../styles/pageWatermark.css";
+import "../styles/pageLineNumbers.css";
 import "../styles/dropCap.css";
 
 /**
@@ -124,6 +131,78 @@ export function PageChrome({
     () => (g.watermark ? watermarkLayerFor(g.watermark, g) : null),
     [g],
   );
+
+  /**
+   * 画布上的行号预览。Word 数的是**视觉行**，所以每次布局量一遍顶层块的高度，
+   * 按各块自己的行高拆成行（算法在 `editor/lineNumbers.ts`）。归页按行自己的位置
+   * 落在哪一页的纸面上算——段中分页时后半截的行属于下一页，号要重新从 `start` 数。
+   * `w:restart` 没有建模，按规范缺省每页重新数。
+   *
+   * 触发时机：几何变了、正文变了、分页计划变了（`oc:pagecount`）、块尺寸变了。
+   */
+  const [lineLabels, setLineLabels] = useState<LineNumberLabel[]>([]);
+  const lineNumberSettings = g.lineNumbers ?? null;
+  useEffect(() => {
+    if (!lineNumberSettings) {
+      setLineLabels([]);
+      return;
+    }
+    const measure = () => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      // 一律换算到 `.page-stage` 自己的坐标系：舞台带 zoom 的 transform，所以屏幕
+      // 差值要除掉缩放；除此之外不做任何"页高 × 页码"的算术——占位 spacer 的高度
+      // 由 PagedLayout 决定，自己再乘一遍就会错位（行号浮到页顶之上就是这么来的）。
+      const stageTop = stage.getBoundingClientRect().top;
+      const toStageY = (clientTop: number) => (clientTop - stageTop) / zoom;
+      // 每页纸面的范围与 `pages` 里卡片用的是同一个公式，号才贴得准页边界。
+      const bands: PageBand[] = Array.from({ length: pageCount }, (_, i) => {
+        const topPx = i * (g.pageHeight + PAGE_GAP);
+        return { topPx, bottomPx: topPx + g.pageHeight };
+      });
+      const blocks: NumberedBlock[] = [];
+      const push = (pos: number) => {
+        const raw = editor.view.nodeDOM(pos);
+        const el = (
+          raw?.nodeType === Node.ELEMENT_NODE ? raw : raw?.parentNode
+        ) as HTMLElement | null;
+        if (!el) return;
+        const cs = getComputedStyle(el);
+        const lineHeightPx =
+          parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 14) * 1.2;
+        const rect = el.getBoundingClientRect();
+        blocks.push({
+          topPx: toStageY(rect.top),
+          heightPx: rect.height / zoom,
+          lineHeightPx,
+        });
+      };
+      editor.state.doc.forEach((node, pos) => {
+        if (node.type.name === "bulletList" || node.type.name === "orderedList") {
+          node.forEach((item, inner) => push(pos + 1 + inner));
+        } else {
+          push(pos);
+        }
+      });
+      setLineLabels(lineNumberLabelsFor(blocks, bands, lineNumberSettings));
+    };
+    let frame = 0;
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+    schedule();
+    const ro = new ResizeObserver(schedule);
+    ro.observe(editorEl);
+    editorEl.addEventListener("oc:pagecount", schedule);
+    editor.on("update", schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+      editorEl.removeEventListener("oc:pagecount", schedule);
+      editor.off("update", schedule);
+    };
+  }, [editor, editorEl, lineNumberSettings, zoom, pageCount, g.pageHeight]);
 
   // Push page geometry into CSS variables for the PagedLayout plugin
   // and the editor styles to consume.
@@ -388,6 +467,25 @@ export function PageChrome({
                   }
                 >
                   {watermarkLayer.text}
+                </div>
+              ))}
+            {/* 行号：每页从起始号重新数，号右边缘距正文 `w:distance`。 */}
+            {lineNumberSettings &&
+              lineLabels.map((label) => (
+                <div
+                  key={`ln-${label.page}-${label.value}`}
+                  className="oc-line-number"
+                  aria-hidden="true"
+                  style={
+                    {
+                      left: 0,
+                      top: label.topPx,
+                      width: Math.max(24, g.marginLeft - lineNumberSettings.distance),
+                      height: label.lineHeightPx,
+                    } as CSSProperties
+                  }
+                >
+                  {label.value}
                 </div>
               ))}
             {/* 分栏导引线：每页一组，位置见 columnGuides。 */}
