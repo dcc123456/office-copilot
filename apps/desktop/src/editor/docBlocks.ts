@@ -6,6 +6,7 @@ import {
   CHAR_STYLE_KEYS,
   CHAR_STYLE_LABELS,
   matchesAddress,
+  normalise,
   PARAGRAPH_NUM_KEYS,
   type Address,
   type Anchor,
@@ -317,11 +318,6 @@ function locateAnchor(doc: PMNode, anchor: Anchor): Located | null {
     return all[all.length - 1] ?? null;
   }
   return locateAddress(doc, anchor.after);
-}
-
-/** Collapse newlines: one op rewrites one block, so block boundaries stay stable. */
-export function normalise(text: string): string {
-  return text.replace(/\s*\n\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
 }
 
 /**

@@ -644,6 +644,33 @@ function reindex(blocks: Block[]): void {
   });
 }
 
+/**
+ * 折叠空白：一块只装一行文字，所以换行落进文档前必然先变成空格。
+ *
+ * @param text 任意文字（模型写的、用户粘的、op 里带的）。
+ * @returns 去掉首尾空白、换行与连续空格并成单个空格的文字。
+ */
+export function normalise(text: string): string {
+  return text.replace(/\s*\n\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+/**
+ * 一段 `text` 落成文档里的哪几块——块模型与执行层唯一的切分口径。
+ *
+ * 模型常常把多章正文塞进一条 op 的 `text`（带换行），执行层只认"一条 op 写一块"，
+ * 所以多出来的行必须在这里就展开成多段；否则仿真存原文、落地存折叠后的文字，
+ * 两边一比就"与提案不一致"，整批写入被放弃（AGENTS §2.4）。
+ *
+ * @param text op 里的 `text`，可以含任意换行与空白。
+ * @returns 每段折叠后的非空文字；整条 `text` 没有正文时返回空数组。
+ */
+export function paragraphTexts(text: string): string[] {
+  return text
+    .split(/\n+/)
+    .map((s) => normalise(s))
+    .filter(Boolean);
+}
+
 function blockFromNew(nb: NewBlock): Block {
   if (nb.type === "table") {
     return {
@@ -661,7 +688,9 @@ function blockFromNew(nb: NewBlock): Block {
   return {
     index: 0,
     type: style.headingLevel ? "heading" : "paragraph",
-    text: nb.text,
+    // 带 json 的块（目录条目、题注）文字必须逐字等于建出来节点的 textContent，
+    // 折叠一下就会和真实文档对不上；只有引擎按文字建段时才走执行层那套归一化。
+    text: nb.json ? nb.text : normalise(nb.text),
     style: { ...style },
   };
 }
@@ -686,7 +715,7 @@ export function applyCore(blocks: Block[], op: CoreOp): ApplyResult {
       const b = blocks[i]!;
       if (!isTextual(b)) return { ok: false, reason: "该块不支持文字替换" };
       const beforeText = b.text;
-      blocks[i] = { ...b, text: op.text };
+      blocks[i] = { ...b, text: normalise(op.text) };
       const addr = addressOf(blocks, i)!;
       return { ok: true, inverse: { kind: "setText", addr, text: beforeText } };
     }
@@ -873,6 +902,28 @@ export function planEdit(blocks: Block[], proposal: Proposal, diagrams?: Diagram
   };
 }
 
+/**
+ * 多行正文展开成逐段插入——仿真与落地共用的唯一口径。
+ *
+ * @param anchor 插入位置。
+ * @param pieces 段落文字，来自 {@link paragraphTexts}。
+ * @param style 模型给这段文字的样式，逐段沿用。
+ * @returns 按落地顺序排好的 insertBlock op 列表。
+ */
+function insertParagraphs(
+  anchor: Anchor,
+  pieces: readonly string[],
+  style?: StylePatch,
+): CoreOp[] {
+  const ops: CoreOp[] = pieces.map((text) => ({
+    kind: "insertBlock",
+    anchor,
+    block: { type: "paragraph", text, ...(style ? { style } : {}) },
+  }));
+  // 每条都插在同一个锚点之后，倒着发才落成正的顺序；锚在文末时本来就是逐段追加。
+  return anchor.at === "end" ? ops : ops.reverse();
+}
+
 function resolveAiOp(
   ai: AiOp,
   blocks: Block[],
@@ -926,7 +977,16 @@ function resolveAiOp(
       const target = originalIndex(ai.index, "setText");
       if (!target) return [];
       const addr = addressOf(blocks, target.index);
-      return addr ? [{ kind: "setText", addr, text: ai.text }] : [];
+      if (!addr) return [];
+      // 地址必须在改写之前算：改写后这一段就不是原来那段文字了，锚点会认不出来。
+      const pieces = paragraphTexts(ai.text);
+      if (pieces.length <= 1) {
+        return [{ kind: "setText", addr, text: pieces[0] ?? "" }];
+      }
+      return [
+        ...insertParagraphs({ at: "after", after: addr }, pieces.slice(1)),
+        { kind: "setText", addr, text: pieces[0]! },
+      ];
     }
     case "setStyle": {
       const target = originalIndex(ai.index, "setStyle");
@@ -936,7 +996,13 @@ function resolveAiOp(
     }
     case "insertParagraph": {
       const anchor = anchorAfter(ai.after);
-      return anchor ? [{ kind: "insertBlock", anchor, block: { type: "paragraph", text: ai.text, ...(ai.style ? { style: ai.style } : {}) } }] : [];
+      if (!anchor) return [];
+      const pieces = paragraphTexts(ai.text);
+      if (!pieces.length) {
+        skipped.push(`insertParagraph：${ai.after < 0 ? "文首" : `第 ${ai.after + 1} 段之后`}的文字只有空白，已跳过`);
+        return [];
+      }
+      return insertParagraphs(anchor, pieces, ai.style);
     }
     case "insertTable": {
       const anchor = anchorAfter(ai.after);

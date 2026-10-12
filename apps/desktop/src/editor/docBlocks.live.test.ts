@@ -1468,3 +1468,51 @@ describe("行内 op：插入与撤掉引用域（真实 schema）", () => {
     expect(editor.state.doc.toJSON()).toEqual(before);
   });
 });
+
+describe("多行正文落到真实文档", () => {
+  /** 按 UI 的那条路走一遍：提案 → 仿真 → 事务落地。 */
+  function runProposal(startDoc: unknown[], ops: Parameters<typeof planEdit>[1]["ops"]) {
+    const editor = harness(startDoc);
+    const plan = planEdit(blocksOf(editor.state.doc), { summary: "t", ops });
+    return { editor, plan, exec: executeOps(editor, plan.ops, plan.after) };
+  }
+
+  const textsOf = (editor: Editor) => blocksOf(editor.state.doc).map((b) => b.text);
+
+  it("新建空文档写小说：一条带换行的提案拆成逐段，且真的写进文档", () => {
+    const { editor, exec } = runProposal([para([])], [
+      { op: "insertParagraph", after: -1, text: "第一章 启程\n\n夜色沉进河谷。\n他推开木门。" },
+    ]);
+    expect(exec.ok).toBe(true);
+    // after=-1 是"插到文首"：新段落整体排在原来那个空段之前，空段留在末尾。
+    expect(textsOf(editor)).toEqual(["第一章 启程", "夜色沉进河谷。", "他推开木门。", ""]);
+  });
+
+  it("setText 带换行：首段改写本段，其余各段插在它后面", () => {
+    const { editor, exec } = runProposal([para([text("原句")]), para([text("尾段")])], [
+      { op: "setText", index: 0, text: "改写后的第一行\n补一句第二行" },
+    ]);
+    expect(exec.ok).toBe(true);
+    expect(textsOf(editor)).toEqual(["改写后的第一行", "补一句第二行", "尾段"]);
+  });
+
+  it("撤销这条拆段改动：正文与段数都回到插入前", () => {
+    const { editor, plan, exec } = runProposal([para([text("原句")])], [
+      { op: "setText", index: 0, text: "改写后的第一行\n补一句第二行" },
+    ]);
+    expect(exec.ok).toBe(true);
+    const back = revert(blocksOf(editor.state.doc), plan.inverses);
+    expect(back.ok).toBe(true);
+    const undo = executeOps(editor, back.applied, back.after);
+    expect(undo.ok).toBe(true);
+    expect(textsOf(editor)).toEqual(["原句"]);
+  });
+
+  it("段内连续空白折叠后仿真与落地一致，不再放弃写入", () => {
+    const { exec } = runProposal([para([text("原句")])], [
+      { op: "setText", index: 0, text: "  甲   乙  " },
+    ]);
+    expect(exec.reason).toBeUndefined();
+    expect(exec.after.map((b) => b.text)).toEqual(["甲 乙"]);
+  });
+});

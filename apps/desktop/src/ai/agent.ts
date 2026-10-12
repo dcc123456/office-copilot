@@ -3,6 +3,7 @@ import {
   addressOf,
   buildOutline,
   coerceProposal,
+  normalise,
   planEdit,
   revert,
   runOps,
@@ -13,7 +14,7 @@ import {
 } from "./docEdit.js";
 import { describeCoreOp } from "./docEdit.js";
 import { diagramResolverFor } from "./diagramCanvas.js";
-import { blocksOf, executeOps, locateAll, normalise } from "../editor/docBlocks.js";
+import { blocksOf, executeOps, locateAll } from "../editor/docBlocks.js";
 
 /**
  * The document-editing agent: ask the model for a JSON edit plan, validate it
@@ -54,7 +55,7 @@ export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用�
    letterSpacing("0.67px")、color("#cc0000")、highlight("#ffff00")、lineHeight("1.5")、
    spacingBefore/spacingAfter(单位磅)、indent/indentRight/indentFirst(单位磅，indentFirst 为负表示悬挂缩进)。把不需要的字段设成 null 表示清除。
    段内只有部分文字带某种字符样式（如加粗、颜色）时，整段设置那一项会被拒绝，只设其余字段。
-3. {"op":"insertParagraph","after":N,"text":"...","style":{...}} — 在第 N 段后插入。after=-1 插到文首。
+3. {"op":"insertParagraph","after":N,"text":"...","style":{...}} — 在第 N 段后插入。after=-1 插到文首。一次只插一段，text 里不要放换行。
 4. {"op":"insertTable","after":N,"rows":[["列1","列2"],["值1","值2"]],"headerRow":true} — 插入表格，rows 必须是等宽的二维数组。
 5. {"op":"insertDiagram","after":N,"alt":"图注","diagram":{"title":"图标题","layout":"flow-v|flow-h|grid","nodes":[{"id":"a","label":"步骤一","shape":"box|round|diamond"}],"edges":[{"from":"a","to":"b","label":"可选条件"}]}} — 生成一张 canvas 示意图（流程图/结构图）插入文档，用来增强说明。
 6. {"op":"deleteBlock","index":N} — 删除第 N 段。
@@ -65,6 +66,7 @@ export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用�
 - 自动排版：给标题设 headingLevel/align/bold，给正文设 fontSize、lineHeight、indentFirst 等；排版任务不要改文字。
 - 纠正错别字：只改确实有错的段落，并在 summary 里列出改了哪几个词；没有错误就返回 {"summary":"未发现错别字","ops":[]}。
 - 保持文档原有语言，除非用户明确要求翻译。
+- 写新内容（章节、小说、长文）要一段一条 op：需要几段就发几条 insertParagraph，after 依次指向前一段（含刚插入那段的编号）。一条 text 里塞多行会被拆成多段，标题就得另发一条带 headingLevel 的。
 - 一次改动尽量精简，只做用户要求的事。`;
 
 export function buildUserMessage(instruction: string, blocks: Block[], selection?: string): string {
