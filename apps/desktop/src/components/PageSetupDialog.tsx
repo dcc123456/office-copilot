@@ -558,6 +558,12 @@ export function PageSetupDialog({
               />
             </label>
           </div>
+          {colNum > 1 && (
+            <div className="ps-hint">
+              编辑视图里只画栏边界导引线，正文仍按单栏排；真正排成 {colNum} 栏要看打印 / 导出的
+              PDF，或在 Word / WPS 里打开。
+            </div>
+          )}
           <div className="ps-section-title">页面边框</div>
           <div className="ps-border-grid">
             <span />
@@ -666,6 +672,11 @@ export function PageSetupDialog({
               />
             </label>
           </div>
+          {lnEnabled && (
+            <div className="ps-hint">
+              编辑视图里每页从起始编号重新数（与 Word 的缺省一致）；打印 / 导出的 PDF 不画行号，Word 与 WPS 打开时会自己渲染。
+            </div>
+          )}
           <div className="ps-section-title">水印</div>
           <div className="ps-grid">
             <label>
