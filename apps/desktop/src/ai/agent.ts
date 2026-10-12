@@ -68,6 +68,7 @@ export const SYSTEM_PROMPT = `你是文档编辑助手，可以直接修改用�
 - 纠正错别字：只改确实有错的段落，并在 summary 里列出改了哪几个词；没有错误就返回 {"summary":"未发现错别字","ops":[]}。
 - 保持文档原有语言，除非用户明确要求翻译。
 - 写新内容（章节、小说、长文）要一段一条 op：需要几段就发几条 insertParagraph，一条 text 里塞多行会被拆成多段，标题就得另发一条带 headingLevel 的。
+- text 里的对白、引用一律用中文引号（“” 或 「」）。绝对不要往 text 里塞没转义的英文双引号 " —— 它会把整份 JSON 写坏，一个字都落不了地。
 - 一次改动尽量精简，只做用户要求的事。`;
 
 export function buildUserMessage(instruction: string, blocks: Block[], selection?: string): string {
@@ -88,9 +89,23 @@ export function buildUserMessage(instruction: string, blocks: Block[], selection
  */
 export function extractJson(text: string): { value: unknown | null; truncated: boolean } {
   const withoutFence = text.replace(/```(?:json)?/gi, "").trim();
+  // 严格那份先试：修文本是猜模型的意思，能不改就不改。
+  const passes = [pickProposal(withoutFence), pickProposal(repairJsonText(withoutFence))];
+  for (const p of passes) if (p.value !== null && !p.truncated) return p;
+  for (const p of passes) if (p.value !== null) return p;
+  return { value: null, truncated: false };
+}
+
+/**
+ * 在一段（可能不合法的）文本里找提案对象。
+ *
+ * @param text 去掉代码块围栏后的文本。
+ * @returns 提案对象与是否被截断；取不到时 `value` 为 null。
+ */
+function pickProposal(text: string): { value: unknown | null; truncated: boolean } {
   const candidates: { body: string; scan: ReturnType<typeof scanBraces> }[] = [];
-  for (let i = withoutFence.indexOf("{"); i >= 0; i = withoutFence.indexOf("{", i + 1)) {
-    const body = withoutFence.slice(i);
+  for (let i = text.indexOf("{"); i >= 0; i = text.indexOf("{", i + 1)) {
+    const body = text.slice(i);
     candidates.push({ body, scan: scanBraces(body) });
   }
 
@@ -123,6 +138,79 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 把模型写歪的 JSON 修成能 parse 的文本，只在严格解析失败之后才跑。
+ *
+ * 两类高频毛病：正文里该写 `\n` 却打了裸回车；对白里的英文直双引号没写成 `\"`
+ * （`"text":"他说"你好"。"` 这种，一个引号就能让整份提案作废）。
+ *
+ * @param text 原始文本（可以带 JSON 前后的说明文字）。
+ * @returns 转义后的文本；结构字符（`, } ] :`）紧邻的引号才当结束引号。
+ */
+function repairJsonText(text: string): string {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      out += ch;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      // 只有后面紧跟结构符（或到了结尾）才是收束引号，否则它是正文里的引号。
+      if (isQuoteTerminator(text, i + 1)) {
+        inString = false;
+        out += ch;
+      } else {
+        out += '\\"';
+      }
+      continue;
+    }
+    const code = ch.codePointAt(0)!;
+    out += code < 0x20 ? escapeControlChar(ch) : ch;
+  }
+  return out;
+}
+
+/**
+ * 判断字符串里的这个引号是不是真正的结束引号。
+ *
+ * @param text 全文。
+ * @param next 引号之后第一个字符的下标。
+ * @returns 之后（跳过空白）是 `,` `}` `]` `:` 或文本结束时为 true。
+ */
+function isQuoteTerminator(text: string, next: number): boolean {
+  let i = next;
+  while (i < text.length && /\s/.test(text[i]!)) i++;
+  if (i >= text.length) return true;
+  return text[i] === "," || text[i] === "}" || text[i] === "]" || text[i] === ":";
+}
+
+/**
+ * 把裸控制字符写成 JSON 转义序列。
+ *
+ * @param ch codePoint 小于 0x20 的字符。
+ * @returns 形如 `\n`、`\t`、`\u0001` 的两/六字符转义。
+ */
+function escapeControlChar(ch: string): string {
+  if (ch === "\n") return "\\n";
+  if (ch === "\r") return "\\r";
+  if (ch === "\t") return "\\t";
+  return `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`;
 }
 
 /**
@@ -236,7 +324,9 @@ function readJsonString(text: string, from: number): string {
     const ch = text[i];
     if (escaped) escaped = false;
     else if (ch === "\\") escaped = true;
-    else if (ch === '"') break;
+    // 正文里没转义的引号后面挂的是字，不是 `, } ] :`，不能当结束引号——否则一段话
+    // 会被模型自己写的引号截成两半显示。
+    else if (ch === '"' && isQuoteTerminator(text, i + 1)) break;
     i++;
   }
   const frag = text.slice(from, i);
@@ -368,10 +458,12 @@ export async function requestProposal(opts: {
   }
   const parsed = extractJson(acc);
   if (parsed.value === null) {
+    // 把模型回的前一小段贴出来：解析失败的原因（它压根没回 JSON、还是回歪了）一眼能看出来。
+    const peek = acc.replace(/\s+/g, " ").trim().slice(0, 160);
     return {
       ok: false,
       before,
-      message: "模型没有返回可解析的修改方案，请重试或换个说法。",
+      message: `模型没有返回可解析的修改方案${peek ? `，它回的是：${peek}` : ""}。请重试或换个说法。`,
       warnings: [],
     };
   }

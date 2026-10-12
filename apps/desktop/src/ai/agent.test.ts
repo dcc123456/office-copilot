@@ -169,8 +169,46 @@ describe("从模型原文里取提案 JSON", () => {
     expect(coerceProposal(value, 1).proposal?.ops).toHaveLength(2);
   });
 
+  it("正文里带裸换行（该写 \\n 却直接回车）照样能取", () => {
+    const raw = '{"summary":"写两段","ops":[{"op":"insertParagraph","after":0,"text":"夜色沉进河谷。\n他推开木门。"}]}';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(false);
+    expect(coerceProposal(value, 1).proposal?.ops).toEqual([
+      { op: "insertParagraph", after: 0, text: "夜色沉进河谷。\n他推开木门。" },
+    ]);
+  });
+
+  it("裸换行叠上被截断，也能抢救出写完的那段", () => {
+    const raw =
+      '{"summary":"s","ops":[{"op":"insertParagraph","after":0,"text":"甲段\n乙段"},{"op":"insertParagraph","after":1,"text":"丙';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(true);
+    expect(coerceProposal(value, 1).proposal?.ops).toHaveLength(1);
+  });
+
   it("一段都没写完时才算真的取不到", () => {
     expect(extractJson('别急，我先看看文档… {"summary":"甲').value).toBeNull();
+  });
+
+  it("正文里塞了没转义的英文引号照样能取（一个引号不该废掉整份提案）", () => {
+    // 真实模型写小说时就这么回过：{"text":"他想起那句"你不该回来的"。…"}
+    const raw =
+      '{"summary":"写两段","ops":[{"op":"insertParagraph","after":0,"text":"他想起那句"你不该回来的"。"},{"op":"setText","index":0,"text":"甲"}]}';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(false);
+    expect(coerceProposal(value, 1).proposal?.ops).toEqual([
+      { op: "insertParagraph", after: 0, text: '他想起那句"你不该回来的"。' },
+      { op: "setText", index: 0, text: "甲" },
+    ]);
+    expect(coerceProposal(value, 1).errors).toEqual([]);
+  });
+
+  it("没转义的引号叠上被截断，仍然抢救出写完的那几条", () => {
+    const raw =
+      '{"summary":"s","ops":[{"op":"insertParagraph","after":0,"text":"他说"再见"。"},{"op":"insertParagraph","after":1,"text":"下一';
+    const { value, truncated } = extractJson(raw);
+    expect(truncated).toBe(true);
+    expect(coerceProposal(value, 1).proposal?.ops).toHaveLength(1);
   });
 });
 
@@ -186,6 +224,11 @@ describe("流式预览逐段取文", () => {
   it("正文里被转义的引号不会被当成键名", () => {
     const raw = '{"ops":[{"op":"setText","index":0,"text":"他念了一句 \\"text\\":\\"再见\\""}]}';
     expect(streamedParagraphs(raw)).toEqual(['他念了一句 "text":"再见"']);
+  });
+
+  it("正文里有没转义的引号时，预览显示整段而不是前半句", () => {
+    const raw = '{"ops":[{"op":"insertParagraph","after":0,"text":"他想起那句"你不该回来的"。"}]}';
+    expect(streamedParagraphs(raw)).toEqual(['他想起那句"你不该回来的"。']);
   });
 
   it("还没写到正文时预览是空的", () => {
