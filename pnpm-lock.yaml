@@ -281,6 +281,31 @@ importers:
         specifier: ^2.1.1
         version: 2.1.9(@types/node@20.19.43)(jsdom@30.0.1)(terser@5.50.0)
 
+  packages/sheet-io:
+    dependencies:
+      '@office-copilot/docx-io':
+        specifier: workspace:*
+        version: link:../docx-io
+      '@office-copilot/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@rgrove/parse-xml':
+        specifier: ^4.2.3
+        version: 4.2.3
+      jszip:
+        specifier: ^3.10.1
+        version: 3.10.1
+    devDependencies:
+      '@types/node':
+        specifier: ^20.14.10
+        version: 20.19.43
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.1
+        version: 2.1.9(@types/node@20.19.43)(jsdom@30.0.1)(terser@5.50.0)
+
   packages/word-client:
     dependencies:
       '@office-copilot/shared':
