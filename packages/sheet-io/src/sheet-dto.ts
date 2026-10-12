@@ -22,6 +22,37 @@ export interface WorkbookPayload {
 }
 
 /**
+ * 可编辑上限（已用格总数）。
+ *
+ * 依据一次性探针（spec 阶段 2 验收 D19）：100 万格时解析 2.04s、堆 1.2GB，
+ * 而 `cells` 还要整体结构化克隆过 IPC、在渲染层再存一份；20 万格以下实测在几百毫秒内。
+ */
+export const EDITABLE_CELL_LIMIT = 200000;
+
+/**
+ * 数工作簿里所有表的已用格总数。
+ *
+ * @param workbook 跨界载荷（只需 `sheets`，测试可传局部对象）。
+ * @returns 格子数，含只有格式没有值的格（它们同样占内存与 IPC）；空工作簿为 0。
+ */
+export function usedCellCount(workbook: Pick<WorkbookPayload, "sheets">): number {
+  return workbook.sheets.reduce((sum, sheet) => sum + Object.keys(sheet.cells).length, 0);
+}
+
+/**
+ * 判定这份载荷该不该只读打开（spec §七"大表全量载入内存"的缓解）。
+ *
+ * @param workbook 跨界载荷。
+ * @returns 超上限时给 UI 一条可读理由（含实测格数与上限）；可编辑时返回 null。
+ *   数字不做千分位分组，免得文案随运行环境的 ICU 变化。
+ */
+export function readOnlyReason(workbook: Pick<WorkbookPayload, "sheets">): string | null {
+  const cellCount = usedCellCount(workbook);
+  if (cellCount <= EDITABLE_CELL_LIMIT) return null;
+  return `这张工作簿有 ${cellCount} 个已用格，超过可编辑上限 ${EDITABLE_CELL_LIMIT} 个，已按只读打开——滚动、切换表页、看公式都正常，改内容需要拆小这份表或在 Excel 里编辑。`;
+}
+
+/**
  * 把表模型压成跨界载荷。
  *
  * @param sheet reader 产出的表模型。

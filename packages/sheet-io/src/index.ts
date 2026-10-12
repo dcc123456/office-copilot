@@ -54,7 +54,10 @@ export { StyleTable, type CellStyleParts } from "./xlsx-styles.js";
 export { cellDisplayText, formatNumberForDisplay, parseUserCellText, type ParsedCellInput } from "./cell-text.js";
 export {
   applySheetPayload,
+  EDITABLE_CELL_LIMIT,
+  readOnlyReason,
   sheetPayloadOf,
+  usedCellCount,
   workbookPayload,
   type SheetPayload,
   type WorkbookPayload,

@@ -44,10 +44,18 @@
   font: inherit;
 }
 
-.sheet-recalc-hint {
+.sheet-recalc-hint,
+.sheet-readonly-hint {
   flex: 0 0 auto;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+/* 只读是大表的运行模式，不是一条脚注，所以带底色让人一眼看见（阈值见 sheet-io 的 EDITABLE_CELL_LIMIT）。 */
+.sheet-readonly-hint {
+  padding: 0 var(--space-1);
+  background: var(--accent-tint);
+  border-radius: var(--radius-xs);
 }
 
 /* 2×2：左上角、列表头、行表头、滚动区。表头用 transform 跟滚动区同步。 */

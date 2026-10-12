@@ -31,7 +31,7 @@ import type {
   SectionGeometry,
   StyleEdit,
 } from "@office-copilot/docx-io";
-import type { SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
+import { readOnlyReason, type SheetPayload, type WorkbookPayload } from "@office-copilot/sheet-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
@@ -271,6 +271,9 @@ export function App() {
         ...workbook.warnings,
         ...workbook.unsupported.map((feature) => `${feature.reason} 暂不编辑，已原样保留`),
       ];
+      // 大表只读：判定在 sheet-io（阈值来自实测），这里只负责把理由说给用户（spec D19、§七）。
+      const reason = readOnlyReason(workbook);
+      if (reason) hints.push(reason);
       if (hints.length) toast(hints.join("\n"));
     },
     [stopTracking],
@@ -421,8 +424,22 @@ export function App() {
     setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
   }, []);
 
+  /**
+   * 表格写盘前的只读闸门：判定只在 `sheet-io` 一处，这里两个写入口共用。
+   *
+   * @param workbook 当前工作簿载荷。
+   * @returns 允许写入返回 true；超上限只读时把理由提示给用户并返回 false（spec D19）。
+   */
+  const canWriteSheet = useCallback((workbook: WorkbookPayload): boolean => {
+    const reason = readOnlyReason(workbook);
+    if (!reason) return true;
+    toast(reason, "error");
+    return false;
+  }, []);
+
   const handleSave = useCallback(async () => {
     if (sheetWorkbook) {
+      if (!canWriteSheet(sheetWorkbook)) return;
       const saved = await window.officeCopilot.saveSheet({
         path: filePathRef.current,
         sheets: sheetWorkbook.sheets,
@@ -456,10 +473,11 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
+  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
 
   const handleSaveAs = useCallback(async () => {
     if (sheetWorkbook) {
+      if (!canWriteSheet(sheetWorkbook)) return;
       const saved = await window.officeCopilot.saveSheetAs({
         path: filePathRef.current,
         sheets: sheetWorkbook.sheets,
@@ -499,7 +517,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
+  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
 
   /**
    * 给当前选区新建一条批注，并把侧栏开到那条上。

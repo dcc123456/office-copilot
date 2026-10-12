@@ -5,7 +5,7 @@
  * 组件里不出现第二套换算，也不碰 Node 能力（`AGENTS.md` §3.3 / §5.2）。
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { formatA1, indexToColName, rangeContains, type A1Address, type A1Range, type SheetPayload, type WorkbookPayload } from "@office-copilot/sheet-io";
+import { formatA1, indexToColName, rangeContains, readOnlyReason, type A1Address, type A1Range, type SheetPayload, type WorkbookPayload } from "@office-copilot/sheet-io";
 import {
   COLUMN_HEADER_HEIGHT_PX,
   OVERSCAN_ROWS,
@@ -48,6 +48,9 @@ const RESIZE_HOTZONE_PX = 6;
 export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet }: SheetViewProps) {
   const sheet = workbook.sheets[activeIndex];
   const layout = useMemo(() => (sheet ? buildSheetLayout(sheet) : undefined), [sheet]);
+  /** 大表只读（spec D19）：阈值与理由都在 `sheet-io`，这里只按它拦住所有写入路径，不做第二处状态。 */
+  const readOnlyHint = useMemo(() => readOnlyReason(workbook), [workbook]);
+  const isReadOnly = readOnlyHint !== null;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const colHeaderRef = useRef<HTMLDivElement | null>(null);
@@ -119,7 +122,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
    */
   const commitText = useCallback(
     (text: string, move: "down" | "right" | "none") => {
-      if (!sheet || !layout) return;
+      if (!sheet || !layout || isReadOnly) return;
       const address = formatA1(active);
       onChangeSheet(withCellText(sheet, address, text));
       setEditing(null);
@@ -134,7 +137,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
       setAnchor(next);
       scrollToAddress(next);
     },
-    [active, layout, onChangeSheet, scrollToAddress, sheet],
+    [active, isReadOnly, layout, onChangeSheet, scrollToAddress, sheet],
   );
 
   /**
@@ -151,6 +154,16 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
     },
     [scrollToAddress],
   );
+
+  /**
+   * 打开当前格的编辑框（初值是格里的现文本）。
+   *
+   * 只读工作簿里什么都不做——所有写入路径都汇到 `commitText`，这里只是提前拦住无谓的编辑态。
+   */
+  const startEditing = () => {
+    if (isReadOnly) return;
+    setEditing({ address: formatA1(active), text: cellTextAt(sheet, active) });
+  };
 
   /**
    * 网格的键盘导航。
@@ -173,12 +186,12 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
     if (step && !(event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       moveSelection(moveAddress(active, step[0], step[1], maxCol, maxRow), event.shiftKey);
-      if (event.key === "Enter") setEditing({ address: formatA1(active), text: cellTextAt(sheet, active) });
+      if (event.key === "Enter") startEditing();
       return;
     }
     if (event.key === "F2") {
       event.preventDefault();
-      setEditing({ address: formatA1(active), text: cellTextAt(sheet, active) });
+      startEditing();
       return;
     }
     if (event.key === "Delete" || event.key === "Backspace") {
@@ -198,7 +211,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
       return;
     }
     // 可打印字符直接进编辑框，并把这个字符作为初值，省一次点击。
-    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    if (event.key.length === 1 && !isReadOnly && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault();
       setEditing({ address: formatA1(active), text: event.key });
     }
@@ -308,6 +321,11 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
           aria-label="编辑栏"
         />
         {activeCell?.formula ? <span className="sheet-recalc-hint">公式显示的是文件里的缓存值，需在 Excel / WPS 里重算</span> : null}
+        {isReadOnly ? (
+          <span className="sheet-readonly-hint" title={readOnlyHint ?? ""}>
+            只读
+          </span>
+        ) : null}
       </div>
 
       <div className="sheet-grid">
@@ -324,12 +342,14 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onChangeSheet 
                   style={{ left: layout.colOffsetPx[slot] ?? 0, width: widthPx }}
                 >
                   {indexToColName(colIndex)}
-                  <span
-                    className="sheet-col-resize"
-                    style={{ right: -RESIZE_HOTZONE_PX / 2 }}
-                    onPointerDown={(event) => startColumnResize(event, colIndex, widthPx)}
-                    title="拖动调整列宽"
-                  />
+                  {isReadOnly ? null : (
+                    <span
+                      className="sheet-col-resize"
+                      style={{ right: -RESIZE_HOTZONE_PX / 2 }}
+                      onPointerDown={(event) => startColumnResize(event, colIndex, widthPx)}
+                      title="拖动调整列宽"
+                    />
+                  )}
                 </div>
               );
             })}
