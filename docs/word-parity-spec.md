@@ -1505,6 +1505,45 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 提交：`12216f0`（行号）+ `6856b9a`（两句说明）+ 本条 docs 与 AGENTS 记录一起推送；推送后
   `git ls-remote origin main` 与本仓 `git rev-parse HEAD` 一致才声称已推送。
 
+### 8.16 排名 7 收尾总检（分栏 / 页面边框 / 水印逐字段实跑，含"版式=横向"的水印居中复核）
+
+§8.14 那轮总检只跑到纸张 / 方向 / 边距 / 行号，**页面边框与水印的逐字段、以及分栏的存盘数值**
+没在同一轮里看过。这一轮补齐（`tmp/ps-final-probe.mjs` → `tmp/ps-final.log`，真实 app + 独立
+`--user-data-dir`，文档 = `tmp/ps-final.docx`）。
+
+- 填进去的值：栏数 2 / 栏间距 1cm；边框 上=双线 3pt 间距4 #cc0000、左=虚线 1.5pt 2 #0070c0、
+  下=单线 1pt 1 #00b050、右=无；水印 启用 + 半透明 + 文字"机密" + 字号 60pt + 颜色 #dddddd +
+  版式"横向"；行号 启用（每 1 行 / 起始 1）。
+- 存盘 XML（`word/document.xml` 与 `word/header1.xml` 都是读回真文件，不是断言推断）：
+  `<w:pgBorders w:offsetFrom="page">` 里 `<w:top w:val="double" w:sz="24" w:space="4" w:color="CC0000"/>`、
+  `<w:left w:val="dashed" w:sz="12" w:space="2" w:color="0070C0"/>`、
+  `<w:bottom w:val="single" w:sz="8" w:space="1" w:color="00B050"/>`，**右边没线就不写** ✓
+  （`w:sz` 是 1/8 pt：3pt→24、1.5pt→12、1pt→8 ✓；子元素顺序 top→left→bottom 合 `CT_PgBorders`）；
+  `<w:cols w:space="567" w:num="2"/>`（1cm=567twips ✓）、`<w:lnNumType w:countBy="1" w:distance="363"/>`
+  （起始 1 是缺省所以不写 `w:start` ✓）、`<w:pgSz w:w="11906" w:h="16838"/>` 与 `w:pgMar` 未被牵连 ✓；
+  水印写进 `word/header1.xml` 的 VML：`type="#_x0000_t136"`、`fillcolor="#dddddd"`、
+  `<v:fill on="t" opacity="50%"/>`（半透明 ✓）、`v:textpath style="font-family:'宋体';font-size:60pt"
+  string="机密"` ✓，版式选"横向"时不写 rotation ✓。
+- 画布：`.oc-page-border` 21 条（3 条有线 × 7 页，线宽/线型/颜色经 CSS 变量交给
+  `pageBorders.css`，其几何由 `pageBorders.test.ts` 6 条单测机检）、`.oc-column-guide` 7 条、
+  `.oc-line-number` 262 个、`.oc-page-watermark` 7 份；重开对话框四条边的线型/线宽/间距/颜色与
+  水印六个字段逐字回显（含"右=none"）✓；正文 195 段 / 5440 字一字不缺 ✓；控制台 0 条 error ✓；
+  截图 `tmp/ps-final-canvas.png`（红双线在上、蓝虚线在左、中线是导引线、左边距里一列行号、
+  右下那团淡灰是"机密"）。
+- **顺手复核的一条疑点（结论：不是 bug）**：截图里水印看着偏右下，怀疑"版式=横向"时盒子没居中，
+  于是量了一次（`tmp/ps-wmpos-probe.mjs`）：对角与横向两种版式下 `.oc-page-watermark` 的
+  **盒子中心都正好落在页面中心** `[397, 561]`（页 794×1123），`transform` 分别是
+  `matrix(0.707,-0.707,0.707,0.707,0,0)`（-45°）与单位矩阵。看着偏是因为旋转盒的**外接矩形**
+  变大了（对角时 `wmRectCss` 是 552×552），而文字本身仍居中。
+- 一个探针侧的坑（记下来免得再误判）：`.ps-border-grid` 的行序是 **上 / 左 / 下 / 右**
+  （`BORDER_SIDES` 按 Word 那个方框的阅读顺序排），不是上/下/左/右；按位置索引写控件前先读回
+  行名 span，否则会把"左"的虚线当成"下"来核对。
+- 门禁：本轮无代码改动（只补文档与探针），沿用 §8.15 末尾那次 `pnpm build` EXIT=0 /
+  `pnpm test` EXIT=0 的逐包数字（desktop 416 / docx-io 296 / sheet-io 45 / word-client 8 /
+  word-tools 6 / server 2）。
+- Word 实测：`[!] BLOCKED`（§8.12）。边框 `w:sz` 的 1/8pt 口径、`v:fill/@opacity` 的写法是
+  ECMA-376 §17.6.1 + Word 产出的 VML 样例比对，不是亲眼看到 Word 渲染。
+
 ## 附录 A：现状盘点（`path:line` 为证）
 
 - 段落格式属性与命令：`apps/desktop/src/editor/extensions/ParagraphFormatting.ts`——段落属性表在
