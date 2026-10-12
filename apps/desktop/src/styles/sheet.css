@@ -1,0 +1,258 @@
+/* 表格视图（spec 阶段 2）。
+   网格几何（列宽、行高、偏移）全部由组件的内联 style 给出，因为这些数字来自文件本身；
+   这里只负责颜色、边框、滚动容器与对齐，不出现第二套单位换算（AGENTS.md §2.1 / §5.4）。 */
+
+.sheet-view {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* 名称框 + 编辑栏：阶段 2 编辑栏只读，公式格另起一行提示缓存值不重算。 */
+.sheet-namebox {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: no-drag;
+}
+
+.sheet-namebox-address {
+  flex: 0 0 auto;
+  min-width: 56px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.sheet-formulabar {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+}
+
+.sheet-recalc-hint {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* 2×2：左上角、列表头、行表头、滚动区。表头用 transform 跟滚动区同步。 */
+.sheet-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-rows: 24px minmax(0, 1fr);
+  background: var(--bg-muted);
+}
+
+.sheet-corner {
+  grid-column: 1;
+  grid-row: 1;
+  background: var(--bg-muted);
+  border-right: 1px solid var(--border-strong);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.sheet-colheader,
+.sheet-rowheader {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-muted);
+}
+
+.sheet-colheader {
+  grid-column: 2;
+  grid-row: 1;
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.sheet-rowheader {
+  grid-column: 1;
+  grid-row: 2;
+  border-right: 1px solid var(--border-strong);
+}
+
+.sheet-colheader-track,
+.sheet-rowheader-track {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+}
+
+.sheet-colhead,
+.sheet-rowhead {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.sheet-colhead {
+  top: 0;
+  height: 100%;
+  border-right: 1px solid var(--border);
+}
+
+.sheet-rowhead {
+  left: 0;
+  width: 45px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sheet-colhead.is-selected,
+.sheet-rowhead.is-selected {
+  background: var(--accent-tint);
+  color: var(--text);
+}
+
+/* 列宽热区：压在列表头右边界上，命中即拖，松手才写回文档。 */
+.sheet-col-resize {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 6px;
+  cursor: col-resize;
+  -webkit-app-region: no-drag;
+}
+
+.sheet-scroll {
+  grid-column: 2;
+  grid-row: 2;
+  overflow: auto;
+  background: var(--bg-raised);
+  outline: none;
+}
+
+.sheet-canvas {
+  position: relative;
+  background: var(--bg-raised);
+}
+
+.sheet-cell {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  padding: 1px 4px;
+  background: var(--bg-raised);
+  /* 格线由格子自己画，合并区再用不透明覆盖层把内部格线盖掉。 */
+  box-shadow: inset -1px -1px 0 var(--border);
+}
+
+.sheet-cell-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.sheet-cell--num {
+  justify-content: flex-end;
+}
+
+.sheet-cell--formula {
+  color: var(--text-muted);
+}
+
+.sheet-cell.is-selected {
+  background: var(--accent-tint);
+}
+
+.sheet-cell.is-head {
+  background: var(--selected-cell);
+}
+
+.sheet-merge {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  padding: 1px 4px;
+  background: var(--bg-raised);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.sheet-selection {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.sheet-editor {
+  position: absolute;
+  z-index: 3;
+  border: 1px solid var(--accent);
+  padding: 1px 4px;
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  outline: none;
+}
+
+.sheet-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 0 var(--space-2);
+  background: var(--bg-muted);
+  border-top: 1px solid var(--border);
+  -webkit-app-region: no-drag;
+}
+
+.sheet-tab {
+  appearance: none;
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sheet-tab:hover {
+  color: var(--text);
+}
+
+.sheet-tab.is-active {
+  background: var(--bg-raised);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.sheet-tabinfo {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.sheet-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}

@@ -8,6 +8,7 @@
 import {
   cellDisplayText,
   columnWidthCharsToPx,
+  columnWidthPxToChars,
   formatA1,
   parseA1,
   parseUserCellText,
@@ -24,8 +25,13 @@ const DEFAULT_COLUMN_WIDTH_PX = columnWidthCharsToPx(2158 / 256);
 /** 默认行高（磅），与 Excel 空白工作簿一致；px 由 IO 包换算。 */
 const DEFAULT_ROW_HEIGHT_PT = 15;
 
-/** 已用区域之外再多给的空列/空行：用户要能在表尾接着打字，Excel 就是这个行为。 */
-const TRAILING_COLUMNS = 8;
+/**
+ * 已用区域之外再多给的空列/空行：用户要能在表尾接着打字，Excel 就是这个行为。
+ *
+ * 空列按默认宽度 64px 排，8 列只有 512px——实测在 1200px 宽的窗口里右侧会露出一条没有格线的空白，
+ * 所以要给到 24 列（≈1536px）才铺得满常见窗口。
+ */
+const TRAILING_COLUMNS = 24;
 const TRAILING_ROWS = 40;
 
 /** 虚拟滚动上下各多渲染这么多行，避免快速滚动露白。 */
@@ -100,17 +106,18 @@ export function buildSheetLayout(sheet: SheetPayload): SheetLayout {
 }
 
 /**
- * 求滚动窗口内要渲染的行区间。
+ * 求滚动窗口内要渲染的槽位区间（行、列两个方向共用这一条）。
  *
- * @param layout 网格几何。
- * @param scrollTop 视口滚动距离（px）。
- * @param viewportHeightPx 视口高度（px）。
- * @param overscan 上下各多算几行。
- * @returns `[start, end)` 的 `layout.rowIndexes` 下标区间；已夹到有效范围。
+ * @param offsets 该方向的前缀和（`layout.rowOffsetPx` 或 `colOffsetPx`，长度比槽位数多 1）。
+ * @param scrollPx 该方向的滚动距离（px）。
+ * @param viewportPx 视口在该方向上的尺寸（px）。
+ * @param overscan 两端各多算几个槽位。
+ * @returns `[start, end)` 的槽位下标区间；已夹到有效范围。
  */
-export function visibleRowRange(layout: SheetLayout, scrollTop: number, viewportHeightPx: number, overscan = OVERSCAN_ROWS): [number, number] {
-  const start = Math.max(0, lowerBound(layout.rowOffsetPx, scrollTop) - 1 - overscan);
-  const end = Math.min(layout.rowIndexes.length, lowerBound(layout.rowOffsetPx, scrollTop + viewportHeightPx) + overscan);
+export function visibleSlotRange(offsets: number[], scrollPx: number, viewportPx: number, overscan = OVERSCAN_ROWS): [number, number] {
+  const count = offsets.length - 1;
+  const start = Math.max(0, lowerBound(offsets, scrollPx) - 1 - overscan);
+  const end = Math.min(count, lowerBound(offsets, scrollPx + viewportPx) + overscan);
   return [start, Math.max(start, end)];
 }
 
@@ -208,6 +215,65 @@ export function moveAddress(address: A1Address, dCol: number, dRow: number, maxC
     colIndex: Math.min(Math.max(address.colIndex + dCol, 0), maxColIndex),
     rowIndex: Math.min(Math.max(address.rowIndex + dRow, 0), maxRowIndex),
   };
+}
+
+/**
+ * 把点在网格里的坐标换成格子地址。
+ *
+ * @param layout 网格几何。
+ * @param x 相对画布左上角的横坐标（px，不含行号表头）。
+ * @param y 相对画布左上角的纵坐标（px，不含列字母表头）。
+ * @returns 真实行列号；点在表头留白之外时夹到最后一格，不返回 undefined。
+ */
+export function addressAtPoint(layout: SheetLayout, x: number, y: number): A1Address {
+  const colSlot = slotForOffset(layout.colOffsetPx, x, layout.colIndexes.length);
+  const rowSlot = slotForOffset(layout.rowOffsetPx, y, layout.rowIndexes.length);
+  return {
+    colIndex: layout.colIndexes[colSlot] ?? 0,
+    rowIndex: layout.rowIndexes[rowSlot] ?? 0,
+  };
+}
+
+/**
+ * 拖动某一列的边界后改写这一列的宽度。
+ *
+ * `<col min max>` 是一段范围，只改其中一列必须把范围劈成三段（左段原样、中间这列新宽度、右段原样），
+ * 否则会把相邻列的宽度一起牵连掉。
+ *
+ * @param sheet 当前表的载荷。
+ * @param colIndex 被拖的真实列号。
+ * @param widthPx 拖出来的像素宽度。
+ * @returns 新载荷；`columns` 换了一份数组，其余字段原样。
+ */
+export function withColumnWidth(sheet: SheetPayload, colIndex: number, widthPx: number): SheetPayload {
+  const widthChars = columnWidthPxToChars(widthPx);
+  const covering = sheet.columns.find((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex);
+  const others = sheet.columns.filter((column) => column !== covering);
+  const rebuilt: SheetPayload["columns"] = [];
+  if (covering) {
+    if (covering.minColIndex < colIndex) {
+      rebuilt.push({ ...covering, minColIndex: covering.minColIndex, maxColIndex: colIndex - 1 });
+    }
+    rebuilt.push({ ...covering, minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
+    if (covering.maxColIndex > colIndex) {
+      rebuilt.push({ ...covering, minColIndex: colIndex + 1, maxColIndex: covering.maxColIndex });
+    }
+  } else {
+    rebuilt.push({ minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
+  }
+  return { ...sheet, columns: [...others, ...rebuilt] };
+}
+
+/** 前缀和里找 `x` 落在哪一段；段号即槽位下标，越界夹到最后一段。 */
+function slotForOffset(offsets: number[], value: number, count: number): number {
+  let low = 0;
+  let high = count - 1;
+  while (low < high) {
+    const middle = (low + high + 1) >> 1;
+    if ((offsets[middle] ?? 0) <= value) low = middle;
+    else high = middle - 1;
+  }
+  return Math.max(0, Math.min(low, count - 1));
 }
 
 /** 列范围里可见列的宽度；`hidden` 的列由调用方排除，这里只算 px。 */

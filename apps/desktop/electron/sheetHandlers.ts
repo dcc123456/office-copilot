@@ -44,23 +44,10 @@ export interface SheetSavePayload {
  * 注册表格相关的通道。
  *
  * @param ipc 主进程的 `ipcMain`。
- * @param getWindow 当前窗口，打开/另存为对话框要挂在它上面。
+ * @param getWindow 当前窗口，另存为对话框要挂在它上面。
  */
 export function registerSheetHandlers(ipc: IpcMain, getWindow: () => BrowserWindow | null): void {
-  ipc.handle("sheet:open", async (): Promise<SheetOpenResult> => {
-    const win = getWindow();
-    const result = await dialog.showOpenDialog(win!, {
-      title: "打开 Excel 表格",
-      properties: ["openFile"],
-      filters: [
-        { name: "Excel 表格", extensions: ["xlsx"] },
-        { name: "所有文件", extensions: ["*"] },
-      ],
-    });
-    if (result.canceled || result.filePaths.length === 0) return { ok: false, canceled: true };
-    return openSheetDoc(result.filePaths[0]!);
-  });
-
+  // 「打开」由 fileHandlers 的单一对话框分派（docx / xlsx 都走那里），这里不再开第二个。
   ipc.handle("sheet:read", async (_e, filePath: string): Promise<SheetOpenResult> => openSheetDoc(filePath));
 
   ipc.handle("sheet:save", async (_e, payload: SheetSavePayload): Promise<SheetSaveResult> => {

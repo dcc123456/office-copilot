@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import type { SheetPayload } from "@office-copilot/sheet-io";
 import {
   ROW_HEADER_WIDTH_PX,
+  addressAtPoint,
   buildSheetLayout,
+  withColumnWidth,
   displayTextOf,
   moveAddress,
   selectionLabel,
   selectionRectOf,
-  visibleRowRange,
+  visibleSlotRange,
   withCellText,
 } from "./sheetGridModel.js";
 
@@ -63,12 +65,12 @@ describe("网格几何（阶段 2：位置与单位的对应关系）", () => {
 
   it("滚动窗口按前缀和定位，行号夹在有效区间内", () => {
     const layout = buildSheetLayout(sampleSheet());
-    const [startAtTop, endAtTop] = visibleRowRange(layout, 0, 400, 0);
+    const [startAtTop, endAtTop] = visibleSlotRange(layout.rowOffsetPx, 0, 400, 0);
     expect(startAtTop).toBe(0);
     expect(endAtTop).toBeGreaterThan(5);
-    const [startScrolled] = visibleRowRange(layout, 400, 400, 0);
+    const [startScrolled] = visibleSlotRange(layout.rowOffsetPx, 400, 400, 0);
     expect(startScrolled).toBe(19);
-    const [, endAtBottom] = visibleRowRange(layout, layout.totalHeightPx, 400, 0);
+    const [, endAtBottom] = visibleSlotRange(layout.rowOffsetPx, layout.totalHeightPx, 400, 0);
     expect(endAtBottom).toBe(layout.rowIndexes.length);
     expect(ROW_HEADER_WIDTH_PX).toBeGreaterThan(0);
   });
@@ -125,5 +127,31 @@ describe("显示与选区", () => {
     expect(moveAddress({ colIndex: 0, rowIndex: 0 }, -1, -1, 10, 20)).toEqual({ colIndex: 0, rowIndex: 0 });
     expect(moveAddress({ colIndex: 10, rowIndex: 20 }, 1, 1, 10, 20)).toEqual({ colIndex: 10, rowIndex: 20 });
     expect(moveAddress({ colIndex: 2, rowIndex: 3 }, 0, 1, 10, 20)).toEqual({ colIndex: 2, rowIndex: 4 });
+  });
+});
+
+describe("点选与列宽拖动（都只认 IO 包给的 px）", () => {
+  it("坐标落在哪格就选哪格，超出画布夹到最后一格", () => {
+    const layout = buildSheetLayout(sampleSheet());
+    // 第一列 89px 宽、第一行 20px 高、第二行 30px 高
+    expect(addressAtPoint(layout, 0, 0)).toEqual({ colIndex: 0, rowIndex: 0 });
+    expect(addressAtPoint(layout, 100, 25)).toEqual({ colIndex: 1, rowIndex: 1 });
+    expect(addressAtPoint(layout, layout.totalWidthPx + 500, layout.totalHeightPx + 900)).toEqual({
+      colIndex: layout.colIndexes[layout.colIndexes.length - 1],
+      rowIndex: layout.rowIndexes[layout.rowIndexes.length - 1],
+    });
+  });
+
+  it("拖动中间一列时把 <col> 范围劈成三段，相邻列宽度不受牵连", () => {
+    const wide: SheetPayload = { ...sampleSheet(), columns: [{ minColIndex: 0, maxColIndex: 4, widthChars: 12, customWidth: true }] };
+    const next = withColumnWidth(wide, 2, 64);
+    const ranges = next.columns
+      .map((column) => [column.minColIndex, column.maxColIndex, column.widthChars] as const)
+      .sort((a, b) => a[0] - b[0]);
+    expect(ranges).toEqual([
+      [0, 1, 12],
+      [2, 2, 2158 / 256], // 64px 换回字符正好是 Excel 默认的 8.43
+      [3, 4, 12],
+    ]);
   });
 });

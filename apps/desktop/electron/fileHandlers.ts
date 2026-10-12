@@ -73,6 +73,12 @@ export type StylePreview =
   | { ok: true; styles: PaneStyle[]; styleFormats: ResolvedStyle[] }
   | { ok: false; message: string };
 
+/** 打开对话框的选择结果：只给路径，读哪个部件由渲染层按扩展名决定。 */
+export type OpenPickResult =
+  | { ok: true; path: string }
+  | { ok: false; canceled: true }
+  | { ok: false; message: string };
+
 export type OpenResult =
   | {
       ok: true;
@@ -140,13 +146,19 @@ export function registerFileHandlers(
     };
   });
 
-  ipc.handle("file:open", async (): Promise<OpenResult> => {
+  /**
+   * 只弹打开对话框，把选中的路径交回渲染层。
+   *
+   * 两种文件共用一个对话框：读哪个部件由渲染层按扩展名分派（`file:read-docx` /
+   * `sheet:read`），于是拖入、最近文件与对话框三条入口走同一套读取逻辑。
+   */
+  ipc.handle("file:open", async (): Promise<OpenPickResult> => {
     const win = getWindow();
     const result = await dialog.showOpenDialog(win!, {
-      title: "打开 Word 文档",
+      title: "打开文档",
       properties: ["openFile"],
       filters: [
-        { name: "Word 文档", extensions: ["docx"] },
+        { name: "Word / Excel 文档", extensions: ["docx", "xlsx"] },
         { name: "所有文件", extensions: ["*"] },
       ],
     });
@@ -154,7 +166,11 @@ export function registerFileHandlers(
       return { ok: false, canceled: true };
     }
     const filePath = result.filePaths[0]!;
-    return openDocx(filePath);
+    // "所有文件"那条筛选项允许选到别的东西，这里挡住，别让 docx 解析器去啃它。
+    if (!/\.(docx|xlsx)$/i.test(filePath)) {
+      return { ok: false, message: "只能打开 .docx 文档或 .xlsx 表格。" };
+    }
+    return { ok: true, path: filePath };
   });
 
   ipc.handle(

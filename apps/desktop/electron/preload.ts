@@ -83,7 +83,9 @@ interface StylePreview {
  */
 const api = {
   newFile: (): Promise<OpenResult> => ipcRenderer.invoke("file:new"),
-  openFile: (): Promise<OpenResult> => ipcRenderer.invoke("file:open"),
+  openFile: (): Promise<
+    { ok: true; path: string } | { ok: false; canceled: true } | { ok: false; message: string }
+  > => ipcRenderer.invoke("file:open"),
   saveFile: (payload: SavePayload): Promise<SaveResult> =>
     ipcRenderer.invoke("file:save", payload),
   saveFileAs: (
@@ -93,7 +95,6 @@ const api = {
     ipcRenderer.invoke("file:read-docx", filePath),
 
   // 表格（.xlsx）：跨界 only 结构化格子，工作表 XML 原文留在主进程（spec 阶段 2）。
-  openSheetFile: (): Promise<SheetOpenResult> => ipcRenderer.invoke("sheet:open"),
   readSheet: (filePath: string): Promise<SheetOpenResult> =>
     ipcRenderer.invoke("sheet:read", filePath),
   saveSheet: (payload: SheetSavePayload): Promise<SheetSaveResult> =>

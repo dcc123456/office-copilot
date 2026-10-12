@@ -70,28 +70,17 @@ export interface SessionRecord {
   turns: SessionTurn[];
 }
 
+/** 打开对话框的选择结果：只有路径，读 docx 还是 xlsx 由渲染层按扩展名分派。 */
+export interface OpenPickResult {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+}
+
 interface OfficeCopilotAPI {
   newFile: () => Promise<unknown>;
-  openFile: () => Promise<{
-    ok: boolean;
-    canceled?: boolean;
-    message?: string;
-    path?: string | null;
-    doc?: unknown;
-    header?: unknown;
-    footer?: unknown;
-    section?: unknown;
-    /** styles.xml 声明的段落样式清单，结构见 docx-io 的 PaneStyle。 */
-    styles?: unknown;
-    /** 样式链合并后的可见格式，结构见 docx-io 的 ResolvedStyle。 */
-    styleFormats?: unknown;
-    /** 脚注与尾注的正文，按部件分组，结构见 docx-io 的 FootnoteBodies。 */
-    footnotes?: unknown;
-    /** 批注部件里的正文与署名，结构见 docx-io 的 CommentBody[]。 */
-    comments?: unknown;
-    warnings?: string[];
-  }>;
-  openSheetFile: () => Promise<SheetOpenResult>;
+  openFile: () => Promise<OpenPickResult>;
   readSheet: (filePath: string) => Promise<SheetOpenResult>;
   saveSheet: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveSheetAs: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;

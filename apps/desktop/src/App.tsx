@@ -31,6 +31,7 @@ import type {
   SectionGeometry,
   StyleEdit,
 } from "@office-copilot/docx-io";
+import type { SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
@@ -48,6 +49,7 @@ import { SettingsModal } from "./components/SettingsModal.js";
 import { HistoryPanel } from "./components/HistoryPanel.js";
 import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
+import { SheetView } from "./sheet/SheetView.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
 import { ToastHost, toast } from "./components/ui/Toast.js";
 import { usePanelResize } from "./hooks/usePanelResize.js";
@@ -109,6 +111,13 @@ export function App() {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [started, setStarted] = useState(false);
+  /**
+   * 打开的 `.xlsx` 载荷；null 表示当前是文档那条路。
+   *
+   * 只存跨界的那部分（结构化格子），工作表 XML 原文始终留在主进程（§2.4 / §5.2）。
+   */
+  const [sheetWorkbook, setSheetWorkbook] = useState<WorkbookPayload | null>(null);
+  const [sheetIndex, setSheetIndex] = useState(0);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -239,33 +248,55 @@ export function App() {
     setFilePath(null);
     setDirty(false);
     setStarted(true);
+    setSheetWorkbook(null);
   }, [editor, stopTracking]);
 
-  const handleOpen = useCallback(async () => {
-    if (!editor) return;
-    const r = await window.officeCopilot.openFile();
-    if (!r.ok) {
-      if (!r.canceled && r.message) toast(r.message, "error");
-      return;
-    }
-    stopTracking();
-    editor.commands.setContent(r.doc as never);
-    setHeaderDoc((r.header as never) ?? null);
-    setFooterDoc((r.footer as never) ?? null);
-    setSection((r.section as never) ?? null);
-    setLinkStyle(null);
-    setDocStyles((r.styles as PaneStyle[] | undefined) ?? []);
-    setDocStyleFormats((r.styleFormats as ResolvedStyle[] | undefined) ?? []);
-    setFootnoteBodies((r.footnotes as FootnoteBodies | undefined) ?? {});
-    setCommentBodies((r.comments as CommentBody[] | undefined) ?? []);
-    setCommentSelectedId(null);
-    styleEditsRef.current = [];
-    setFilePath(r.path ?? null);
-    setDirty(false);
-    setStarted(true);
-    if (r.path) window.officeCopilot.addRecent(r.path);
-    if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
-  }, [editor, stopTracking]);
+  /**
+   * 把刚读到的工作簿装进表格视图。
+   *
+   * @param workbook 主进程压好的跨界载荷（只有结构化格子，没有工作表 XML 原文）。
+   * @param p 磁盘路径，标题栏与最近文件都用它。
+   */
+  const openSheetPayload = useCallback(
+    (workbook: WorkbookPayload, p: string) => {
+      stopTracking();
+      setSheetWorkbook(workbook);
+      setSheetIndex(0);
+      setFilePath(p);
+      setDirty(false);
+      setStarted(true);
+      window.officeCopilot.addRecent(p);
+      // 读不懂的属性与没建模的部件都要一路带到 UI，不许在跨界处丢掉（spec §零.7）。
+      const hints = [
+        ...workbook.warnings,
+        ...workbook.unsupported.map((feature) => `${feature.reason} 暂不编辑，已原样保留`),
+      ];
+      if (hints.length) toast(hints.join("\n"));
+    },
+    [stopTracking],
+  );
+
+  /**
+   * 表格视图改了一张表：只替换当前表签那一张，其余原样带回。
+   *
+   * @param next 改过的那张表；`partPath` 不变，保存时主进程按它配对写回。
+   */
+  const changeSheet = useCallback(
+    (next: SheetPayload) => {
+      setSheetWorkbook((current) =>
+        current
+          ? {
+              ...current,
+              sheets: current.sheets.map((sheet, index) =>
+                index === sheetIndex ? next : sheet,
+              ),
+            }
+          : current,
+      );
+      setDirty(true);
+    },
+    [sheetIndex],
+  );
 
   const openPath = useCallback(
     async (p: string, guardDirty = false) => {
@@ -279,12 +310,23 @@ export function App() {
         });
         if (!ok) return;
       }
+      // 拖入 / 最近文件进来的路径也按扩展名分派，跟「打开」对话框一个口径。
+      if (/\.xlsx$/i.test(p)) {
+        const sheet = await window.officeCopilot.readSheet(p);
+        if (!sheet.ok || !sheet.workbook) {
+          if (sheet.message) toast(sheet.message, "error");
+          return;
+        }
+        openSheetPayload(sheet.workbook, sheet.path ?? p);
+        return;
+      }
       const r = await window.officeCopilot.readDocx(p);
       if (!r.ok) {
         if (r.message) toast(r.message, "error");
         return;
       }
       stopTracking();
+      setSheetWorkbook(null);
       editor.commands.setContent(r.doc as never);
       setHeaderDoc((r.header as never) ?? null);
       setFooterDoc((r.footer as never) ?? null);
@@ -302,10 +344,20 @@ export function App() {
       window.officeCopilot.addRecent(p);
       if (r.warnings && r.warnings.length) toast(r.warnings.join("\n"));
     },
-    [editor, stopTracking],
+    [editor, openSheetPayload, stopTracking],
   );
 
-  // Drag a .docx from Finder/Explorer anywhere onto the window to open it.
+  const handleOpen = useCallback(async () => {
+    // 对话框只给路径，读哪套装到哪套：与拖入、最近文件共用 openPath 的分派。
+    const picked = await window.officeCopilot.openFile();
+    if (!picked.ok) {
+      if (!picked.canceled && picked.message) toast(picked.message, "error");
+      return;
+    }
+    await openPath(picked.path ?? "", true);
+  }, [openPath]);
+
+  // 从 Finder / 资源管理器拖文件进窗口即打开：.docx 与 .xlsx 都按扩展名分派。
   const dragDepthRef = useRef(0);
   const [dropActive, setDropActive] = useState(false);
   const hasFiles = (e: React.DragEvent) =>
@@ -331,10 +383,10 @@ export function App() {
       dragDepthRef.current = 0;
       setDropActive(false);
       const file = Array.from(e.dataTransfer.files).find((f) =>
-        /\.(docx|json)$/i.test(f.name),
+        /\.(docx|json|xlsx)$/i.test(f.name),
       );
       if (!file) {
-        toast("只能打开 .docx 文档。", "error");
+        toast("只能打开 .docx 文档或 .xlsx 表格。", "error");
         return;
       }
       const p = window.officeCopilot.pathForFile(file);
@@ -370,6 +422,20 @@ export function App() {
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (sheetWorkbook) {
+      const saved = await window.officeCopilot.saveSheet({
+        path: filePathRef.current,
+        sheets: sheetWorkbook.sheets,
+      });
+      if (saved.ok && saved.path) {
+        setFilePath(saved.path);
+        setDirty(false);
+        window.officeCopilot.addRecent(saved.path);
+      } else if (!saved.canceled && saved.message) {
+        toast(saved.message, "error");
+      }
+      return;
+    }
     if (!editor) return;
     const json = editor.getJSON() as PMDoc;
     const r = await window.officeCopilot.saveFile({
@@ -390,9 +456,26 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies]);
+  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
 
   const handleSaveAs = useCallback(async () => {
+    if (sheetWorkbook) {
+      const saved = await window.officeCopilot.saveSheetAs({
+        path: filePathRef.current,
+        sheets: sheetWorkbook.sheets,
+        defaultName: filePathRef.current
+          ? filePathRef.current.split(/[\\/]/).pop()
+          : "工作簿.xlsx",
+      });
+      if (saved.ok && saved.path) {
+        setFilePath(saved.path);
+        setDirty(false);
+        window.officeCopilot.addRecent(saved.path);
+      } else if (!saved.canceled && saved.message) {
+        toast(saved.message, "error");
+      }
+      return;
+    }
     if (!editor) return;
     const json = editor.getJSON() as PMDoc;
     const defaultName = filePathRef.current
@@ -416,7 +499,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies]);
+  }, [editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
 
   /**
    * 给当前选区新建一条批注，并把侧栏开到那条上。
@@ -930,6 +1013,9 @@ export function App() {
 
   if (!editor) return <div className="app">启动中…</div>;
 
+  // 表格与文档是两套视图：打开 .xlsx 时隐藏的是文档专属的面板（大纲、样式、脚注、批注、AI）。
+  const isSheet = sheetWorkbook !== null;
+
   return (
     <div
       className="app"
@@ -956,12 +1042,14 @@ export function App() {
           } as React.CSSProperties
         }
       >
-        <Outline
-          editor={editor}
-          collapsed={outlineCollapsed}
-          onToggle={() => setOutlineCollapsed((v) => !v)}
-        />
-        {!outlineCollapsed && (
+        {!isSheet && (
+          <Outline
+            editor={editor}
+            collapsed={outlineCollapsed}
+            onToggle={() => setOutlineCollapsed((v) => !v)}
+          />
+        )}
+        {!isSheet && !outlineCollapsed && (
           <div
             className="resizer"
             title="拖动调整宽度，双击复位"
@@ -969,7 +1057,7 @@ export function App() {
             onDoubleClick={outlineResize.onDoubleClick}
           />
         )}
-        {stylePaneOpen && (
+        {!isSheet && stylePaneOpen && (
           <StylePane
             editor={editor}
             styles={docStyles}
@@ -977,7 +1065,7 @@ export function App() {
             onClose={() => setStylePaneOpen(false)}
           />
         )}
-        {footnotePaneOpen && editor && (
+        {!isSheet && footnotePaneOpen && editor && (
           <FootnotePane
             editor={editor}
             bodies={footnoteBodies}
@@ -988,7 +1076,7 @@ export function App() {
             onClose={() => setFootnotePaneOpen(false)}
           />
         )}
-        {commentPaneOpen && editor && (
+        {!isSheet && commentPaneOpen && editor && (
           <CommentPane
             editor={editor}
             bodies={commentBodies}
@@ -1002,9 +1090,17 @@ export function App() {
           />
         )}
         <div className="editor-area">
+          {isSheet && sheetWorkbook ? (
+            <SheetView
+              workbook={sheetWorkbook}
+              activeIndex={sheetIndex}
+              onSelectSheet={setSheetIndex}
+              onChangeSheet={changeSheet}
+            />
+          ) : null}
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
-          {docStyleCss ? <style>{docStyleCss}</style> : null}
-          {started ? (
+          {!isSheet && docStyleCss ? <style>{docStyleCss}</style> : null}
+          {!isSheet && started ? (
             <Toolbar
               editor={editor}
               onInsertImage={insertImage}
@@ -1018,8 +1114,8 @@ export function App() {
               dirty={dirty}
             />
           ) : null}
-          {showFind && <FindBar editor={editor} onClose={() => setShowFind(false)} />}
-          {started ? (
+          {!isSheet && showFind && <FindBar editor={editor} onClose={() => setShowFind(false)} />}
+          {isSheet ? null : started ? (
             editor && (
               <PageChrome
                 editor={editor}
@@ -1044,9 +1140,11 @@ export function App() {
               onOpenRecent={(p) => openPath(p, true)}
             />
           )}
-          <StatusBar wordCount={wordCount} charCount={charCount} editorEl={editorEl} />
+          {!isSheet && (
+            <StatusBar wordCount={wordCount} charCount={charCount} editorEl={editorEl} />
+          )}
         </div>
-        {showAI && !aiCollapsed && (
+        {!isSheet && showAI && !aiCollapsed && (
           <div
             className="resizer"
             title="拖动调整宽度，双击复位"
@@ -1054,7 +1152,7 @@ export function App() {
             onDoubleClick={aiResize.onDoubleClick}
           />
         )}
-        {showAI && (
+        {!isSheet && showAI && (
           <AIPanel
             editor={editor}
             docKey={filePath ?? "未命名文档"}
@@ -1118,7 +1216,7 @@ export function App() {
         <div className="drop-overlay">
           <div className="drop-overlay-card">
             <FileDown size={28} />
-            松开以打开 .docx
+            松开以打开 .docx / .xlsx
           </div>
         </div>
       )}
