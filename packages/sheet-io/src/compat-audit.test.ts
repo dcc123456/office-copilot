@@ -5,7 +5,7 @@ import { auditXlsxPackage } from "./compat-audit.js";
 import { resolveChartSpec } from "./chart-spec.js";
 import { SheetFile } from "./sheet-file.js";
 import { sheetPayloadOf } from "./sheet-dto.js";
-import { runSheetOps, setCellTextOp } from "./sheet-edit.js";
+import { runSheetOps, setCellTextOp, sortRowsOp } from "./sheet-edit.js";
 import type { SheetModel } from "./model.js";
 
 /**
@@ -167,9 +167,21 @@ describe("我们自己的写入产物过审计（不许给自己判损坏）", (
     return file.toBytes();
   }
 
+  /** 按 C 列把夹具的第 3~4 行整体换位（spec 决策 D7），走桌面的保存路径出字节。 */
+  async function bytesAfterSortWrite(): Promise<Uint8Array> {
+    const file = await SheetFile.fromBytes(await buildSampleWorkbookBytes(), { fileName: "sample.xlsx" });
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const made = sortRowsOp(sheet, { range: "A3:E4", column: "C" });
+    if (!made.ok) throw new Error(made.reason);
+    const after = runSheetOps(sheet, [made.op]);
+    file.writeSheet(after.after as SheetModel);
+    return file.toBytes();
+  }
+
   it.each([
     ["原始夹具", async () => buildSampleWorkbookBytes()],
     ["改过格子的写回", bytesAfterCellWrite],
+    ["重排过整行的写回", bytesAfterSortWrite],
     ["加过图表的写回", bytesAfterChartAdd],
   ] as const)("%s：审计返回空数组", async (_label, produce) => {
     expect(await auditXlsxPackage(await produce())).toEqual([]);

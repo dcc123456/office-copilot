@@ -6,12 +6,14 @@
  * 形状与 Word 的 `CoreOp` 同构：`before` 与 `after` 都存在 op 里，逆操作就是两者交换，
  * 落地前先核对现场等于 `before`，对不上就整条跳过并报"部分撤销"（§2.4/§2.5）。
  */
-import { formatA1, formatRange, indexToColName, parseA1 } from "./address.js";
+import { formatA1, formatRange, indexToColName, parseA1, parseRange, type A1Range } from "./address.js";
+import { resolveColumnRef } from "./analysis/sheet-table.js";
 import { parseUserCellText } from "./cell-text.js";
 import { evaluateFormula } from "./formula-eval.js";
 import { shiftFormula } from "./formula-refs.js";
 import { columnWidthPxToChars } from "./geometry.js";
 import type { CellScalarValue, SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
+import { isIdentityPermutation, sortKeyOf, sortPermutation, type SortKey } from "./sheet-sort.js";
 import { colFingerprints, recalculateSheetExtent, rowFingerprints } from "./xlsx-sheet.js";
 
 /** 行/列两个轴：插删与尺寸调整的语义完全对称，所以一套类型管两轴。 */
@@ -89,8 +91,26 @@ export interface ShiftTracksOp {
   removed: SheetTrackBand;
 }
 
+/**
+ * 按一列重排一块矩形里的整行（spec 决策 D7）。
+ *
+ * `before` 与 `after` 是**同一块矩形的两份镜像**（排之前、排之后），逆操作就是两者交换——
+ * 所以 `revertSheetOps` 不需要认识"排序"这件事，撤销也不靠整表前像。
+ * 带外一格都不碰；带内的公式、探出区域的记录尾巴、劈不开的合并区在造 op 时就被拒了（D7 三条拒绝）。
+ */
+export interface SortRowsOp {
+  kind: "sortRows";
+  partPath: string;
+  /** 带首行的内容寻址；`before`/`after` 里的位置与 `target.index` 同框（与 `ShiftTracksOp` 同一约定）。 */
+  target: SheetTrackAddress;
+  /** 参与重排的矩形（0 基，含边界），建 op 时的坐标系；落地时按现场位移平移。 */
+  range: A1Range;
+  before: SheetTrackBand;
+  after: SheetTrackBand;
+}
+
 /** 表格的 op 全集（合并区的编辑还没落地，届时再加一种 op）。 */
-export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp | ShiftTracksOp;
+export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp | ShiftTracksOp | SortRowsOp;
 
 /** 一条 op 没落地时的记录，UI 据此报"部分撤销（x/y）"。 */
 export interface SheetSkippedOp {
@@ -295,6 +315,165 @@ export function insertTracksOp(sheet: SheetPayload, axis: SheetAxis, index: numb
 export function deleteTracksOp(sheet: SheetPayload, axis: SheetAxis, index: number, count = 1): ShiftTracksOp | null {
   if (count < 1 || !Number.isInteger(index) || index < 0) return null;
   return { kind: "deleteTracks", partPath: sheet.partPath, axis, target: trackAddress(sheet, axis, index), count, removed: bandSnapshot(sheet, axis, index, count) };
+}
+
+/** 一次能安全记账的带内格子数上限（D7：op 里同时装前后两份镜像，还要整个进 `modlog` 的 JSON）。 */
+const SORT_BAND_CELL_LIMIT = 50_000;
+
+/** `sortRowsOp` 的入参。 */
+export interface SortRowsInput {
+  /** A1 区域写法，如 `A2:D10`。行范围就是参与重排的数据行，列范围必须盖住整条记录；整列/整行写法（`A:C`、`2:4`）一律拒。 */
+  range: string;
+  /** 键列引用：列字母（`C`）或表头原文（`销售额`），与读工具共用同一个 `resolveColumnRef` 口径。 */
+  column: string;
+  /** 升序还是降序，默认升序；只反转非空格之间的次序，空格恒在带尾。 */
+  order?: "asc" | "desc";
+  /** 首行是否当表头，只影响表头文字形式的键列引用；区域本身按字面落地，不做"自动跳过表头"。 */
+  hasHeader?: boolean;
+}
+
+/** `sortRowsOp` 的结果：要么给一条能落地的 op，要么给一句给人和模型看的理由（不抛异常）。 */
+export type SortRowsResult = { ok: true; op: SortRowsOp } | { ok: false; reason: string };
+
+/**
+ * 造一条"按某一列重排这一块矩形里的整行"的 op（spec 决策 D7）。
+ *
+ * 行序由引擎从现场表算（`AGENTS.md` §2.11）：调用方只交区域、键列与升降，不许自己报一个新行序。
+ * 造出来的 `before`/`after` 是同一矩形的两份镜像，撤销就是把两者交换；三条拒绝（带内公式、
+ * 这些行在区域外还有格子、劈不开的合并区）在这里就拦掉，不给"落地一半"的机会。
+ *
+ * @param sheet 当前表的载荷。
+ * @param input 见 `SortRowsInput`。
+ * @returns `{ok:true, op}`；区域写错、键列认不出、只有 0/1 行、触发三条拒绝、或已经是要的次序时 `{ok:false, reason}`。
+ */
+export function sortRowsOp(sheet: SheetPayload, input: SortRowsInput): SortRowsResult {
+  const parsed = parseRange(input.range.trim().toUpperCase());
+  if (!parsed) return { ok: false, reason: `区域「${input.range}」没法解析，请写成 A2:D10 这种起止都明确的形式。` };
+  if (parsed.end.rowIndex > sheet.lastRowIndex || parsed.end.colIndex > sheet.lastColIndex) {
+    return { ok: false, reason: `区域「${input.range}」超出了这张表的数据区（到第 ${sheet.lastRowIndex + 1} 行、${indexToColName(sheet.lastColIndex)} 列），先缩小区域。` };
+  }
+  if (parsed.end.rowIndex <= parsed.start.rowIndex) return { ok: false, reason: `区域「${input.range}」不足两行，没什么可排的。` };
+  const direction = input.order === "desc" ? "desc" : "asc";
+  const keyColIndex = resolveColumnRef(sheet, input.column, input.hasHeader ?? true);
+  if (keyColIndex === null) return { ok: false, reason: `认不出键列「${input.column}」，请改用列字母（如 C）或表头原文。` };
+  if (keyColIndex < parsed.start.colIndex || keyColIndex > parsed.end.colIndex) {
+    return { ok: false, reason: `键列 ${indexToColName(keyColIndex)} 不在排序区域 ${formatRange(parsed)} 里。` };
+  }
+  const guard = sortBandGuardReason(sheet, parsed);
+  if (guard) return { ok: false, reason: guard };
+
+  const keys = rectKeys(sheet, parsed, keyColIndex);
+  const permutation = sortPermutation(keys, direction);
+  if (isIdentityPermutation(permutation)) {
+    return { ok: false, reason: `${formatRange(parsed)} 按 ${indexToColName(keyColIndex)} 列已经是${direction === "desc" ? "降序" : "升序"}了，不需要改动。` };
+  }
+  return {
+    ok: true,
+    op: {
+      kind: "sortRows",
+      partPath: sheet.partPath,
+      target: trackAddress(sheet, "row", parsed.start.rowIndex),
+      range: parsed,
+      before: rectImage(sheet, parsed),
+      after: rectImage(sheet, parsed, permutation),
+    },
+  };
+}
+
+/**
+ * 排序带的硬约束（D7）：这些行在区域外不许还有格子、区域内不许有公式、合并区不许劈开、格子总数不许超上限。
+ *
+ * 造 op 与落地各查一次：用户在提案排队期间往带里补了公式或写了一格区域外的数据，同样不许动手。
+ *
+ * @param sheet 现场载荷。
+ * @param range 排序矩形（0 基，含边界）。
+ * @returns 需要拒绝时给一句中文理由；可以排返回 null。
+ */
+function sortBandGuardReason(sheet: SheetPayload, range: A1Range): string | null {
+  const inBandRows = (rowIndex: number) => rowIndex >= range.start.rowIndex && rowIndex <= range.end.rowIndex;
+  const inRectCols = (colIndex: number) => colIndex >= range.start.colIndex && colIndex <= range.end.colIndex;
+  let cellCount = 0;
+  for (const cell of Object.values(sheet.cells)) {
+    if (!inBandRows(cell.rowIndex)) continue;
+    if (!inRectCols(cell.colIndex)) {
+      return `${cell.address} 在排序区域之外还有内容，只搬区域内的列会把这一条记录劈成两半，不动它`;
+    }
+    if (cell.formula || cell.rawXml?.includes("<f")) {
+      return `${cell.address} 带公式：Excel 搬动公式时会改写相对引用，本机没有 Excel 能实测它改成什么样（spec 决策 D7），不猜`;
+    }
+    cellCount += 1;
+  }
+  if (cellCount > SORT_BAND_CELL_LIMIT) {
+    return `要排的这一带有 ${cellCount} 格，超过一次能安全记账的 ${SORT_BAND_CELL_LIMIT} 格，先把区域缩小`;
+  }
+  const straddle = sheet.merges.find(
+    (merge) =>
+      merge.range.end.rowIndex >= range.start.rowIndex &&
+      merge.range.start.rowIndex <= range.end.rowIndex &&
+      !(merge.range.start.rowIndex === merge.range.end.rowIndex && inRectCols(merge.range.start.colIndex) && inRectCols(merge.range.end.colIndex)),
+  );
+  if (straddle) return `${straddle.ref} 这个合并区跨行或探出排序区域，重排后合不回原样，不动它`;
+  return null;
+}
+
+/**
+ * 取排序键列在这一带上逐行的键值（行序即现场行序）。
+ *
+ * @param sheet 载荷。
+ * @param range 排序矩形。
+ * @param keyColIndex 键列号（0 基，调用方已确认落在矩形列范围内）。
+ * @returns 与带高等长的键数组；空位在 `sortKeyOf` 里退化成空格秩。
+ */
+function rectKeys(sheet: SheetPayload, range: A1Range, keyColIndex: number): SortKey[] {
+  const letter = indexToColName(keyColIndex);
+  const acc: SortKey[] = [];
+  for (let rowIndex = range.start.rowIndex; rowIndex <= range.end.rowIndex; rowIndex += 1) {
+    acc.push(sortKeyOf(sheet.cells[`${letter}${rowIndex + 1}`]));
+  }
+  return acc;
+}
+
+/**
+ * 拍下这一矩形的镜像。
+ *
+ * @param sheet 载荷。
+ * @param range 排序矩形（0 基，含边界）。
+ * @param permutation 给出时按"新位置 ← 带内原行"重排（`sortPermutation` 的产物）；省略即现场原样。
+ *   行元信息与单行合并区随记录走——用户藏起来的那一行本该跟着它的数据一起挪。
+ * @returns `SheetTrackBand` 形状的前像/后像（`columns` 恒空：行轴不动列宽）。
+ */
+function rectImage(sheet: SheetPayload, range: A1Range, permutation?: number[]): SheetTrackBand {
+  const rowCount = range.end.rowIndex - range.start.rowIndex + 1;
+  const cellsByRow = new Map<number, SheetCell[]>();
+  for (const cell of Object.values(sheet.cells)) {
+    if (cell.rowIndex < range.start.rowIndex || cell.rowIndex > range.end.rowIndex) continue;
+    if (cell.colIndex < range.start.colIndex || cell.colIndex > range.end.colIndex) continue;
+    const bucket = cellsByRow.get(cell.rowIndex);
+    if (bucket) bucket.push(cell);
+    else cellsByRow.set(cell.rowIndex, [cell]);
+  }
+  const metaByRow = new Map(sheet.rows.filter((row) => row.rowIndex >= range.start.rowIndex && row.rowIndex <= range.end.rowIndex).map((row) => [row.rowIndex, row]));
+  const mergesByRow = new Map<number, SheetMerge[]>();
+  for (const merge of sheet.merges) {
+    if (merge.range.start.rowIndex < range.start.rowIndex || merge.range.start.rowIndex > range.end.rowIndex) continue;
+    const bucket = mergesByRow.get(merge.range.start.rowIndex);
+    if (bucket) bucket.push(merge);
+    else mergesByRow.set(merge.range.start.rowIndex, [merge]);
+  }
+  const cells: SheetCell[] = [];
+  const rows: SheetRowMeta[] = [];
+  const merges: SheetMerge[] = [];
+  for (let position = 0; position < rowCount; position += 1) {
+    const source = range.start.rowIndex + (permutation?.[position] ?? position);
+    const target = range.start.rowIndex + position;
+    for (const cell of cellsByRow.get(source) ?? []) {
+      cells.push({ ...cell, rowIndex: target, address: formatA1({ colIndex: cell.colIndex, rowIndex: target }) });
+    }
+    const meta = metaByRow.get(source);
+    if (meta) rows.push({ ...meta, rowIndex: target });
+    for (const merge of mergesByRow.get(source) ?? []) merges.push(moveMerge(merge, true, target - source, 0));
+  }
+  return { cells, rows, columns: [], merges };
 }
 
 /**
@@ -908,11 +1087,92 @@ function sameRowMeta(left: SheetRowMeta, right: SheetRowMeta): boolean {
   );
 }
 
+/**
+ * 落一条排序 op：核对现场 → 整块换成另一份镜像。
+ *
+ * 前进与撤销走同一个函数（逆操作就是 `before`/`after` 交换），所以这里没有"排序专属"的撤销分支：
+ * 现场必须等于 `before` 那份镜像，对不上就整条跳过并报理由（`AGENTS.md` §2.5）。
+ * 行上的 `spans` 描述的是"这一行自己的列分布"，整行搬走时它跟着记录一起走，不需要重算；
+ * 已用区域也不变——排的是同一批行，非空行的下标集合前后一致。
+ *
+ * @param sheet 现场载荷。
+ * @param op 排序 op。
+ * @returns 新载荷与逆操作，或跳过理由。
+ */
+function applySortRowsOp(sheet: SheetPayload, op: SortRowsOp): ApplyOutcome {
+  const from = resolveTrack(sheet, op.target);
+  if (from === null) return { reason: "认不出要重排的第一行：它的内容已被改动，或它被插入/删除的行挪走了" };
+  const shift = from - op.target.index;
+  const range: A1Range = {
+    start: { colIndex: op.range.start.colIndex, rowIndex: from },
+    end: { colIndex: op.range.end.colIndex, rowIndex: from + (op.range.end.rowIndex - op.range.start.rowIndex) },
+  };
+  const guard = sortBandGuardReason(sheet, range);
+  if (guard) return { reason: guard };
+  const before = shiftBand(op.before, "row", shift);
+  const after = shiftBand(op.after, "row", shift);
+  const mismatch = rectMismatchReason(sheet, before, range);
+  if (mismatch) return { reason: mismatch };
+
+  const cells: Record<string, SheetCell> = {};
+  for (const [key, cell] of Object.entries(sheet.cells)) {
+    if (cell.rowIndex >= range.start.rowIndex && cell.rowIndex <= range.end.rowIndex && cell.colIndex >= range.start.colIndex && cell.colIndex <= range.end.colIndex) continue;
+    cells[key] = cell;
+  }
+  for (const cell of after.cells) placeCell(cells, cell, cell.colIndex, cell.rowIndex);
+
+  const inBand = (rowIndex: number) => rowIndex >= range.start.rowIndex && rowIndex <= range.end.rowIndex;
+  const rows = [...sheet.rows.filter((row) => !inBand(row.rowIndex)), ...after.rows.map((row) => ({ ...row }))].sort((left, right) => left.rowIndex - right.rowIndex);
+  const merges = sortMerges([
+    ...sheet.merges.filter((merge) => !inBand(merge.range.start.rowIndex)),
+    ...after.merges.map((merge) => ({ ref: merge.ref, range: { start: { ...merge.range.start }, end: { ...merge.range.end } } })),
+  ]);
+  const next: SheetPayload = { ...sheet, cells, rows, merges };
+  return {
+    // 逆操作的镜像已经在现场坐标系里（`shift` 搬过），锚点也换成落地后那一行的指纹
+    sheet: next,
+    inverse: { ...op, target: trackAddress(next, "row", from), before: after, after: before },
+  };
+}
+
+/**
+ * 现场这一矩形是否与镜像逐格一致（排序落地与撤销共用）。
+ *
+ * 与 `bandMismatchReason` 同一套判据，但范围收在矩形内：带外那一列不属于这次改动，
+ * 用户在带外写东西不该把撤销整体拦死（区域外的格子由 `sortBandGuardReason` 单独拒绝）。
+ *
+ * @param sheet 现场载荷。
+ * @param image 要核对的那份镜像（前进时是 `before`，撤销时是排好之后的那份）。
+ * @param range 现场坐标系里的矩形。
+ * @returns 不一致的理由；一致返回 null。
+ */
+function rectMismatchReason(sheet: SheetPayload, image: SheetTrackBand, range: A1Range): string | null {
+  const inBand = (rowIndex: number) => rowIndex >= range.start.rowIndex && rowIndex <= range.end.rowIndex;
+  const inRect = (colIndex: number) => colIndex >= range.start.colIndex && colIndex <= range.end.colIndex;
+  const liveCells = Object.values(sheet.cells).filter((cell) => inBand(cell.rowIndex) && inRect(cell.colIndex));
+  if (liveCells.length !== image.cells.length) return `第 ${range.start.rowIndex + 1}~${range.end.rowIndex + 1} 行的格子数与这条记录时不同，不覆盖它`;
+  for (const recorded of image.cells) {
+    const live = liveCells.find((cell) => cell.colIndex === recorded.colIndex && cell.rowIndex === recorded.rowIndex);
+    if (!live || !sameCellContent(live, recorded)) return `${recorded.address} 现在装的不是这条记录时的内容，不覆盖它`;
+  }
+  const liveRows = sheet.rows.filter((row) => inBand(row.rowIndex));
+  if (liveRows.length !== image.rows.length) return "这一带的行元信息与记录时不同，不动它";
+  for (const recorded of image.rows) {
+    const live = liveRows.find((row) => row.rowIndex === recorded.rowIndex);
+    if (!live || !sameRowMeta(live, recorded)) return `第 ${recorded.rowIndex + 1} 行的行高/格式与记录时不同，不动它`;
+  }
+  const liveRefs = sheet.merges.filter((merge) => inBand(merge.range.start.rowIndex)).map((merge) => merge.ref).sort();
+  const recordedRefs = image.merges.map((merge) => merge.ref).sort();
+  if (liveRefs.length !== recordedRefs.length || !recordedRefs.every((ref, slot) => ref === liveRefs[slot])) return "这一带的合并区与记录时不同，不动它";
+  return null;
+}
+
 /** 单条 op 的分派；指向别的表就整条跳过。 */
 function applyOne(sheet: SheetPayload, op: SheetCoreOp): ApplyOutcome {
   if (op.partPath !== sheet.partPath) return { reason: "这条 op 指向的是另一张表" };
   if (op.kind === "setCellValue") return applyCellOp(sheet, op);
   if (op.kind === "setColumnWidth") return applyColumnWidthOp(sheet, op);
+  if (op.kind === "sortRows") return applySortRowsOp(sheet, op);
   return applyShiftOp(sheet, op);
 }
 
@@ -992,11 +1252,13 @@ function reanchorTrack(track: SheetTrackAddress, reanchors: Map<string, SheetTra
  *
  * @param sheet 改动前的载荷。
  * @param op 即将应用的 op。
- * @returns `{axis,index}`；插删（改的是整条的位置，不是某条的内容）与空白条（伪指纹，只按位置认）
+ * @returns `{axis,index}`；插删与排序（改的是整段的位置，不是某一条的内容）与空白条（伪指纹，只按位置认）
  *   返回 null，表示这次改动不需要记批内锚点。
  */
 function trackLandedOn(sheet: SheetPayload, op: SheetCoreOp): { axis: SheetAxis; index: number } | null {
-  if (op.kind === "insertTracks" || op.kind === "deleteTracks") return null;
+  // 插删与排序都是"把记录整体挪走"，不是"把某一条改成新内容"：给它们记锚点会把后面的 op 领到错的行上，
+  // 而按内容寻址本来就能在新区位认出那条记录（§2.5 要的就是这个）。
+  if (op.kind === "insertTracks" || op.kind === "deleteTracks" || op.kind === "sortRows") return null;
   const track = op.kind === "setCellValue" ? op.target.row : op.target;
   if (track.fingerprint === EMPTY_TRACK) return null;
   const index = resolveTrack(sheet, track);

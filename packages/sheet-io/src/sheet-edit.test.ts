@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp, sortRowsOp, type SortRowsOp, type SortRowsResult } from "./sheet-edit.js";
 import { parseRange } from "./address.js";
 import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetRowMeta } from "./model.js";
 
@@ -495,5 +495,192 @@ describe("一批 op 改到同一行（阶段 4：整列计算值要一次落地�
     expect(reverted.ok).toBe(false);
     expect(reverted.skipped.length).toBeGreaterThan(0);
     expect(reverted.after.cells["C1"]?.value).toBe(99);
+  });
+});
+
+describe("按一列重排整块行（spec 决策 D7：第五类 op sortRows）", () => {
+  /**
+   * 取排序 op，拒绝时把理由当测试失败抛出来。
+   *
+   * @param result `sortRowsOp` 的返回。
+   * @returns 那条 op；`ok:false` 时抛 `reason`，让失败信息直接是引擎给的理由。
+   */
+  function mustOp(result: SortRowsResult): SortRowsOp {
+    if (!result.ok) throw new Error(result.reason);
+    return result.op;
+  }
+
+  /**
+   * 造一张三行数据的销售表：表头 + 华东300/华北100/华南200。
+   *
+   * @param options.merges 合并区（A1 写法）。
+   * @param options.extraCells 追加的格子（用于造"区域外还有内容"与带公式的行）。
+   * @param options.rows 行元信息。
+   * @returns 载荷；`A2`/`B2` 故意带 `styleIndex` 3，好验证格式跟着记录走。
+   */
+  function salesSheet(options: { merges?: string[]; extraCells?: SheetCell[]; rows?: SheetRowMeta[] } = {}): SheetPayload {
+    const cells: SheetCell[] = [
+      cellOf(0, 0, "区域"),
+      cellOf(1, 0, "销售额"),
+      cellOf(0, 1, "华东", 3),
+      cellOf(1, 1, 300, 3),
+      cellOf(0, 2, "华北"),
+      cellOf(1, 2, 100),
+      cellOf(0, 3, "华南"),
+      cellOf(1, 3, 200),
+      ...(options.extraCells ?? []),
+    ];
+    return sheetOf(cells, [], options.merges ?? [], options.rows ?? []);
+  }
+
+  it("按销售额升序把整行搬到新位次，撤销逐格回到原样", () => {
+    const sheet = salesSheet();
+    const applied = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" }))]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["A2"]?.value).toBe("华北");
+    expect(applied.after.cells["B3"]?.value).toBe(200);
+    expect(applied.after.cells["A4"]?.value).toBe("华东");
+    // 华东那行原本带 styleIndex 3：格式是记录的一部分，搬走时不许留在原位（§2.3）
+    expect(applied.after.cells["B4"]?.styleIndex).toBe(3);
+    expect(applied.after.cells["B2"]?.styleIndex).toBeUndefined();
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("降序排一次、再降序排一次时空操作会被拦下", () => {
+    const sheet = salesSheet();
+    const applied = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额", order: "desc" }))]);
+    expect(applied.after.cells["A2"]?.value).toBe("华东");
+    expect(applied.after.cells["A4"]?.value).toBe("华北");
+    const again = sortRowsOp(applied.after, { range: "A2:B4", column: "销售额", order: "desc" });
+    expect(!again.ok && again.reason).toContain("已经是降序");
+  });
+
+  it("键值相同的行保持原次序：整块搬的是记录，不是把相同值随机打散", () => {
+    const sheet = sheetOf([
+      cellOf(0, 0, "区域"),
+      cellOf(1, 0, "销售额"),
+      cellOf(0, 1, "甲"),
+      cellOf(1, 1, 1),
+      cellOf(0, 2, "乙"),
+      cellOf(1, 2, 5),
+      cellOf(0, 3, "丙"),
+      cellOf(1, 3, 1),
+    ]);
+    const applied = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" }))]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["A2"]?.value).toBe("甲");
+    expect(applied.after.cells["A3"]?.value).toBe("丙");
+    expect(applied.after.cells["A4"]?.value).toBe("乙");
+  });
+
+  it("键列空白的行升序降序都排在带尾", () => {
+    const sheet = sheetOf([
+      cellOf(0, 0, "区域"),
+      cellOf(1, 0, "销售额"),
+      cellOf(0, 1, "五"),
+      cellOf(1, 1, 5),
+      cellOf(0, 2, "空"),
+      cellOf(0, 3, "一"),
+      cellOf(1, 3, 1),
+    ]);
+    const ascending = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" }))]);
+    expect(ascending.after.cells["A4"]?.value).toBe("空");
+    expect(ascending.after.cells["A2"]?.value).toBe("一");
+    const descending = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额", order: "desc" }))]);
+    expect(descending.after.cells["A4"]?.value).toBe("空");
+    expect(descending.after.cells["A2"]?.value).toBe("五");
+  });
+
+  it("行高与单行合并区跟着记录一起挪，不留在原位", () => {
+    const sheet = salesSheet({ merges: ["A2:B2"], rows: [{ rowIndex: 1, heightPt: 30, customHeight: true }] });
+    const applied = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" }))]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.merges.map((merge) => merge.ref)).toEqual(["A4:B4"]);
+    expect(applied.after.rows.find((row) => row.rowIndex === 3)?.heightPt).toBe(30);
+    expect(applied.after.rows.find((row) => row.rowIndex === 1)).toBeUndefined();
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(reverted.after.merges.map((merge) => merge.ref)).toEqual(["A2:B2"]);
+    expect(reverted.after.rows).toEqual(sheet.rows);
+  });
+
+  it("带内有公式、区域外还有格子、合并区劈不开时三条都拒绝", () => {
+    const withFormula = salesSheet({ extraCells: [formulaCell("C2", 2, 1, "B2/1000")] });
+    const formulaRefusal = sortRowsOp(withFormula, { range: "A2:C4", column: "销售额" });
+    expect(formulaRefusal.ok).toBe(false);
+    if (!formulaRefusal.ok) expect(formulaRefusal.reason).toContain("带公式");
+
+    const outside = salesSheet({ extraCells: [cellOf(2, 1, 0.3)] });
+    const outsideRefusal = sortRowsOp(outside, { range: "A2:B4", column: "销售额" });
+    expect(outsideRefusal.ok).toBe(false);
+    if (!outsideRefusal.ok) expect(outsideRefusal.reason).toContain("在排序区域之外还有内容");
+
+    const acrossRows = sortRowsOp(salesSheet({ merges: ["A2:A3"] }), { range: "A2:B4", column: "销售额" });
+    expect(acrossRows.ok).toBe(false);
+    if (!acrossRows.ok) expect(acrossRows.reason).toContain("合并区跨行或探出排序区域");
+
+    const stickingOut = sortRowsOp(salesSheet({ merges: ["A2:C2"] }), { range: "A2:B4", column: "销售额" });
+    expect(stickingOut.ok).toBe(false);
+    if (!stickingOut.ok) expect(stickingOut.reason).toContain("合并区跨行或探出排序区域");
+  });
+
+  it("区域与键列写错时逐条给理由，不猜位置", () => {
+    const sheet = salesSheet();
+    const refusals = [
+      sortRowsOp(sheet, { range: "A2:B2", column: "销售额" }),
+      sortRowsOp(sheet, { range: "A1:B99", column: "销售额" }),
+      sortRowsOp(sheet, { range: "A2:B4", column: "不存在的列" }),
+      sortRowsOp(sheet, { range: "A2:A4", column: "销售额" }),
+      sortRowsOp(sheet, { range: "A:C", column: "销售额" }),
+    ];
+    expect(refusals.map((refusal) => refusal.ok)).toEqual([false, false, false, false, false]);
+    expect(refusals[0]).toEqual({ ok: false, reason: expect.stringContaining("不足两行") });
+    expect((refusals[1] as { reason: string }).reason).toContain("超出了这张表的数据区");
+    expect((refusals[2] as { reason: string }).reason).toContain("认不出键列");
+    expect((refusals[3] as { reason: string }).reason).toContain("不在排序区域");
+  });
+
+  it("排完用户又改了带里一格：撤销报部分撤销，不许按位置硬盖", () => {
+    const sheet = salesSheet();
+    const applied = runSheetOps(sheet, [mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" }))]);
+    // 用户在排好的表上把中间那一行（华南）的销售额改成 999：现场不再是撤销所依据的那份镜像
+    const userEdited = { ...applied.after, cells: { ...applied.after.cells, B3: { ...applied.after.cells["B3"]!, value: 999 } } };
+    const reverted = revertSheetOps(userEdited, applied.inverses);
+    expect(reverted.ok).toBe(false);
+    expect(reverted.skipped[0]?.reason).toContain("B3");
+    expect(reverted.after.cells["B3"]?.value).toBe(999);
+
+    // 改的是锚点那一行（新的第一行）时内容寻址直接认不出，同样一格都不许动
+    const anchorEdited = { ...applied.after, cells: { ...applied.after.cells, B2: { ...applied.after.cells["B2"]!, value: 999 } } };
+    const anchorRevert = revertSheetOps(anchorEdited, applied.inverses);
+    expect(anchorRevert.ok).toBe(false);
+    expect(anchorRevert.skipped[0]?.reason).toContain("认不出要重排的第一行");
+    expect(anchorRevert.after.cells["B2"]?.value).toBe(999);
+  });
+
+  it("排序与改值同批时，改值按内容寻址落到那条记录的新行上", () => {
+    const sheet = salesSheet();
+    const applied = runSheetOps(sheet, [
+      mustOp(sortRowsOp(sheet, { range: "A2:B4", column: "销售额" })),
+      // 这条 op 造在排序前的表上：它认的是"华南/200 那一行"，排序把它搬到了第 3 行
+      setCellTextOp(sheet, "B4", "999")!,
+    ]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["A3"]?.value).toBe("华南");
+    expect(applied.after.cells["B3"]?.value).toBe(999);
+    expect(applied.after.cells["B4"]?.value).toBe(300);
+  });
+
+  it("升序排到一半发现超过一次能安全记账的格数就整条拒", () => {
+    const bigCells: SheetCell[] = [];
+    for (let rowIndex = 0; rowIndex < 16_668; rowIndex += 1) {
+      for (let colIndex = 0; colIndex < 3; colIndex += 1) bigCells.push(cellOf(colIndex, rowIndex, rowIndex * 3 + colIndex));
+    }
+    const refusal = sortRowsOp(sheetOf(bigCells), { range: "A1:C16668", column: "C" });
+    expect(refusal.ok).toBe(false);
+    if (!refusal.ok) expect(refusal.reason).toContain("50000");
   });
 });

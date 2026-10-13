@@ -85,9 +85,14 @@ export {
   setCellFormulaOp,
   setCellTextOp,
   setColumnWidthOp,
+  sortRowsOp,
   type SheetCoreOp,
   type SheetOpsResult,
+  type SortRowsInput,
+  type SortRowsOp,
+  type SortRowsResult,
 } from "./sheet-edit.js";
+export { isIdentityPermutation, sortKeyOf, sortPermutation, type SortKey } from "./sheet-sort.js";
 export {
   aggregateSheet,
   describeSheet,

@@ -4,7 +4,7 @@ import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
 import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp, sortRowsOp } from "./sheet-edit.js";
 import { describeSheet, findRows, readRange } from "./analysis/sheet-table.js";
 import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
@@ -615,6 +615,43 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
       [0, 2, 12],
       [3, 3, 14],
     ]);
+  });
+});
+
+describe("按一列重排整行落盘（spec 决策 D7：格式跟着记录走）", () => {
+  it("真实夹具里能排的区域排完写回文件，读回来整行连格式一起换位", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    // 第 3~4 行是夹具里唯一"整条记录都在区域内、又不带公式"的一带：C 列 150 与 90
+    const applied = runSheetOps(payload, [sortRowsOp(payload, { range: "A3:E4", column: "C" })!.op]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.sheet.cells["A3"]?.value).toBe("3月");
+    expect(edited.sheet.cells["C3"]?.value).toBe(90);
+    expect(edited.sheet.cells["A4"]?.value).toBe("2月");
+    expect(edited.sheet.cells["C4"]?.value).toBe(150);
+    // 日期样式（内建 14）与百分比样式（内建 10）各随各的记录走；A4 的粗体红字不许被拍平
+    expect(edited.sheet.cells["D4"]?.numberFormat).toMatchObject({ numFmtId: 14, isDateLike: true });
+    expect(edited.sheet.cells["E4"]?.numberFormat).toMatchObject({ numFmtId: 10, isDateLike: false });
+    expect(edited.sheet.cells["E4"]?.styleOnly).toBe(true);
+    expect(edited.sheet.cells["E3"]).toBeUndefined();
+    expect(edited.sheet.cells["A4"]?.styleIndex).toBe(4);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    const baseline = (await writeAndReopen(payload)).partXml;
+    expect((await writeAndReopen(reverted.after)).partXml).toBe(baseline);
+  });
+
+  it("真实夹具里探出区域的格子与带公式的行一律拒绝", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const outside = sortRowsOp(payload, { range: "A2:E4", column: "C" });
+    expect(outside.ok).toBe(false);
+    if (!outside.ok) expect(outside.reason).toContain("G2 在排序区域之外还有内容");
+
+    const withFormula = sortRowsOp(payload, { range: "A2:J4", column: "C" });
+    expect(withFormula.ok).toBe(false);
+    if (!withFormula.ok) expect(withFormula.reason).toContain("带公式");
   });
 });
 
