@@ -72,7 +72,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | 2.7 | **没有模板角色的块 = 不产生任何 op**：套版/美化时，判定不了角色的段落一律原样保留（例如封面居中带里放着标题、分节标题保持原样式）。禁止为了"排得好看"改动用户已有的版式意图。 | `[验收]` |
 | 2.8 | **模型只产生提案，不直接写文档**：LLM 输出必须过 zod 校验的工具 schema；任务窗格与桌面"半自动"必须用户点确认才落地（桌面"全自动"是用户显式选择的例外，但仍受 2.5 撤销约束）。 | `[机检]` `packages/word-tools` schema 校验 |
 | 2.9 | **发给 LLM 的文档内容默认截断**（前 200 段、每段 ≤120 字、选区 ≤1000 字；表格侧是区域 ≤50 行 **且 ≤50 列**、列画像 ≤50 列、分组 ≤50 条、单格显示串 ≤120 字，且区域**先与已用区域求交**——模型幻觉出一个表外的区域时给一句理由而不是回几百格空格）。禁止为了方便改成整篇/整表上送。 | `[纪律]` |
-| 2.10 | **新建 OPC 部件必须三处一起登记**：部件本体、指向它的 `<Relationship>`、`[Content_Types].xml` 里对应的 Override（图表还要加表部件里的 `<drawing r:id>` 与两级关系，一共五件）。少一件 Excel 直接判文件损坏——只在"原文件里没有这个部件"时补登记，已有部件不许覆盖。 | `[机检]` `packages/sheet-io/src/sheet-file.test.ts`、`xlsx-chart.test.ts` |
+| 2.10 | **新建 OPC 部件必须三处一起登记**：部件本体、指向它的 `<Relationship>`、`[Content_Types].xml` 里对应的 Override（图表还要加表部件里的 `<drawing r:id>` 与两级关系，一共五件）。少一件 Excel 直接判文件损坏——只在"原文件里没有这个部件"时补登记，已有部件不许覆盖。 | `[机检]` `packages/sheet-io/src/sheet-file.test.ts`、`xlsx-chart.test.ts`、`compat-audit.test.ts`（结构审计过 0 条 + `oc sheet check`） |
 | 2.11 | **表格里的数值一律由引擎算，模型只交引用**。聚合与图表的数值来自 `sheet-io` 读现场表；AI 不许自己填数、不许报二维区域、不许把显示串换算成数字再算。取不到数就回一句理由，不许静默写成 0 或假图。 | `[机检]` `packages/sheet-io/src/xlsx-chart.test.ts`（含 `resolveChartSpec` 的解析与落地用例）、`analysis/sheet-table.test.ts`、`packages/sheet-tools/src/index.test.ts`、`apps/desktop/src/ai/sheetAgent.test.ts` |
 
 ---
@@ -194,6 +194,15 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 - **`.xlsx` 的视觉验证没有通道，用独立读取器代替**：`tmp/pylibs` 里有 openpyxl 3.1.5
   （`PYTHONPATH=tmp/pylibs python3`），把它读我们自己的产物作为第三方交叉验证（系列引用、缓存值、锚点、
   图表类型、包结构）。**别用我们自己的 parser 证明我们自己写对了**——§二 P8 那条红线缺陷就是这么被独立读取器抓出来的。
+- **`.xlsx` 能被办公软件打开，本机有两层可用证据，别再标"完全没通道"**：
+  ① **结构审计**（`packages/sheet-io/src/compat-audit.ts`，也有 CLI `oc sheet check <file>`，有问题退出码 1）——
+  按 ECMA-376 的显式硬约束机检内容类型覆盖、关系可解析、`r:id` 落点、`<worksheet>` 子元素顺序。
+  ② **Numbers.app 可以用 AppleScript 驱动**（`/Applications/Numbers.app`，本机**没装** Microsoft Excel 与 LibreOffice）：
+  `tell application "Numbers" to open POSIX file "…"` 之后能问 `count of tables/charts of sheet 1`、
+  `value of cell "A1" of table 1`，查完 `close d saving no`。要**分两次 `osascript` 调用**（open 与查询写在一段里报 `-2741`），
+  取文档用 `front document` 而不是 `document id …`（后者拿 `table 1` 会 `-1728`）。
+  **Numbers 宽容，能开不等于内容都在**：一份删掉画图部件关系表的文件它照样打开、`charts=0`（图静默丢了）。
+  所以合规判定以审计为准，Numbers 的读数只作"第三方办公软件真的读过这份文件"的证据；图表/字体的**画面效果**仍 BLOCKED。
 - **表格模式下的保存入口与文档模式不同**：`App.tsx` 里文档工具栏是 `{!isSheet && ...}`，表格模式不渲染它，
   所以⌘S（原生菜单 accelerator）在 CDP 合成键盘事件下根本到不了渲染层；实跑验收走命令面板（⌘K 是渲染层
   `window` 上的 keydown，能合成）点「保存」。

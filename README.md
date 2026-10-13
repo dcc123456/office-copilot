@@ -81,6 +81,7 @@ cd apps/cli && pnpm link --global && cd -
 | `oc sheet find <file.xlsx> -c 销量 --criteria ">100"` | 按 COUNTIF 风格条件筛行（`>100`、`<=2`、`<>北京`、`北京`） |
 | `oc sheet aggregate <file.xlsx> --by 地区 -m sum:销量 -m avg:销量` | 分组聚合，数值由引擎从现场表读（`avg` = `average`） |
 | `oc sheet dedupe <file.xlsx> --keys 月份,地区` | 重复行预览：按这些键能安全删几行（删行请回桌面 app，才有撤销与 `.bak`） |
+| `oc sheet check <file.xlsx>` | 兼容性体检：按 OOXML 硬约束查这份文件会不会被 Excel / WPS 判损坏（有问题时退出码 1，可当发布前闸门） |
 
 `oc sheet` 全部是**只读**的：与桌面 app、AI 工具层跑同一份 `packages/sheet-io` 引擎，所以三端对同一个文件的
 数字一致；每条都支持 `--json` 供脚本用。写侧刻意不在 CLI 落地（撤销、modlog、原子替换都在主进程那条路上）。
@@ -347,7 +348,15 @@ pnpm --filter @office-copilot/desktop build    # renderer + main + preload
 - 提案能落地四类：改格（`set_cell`，文本以 `=` 开头当公式）、列宽、插行、删行。排序 / 拆合列 / 统一数字格式刻意不开（理由见 spec §七）。
 - 图表是**原生 chart part**而不是贴图（D5）：`xl/charts/chartN.xml` + 画图部件 + 两级关系 + `[Content_Types].xml` 两条 Override，五件一起登记；保存时逐张落地，插不进就整批取消。Excel / WPS 里能当图表点开改。
 - 三种模式沿用文档侧：半自动先出卡片（把引擎读到的引用与数值排成中文行）再点「插入图表」；全自动排进待写清单；聊天模式只念数字不落地。
-- 验收口径：本机没有 Word/WPS 可视通道，视觉验证一律标 BLOCKED，替代证据是**独立读取器复核**（openpyxl 把我们自己写的 `.xlsx` 读回，逐条对系列引用 / 缓存值 / 锚点 / 图表类型）+ 结构断言单测。
+- 怎么确认导出的 `.xlsx` 能在办公软件里打开（本机没装 Microsoft Excel / LibreOffice，所以是三层证据，spec §二 P9/P10）：
+  ① `oc sheet check <file.xlsx>` —— 按 ECMA-376 的显式硬约束机检（内容类型是否覆盖每个部件、关系是否指向真实存在的部件、
+  `r:id` 有没有落点、`<worksheet>` 子元素顺序），引擎里同一份判定是 `auditXlsxPackage`，我们自己的三种产物（夹具 / 改格写回 /
+  加图表写回）都是 0 条；② **openpyxl 交叉读**（`PYTHONPATH=tmp/pylibs python3`）——独立读取器对系列引用 / 缓存值 / 锚点 / 图表类型；
+  ③ **Numbers 实开**（本机唯一能驱动的办公软件）：`osascript -e 'tell application "Numbers" to open POSIX file "/abs/path.xlsx"'`，
+  再问 `count of charts of sheet 1`、`value of cell "A1" of table 1`。
+  这三层能证明"文件合规、且第三方办公软件真把它读成了表格和图"，**证明不了配色与字体的画面效果**——那一条照旧 `[!] BLOCKED`，
+  要装了 Excel / WPS 的机器补一次目视。注意 Numbers 很宽容：一份引用断链的文件它照样打开、只是 `charts=0`（图静默丢了），
+  所以"Numbers 打得开"不等于合规，合规判定以 ① 为准。
 
 ## 项目结构要点
 
@@ -364,7 +373,7 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 185、`desktop` 439、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 3、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 198、`desktop` 439、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
@@ -400,7 +409,7 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 
 - **regex 替换**：未支持，需要在客户端做字面量探测。
 - **重度 PDF 编辑**：下一阶段会走 LibreOffice headless 把 PDF 转 .docx，在 Word 里编辑后再导回；复杂排版评估商业 SDK（Aspose / PDFTron）。
-- **Excel**：读入 + 保真回写 + 手动编辑 + 结构化 op 与撤销 + AI 分析/整理/计算 + 原生图表部件已落，见「Excel 表格」与 `docs/excel-support-spec.md`。**还没做的**：app 内的图表预览视图（`.xlsx` 里已是原生图表，只是本 app 不画它，卡在"要不要引图表库"这条表态上）、CLI 写侧（撤销、modlog、原子替换都在桌面主进程那条路上，CLI 只读）、公式重算引擎（按 D4 只写公式与缓存值）、透视表 / 条件格式 / 数据验证的编辑（读入时原样保留，不建模）、Word/WPS 的可视验证（本机无可视通道，`AGENTS.md` §8，一律标 BLOCKED）。任务窗格加载项不接表格。
+- **Excel**：读入 + 保真回写 + 手动编辑 + 结构化 op 与撤销 + AI 分析/整理/计算 + 原生图表部件已落，见「Excel 表格」与 `docs/excel-support-spec.md`。**还没做的**：app 内的图表预览视图（`.xlsx` 里已是原生图表，只是本 app 不画它，卡在"要不要引图表库"这条表态上）、CLI 写侧（撤销、modlog、原子替换都在桌面主进程那条路上，CLI 只读）、公式重算引擎（按 D4 只写公式与缓存值）、透视表 / 条件格式 / 数据验证的编辑（读入时原样保留，不建模）、Excel / WPS 打开后的**画面效果**（本机没装 Microsoft Excel，WPS 无可视通道，`AGENTS.md` §8，这条标 BLOCKED）。**"文件能不能被办公软件打开"不再靠猜**：`oc sheet check` 机检 OOXML 硬约束 + openpyxl 交叉读 + Numbers 实开，三层证据见上面「怎么确认导出的 `.xlsx` 能在办公软件里打开」。任务窗格加载项不接表格。
 - **PPT**：未开工，原计划的 `packages/ppt-client` 还没建。
 - **多人/企业部署**：目前是单机自托管；后续加 SSO、审计日志、按租户的 Key 管理。
 - **图标**：`apps/task-pane/public/assets/icon-*.png` 目前是占位 1×1 PNG，上架前替换为正式品牌图标。
