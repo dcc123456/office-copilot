@@ -7,6 +7,7 @@
  * `<dimension>`，其余字节原样保留（`AGENTS.md` §2.4 / spec §零.6）。
  */
 import { formatA1, parseA1, parseRange } from "./address.js";
+import { isSheetEmpty } from "./model.js";
 import type {
   CellScalarValue,
   SheetCell,
@@ -253,7 +254,7 @@ export function colFingerprints(sheet: SheetLike): Record<number, string> {
 
 /** `<dimension/@ref>` 需要的写法：由实际存在的格子推出，不猜 Excel 没写的区域。 */
 function dimensionAttributes(sheet: SheetModel): string {
-  if (sheet.lastColIndex < 0 || sheet.lastRowIndex < 0) return 'ref="A1"';
+  if (isSheetEmpty(sheet)) return 'ref="A1"';
   const far = formatA1({ colIndex: sheet.lastColIndex, rowIndex: sheet.lastRowIndex });
   return `ref="A1${far ? `:${far}` : ""}"`;
 }

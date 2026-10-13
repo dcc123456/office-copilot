@@ -71,6 +71,7 @@ export {
   readOnlyReason,
   sheetPayloadOf,
   usedCellCount,
+  usedRangeOf,
   workbookPayload,
   type SheetPayload,
   type WorkbookPayload,

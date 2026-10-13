@@ -11,8 +11,8 @@
 import { colNameToIndex, formatA1, formatRange, indexToColName, parseA1, parseRange, type A1Range } from "../address.js";
 import { cellDisplayText, formatNumberForDisplay } from "../cell-text.js";
 import { toCriteria } from "../formula-eval.js";
-import type { CellScalarValue, SheetCell } from "../model.js";
-import type { SheetPayload } from "../sheet-dto.js";
+import { isSheetEmpty, type CellScalarValue, type SheetCell } from "../model.js";
+import { usedRangeOf, type SheetPayload } from "../sheet-dto.js";
 import { cellNumberValue, profileColumn, type ColumnProfile } from "./column-profile.js";
 
 /** 允许的聚合函数（刻意只留这五个，其余交给 Excel 公式，见 spec 决策 D4）。 */
@@ -111,6 +111,9 @@ const COLUMN_REPORT_LIMIT = 50;
 /** 区域取数默认最多读多少行（验收 B11：≤50 行样本）。 */
 const RANGE_ROW_LIMIT = 50;
 
+/** 区域取数最多读多少列（与行同一口径：幻觉出一个超宽区域也不许把几百列空格灌给模型）。 */
+const RANGE_COL_LIMIT = 50;
+
 /** 单格显示文本的上限（与 Word 侧"每段 ≤120 字"同一口径，防止一格把上下文撑爆）。 */
 const CELL_TEXT_LIMIT = 120;
 
@@ -133,14 +136,16 @@ export interface RangeRow {
 /** `readRange` 的结果。 */
 export interface RangeRead {
   ok: boolean;
-  /** 区域认不出来时的理由；成功为 undefined。工具层把它原样回给模型，不许改成崩溃。 */
+  /** 区域认不出来、或数据区里没有那块时的理由；成功为 undefined。工具层把它原样回给模型，不许改成崩溃。 */
   reason?: string;
-  /** 实际读出的 A1 区域（被 `maxRows` 截断时是截断后的范围）。 */
+  /** 实际读出的 A1 区域（被行列上限截断时是截断后的范围）。 */
   ref: string;
-  /** 区域内的总行数（截断之前的真实值）。 */
+  /** 请求范围与已用区域**求交后**的总行数（截断之前的真实值）。 */
   rowCount: number;
+  /** 同上，列。 */
   colCount: number;
   rows: RangeRow[];
+  /** 行或列任一方向被收口时为 true。 */
   truncated: boolean;
 }
 
@@ -193,7 +198,7 @@ function tidy(value: number): number {
  * @returns `{ from, to }`；空表返回 `{ from: 0, to: -1 }`，即一条数据行都没有。
  */
 export function dataRowRange(sheet: SheetPayload, hasHeader: boolean): { from: number; to: number } {
-  if (sheet.lastColIndex < 0 || sheet.lastRowIndex < 0) return { from: 0, to: -1 };
+  if (isSheetEmpty(sheet)) return { from: 0, to: -1 };
   return { from: hasHeader ? 1 : 0, to: sheet.lastRowIndex };
 }
 
@@ -269,7 +274,7 @@ export function resolveColumnRef(sheet: SheetPayload, ref: string, hasHeader: bo
 export function describeSheet(sheet: SheetPayload, options: DescribeOptions = {}): SheetProfile {
   const hasHeader = options.hasHeader ?? true;
   const maxColumns = options.maxColumns ?? COLUMN_REPORT_LIMIT;
-  const empty = sheet.lastColIndex < 0 || sheet.lastRowIndex < 0;
+  const empty = isSheetEmpty(sheet);
   const columns: ColumnProfile[] = [];
   const headerWarnings: string[] = [];
   const seen = new Map<string, number>();
@@ -291,7 +296,7 @@ export function describeSheet(sheet: SheetPayload, options: DescribeOptions = {}
   }
 
   const { from, to } = dataRowRange(sheet, hasHeader);
-  const range = empty ? undefined : formatRange({ start: { colIndex: 0, rowIndex: 0 }, end: { colIndex: sheet.lastColIndex, rowIndex: sheet.lastRowIndex } });
+  const range = usedRangeOf(sheet);
   return {
     sheetName: sheet.name,
     partPath: sheet.partPath,
@@ -432,22 +437,40 @@ export function duplicateGroups(sheet: SheetPayload, input: { keys: string[]; ha
 /**
  * 读一块区域的显示文本（AI 要看"这几行长什么样"时用它）。
  *
- * 行数与单格长度都在这里收口（验收 B11），调用方不必再自己截断；`ref` 回的是**实际读出**的范围，
- * 模型据此知道剩下的行没上送。文本一律走 `cellDisplayText`，本文件不出现第二处单位换算（§2.1）。
+ * 行列数与单格长度都在这里收口（验收 B11），调用方不必再自己截断；请求范围**先与已用区域求交**，
+ * 完全落在数据区之外时给一句理由而不是回几百列空格（模型据此改正引用，`ref` 回的是实际读出的范围）。
+ * 文本一律走 `cellDisplayText`，本文件不出现第二处单位换算（§2.1）。
  *
  * @param sheet 表载荷。
  * @param input 见 `ReadRangeInput`。
- * @returns `RangeRead`；区域写法认不出时 `ok:false` + 理由，不抛异常（验收 B9）。
+ * @returns `RangeRead`；区域写法认不出或数据区里没有那块时 `ok:false` + 理由，不抛异常（验收 B9）。
  */
 export function readRange(sheet: SheetPayload, input: ReadRangeInput): RangeRead {
   const bounds = parseRangeOrCell(input.range);
   if (!bounds) {
     return { ok: false, reason: `认不出区域「${input.range}」，请写成 A1:D20 或 C2 这样的形式。`, ref: "", rowCount: 0, colCount: 0, rows: [], truncated: false };
   }
+  const usedRef = usedRangeOf(sheet);
+  const outside = !usedRef || bounds.start.colIndex > sheet.lastColIndex || bounds.start.rowIndex > sheet.lastRowIndex;
+  if (outside) {
+    return {
+      ok: false,
+      reason: `「${input.range}」在这张表的数据区（${usedRef ?? "空表"}）之外，那里没有内容。改用列字母或表头再定位一次。`,
+      ref: "",
+      rowCount: 0,
+      colCount: 0,
+      rows: [],
+      truncated: false,
+    };
+  }
   const maxRows = Math.max(1, input.maxRows ?? RANGE_ROW_LIMIT);
+  // 与数据区求交在前、按上限截断在后：rowCount/colCount 报的是求交后的真实值，模型看得见"剩下的没上送"。
+  const areaLastCol = Math.min(bounds.end.colIndex, sheet.lastColIndex);
+  const areaLastRow = Math.min(bounds.end.rowIndex, sheet.lastRowIndex);
+  const lastCol = Math.min(areaLastCol, bounds.start.colIndex + RANGE_COL_LIMIT - 1);
+  const lastRow = Math.min(areaLastRow, bounds.start.rowIndex + maxRows - 1);
   const letters: string[] = [];
-  for (let colIndex = bounds.start.colIndex; colIndex <= bounds.end.colIndex; colIndex += 1) letters.push(indexToColName(colIndex));
-  const lastRow = Math.min(bounds.end.rowIndex, bounds.start.rowIndex + maxRows - 1);
+  for (let colIndex = bounds.start.colIndex; colIndex <= lastCol; colIndex += 1) letters.push(indexToColName(colIndex));
   const rows: RangeRow[] = [];
   for (let rowIndex = bounds.start.rowIndex; rowIndex <= lastRow; rowIndex += 1) {
     rows.push({
@@ -460,11 +483,11 @@ export function readRange(sheet: SheetPayload, input: ReadRangeInput): RangeRead
   }
   return {
     ok: true,
-    ref: formatRange({ start: bounds.start, end: { colIndex: bounds.end.colIndex, rowIndex: lastRow } }),
-    rowCount: bounds.end.rowIndex - bounds.start.rowIndex + 1,
-    colCount: letters.length,
+    ref: formatRange({ start: bounds.start, end: { colIndex: lastCol, rowIndex: lastRow } }),
+    rowCount: areaLastRow - bounds.start.rowIndex + 1,
+    colCount: areaLastCol - bounds.start.colIndex + 1,
     rows,
-    truncated: lastRow < bounds.end.rowIndex,
+    truncated: lastRow < areaLastRow || lastCol < areaLastCol,
   };
 }
 

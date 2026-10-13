@@ -18,11 +18,11 @@ import {
   describeSheet,
   duplicateGroups,
   findRows,
-  formatA1,
   readOnlyReason,
   readRange,
   sheetPayloadOf,
   usedCellCount,
+  usedRangeOf,
   type AggregateFunction,
   type SheetPayload,
   type WorkbookPayload,
@@ -100,12 +100,6 @@ export function pickSheet(sheets: SheetPayload[], ref?: string): SheetPayload | 
   return Number.isInteger(index) && index >= 1 && index <= sheets.length ? sheets[index - 1] : undefined;
 }
 
-/** 已用区域的 A1 写法；空表返回"空表"。 */
-function usedRangeOf(sheet: SheetPayload): string {
-  if (sheet.lastColIndex < 0 || sheet.lastRowIndex < 0) return "空表";
-  return `A1:${formatA1({ colIndex: sheet.lastColIndex, rowIndex: sheet.lastRowIndex })}`;
-}
-
 /**
  * 把 `--metric fn:列` 翻成引擎的聚合规格。
  *
@@ -179,7 +173,7 @@ export function registerSheetCommands(program: Command): void {
       const rows = loaded.workbook.sheets.map((item, index) => ({
         order: index + 1,
         name: item.name,
-        usedRange: usedRangeOf(item),
+        usedRange: usedRangeOf(item) ?? "空表",
         cellCount: Object.keys(item.cells).length,
         merges: item.merges.length,
         columnWidthRecords: item.columns.length,
@@ -258,9 +252,9 @@ export function registerSheetCommands(program: Command): void {
       });
       if (!read.ok) reportReason(read.reason);
       emit(opts.json, read, () => {
-        log(pc.bold(read.ref) + pc.dim(`  ${read.rowCount} 行 × ${read.colCount} 列`));
+        log(pc.bold(read.ref) + pc.dim(`  数据区里这块共 ${read.rowCount} 行 × ${read.colCount} 列`));
         for (const row of read.rows) log(`  ${pc.dim(String(row.rowNumber).padStart(4, " "))}  ${row.cells.join("\t")}`);
-        if (read.truncated) warn(`区域太大，只读了前 ${read.rows.length} 行（共 ${read.rowCount} 行）。`);
+        if (read.truncated) warn(`只读了 ${read.rows.length} 行 × ${read.rows[0]?.cells.length ?? 0} 列，剩下的没上送（行可用 --max-rows 放宽，列一律最多读 50 列）。`);
       });
     });
 

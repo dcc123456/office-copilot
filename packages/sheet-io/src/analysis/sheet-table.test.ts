@@ -269,6 +269,34 @@ describe("readRange：上送给模型看的行样本（截断在这里收口，�
     expect(readRange(sheet, { range: "A1:B3" }).rows[2]!.cells).toEqual(["2月", ""]);
   });
 
+  it("请求范围超出数据区时按数据区收口，行列数报的是求交后的真实值", () => {
+    const read = readRange(sampleSheet(), { range: "A1:F10" });
+    expect(read).toMatchObject({ ok: true, ref: "A1:D5", rowCount: 5, colCount: 4, truncated: false });
+    expect(read.rows.length).toBe(5);
+  });
+
+  it("整块都在数据区之外时给一句理由，不回几百列空格（CLI 探针实测的缺陷）", () => {
+    const read = readRange(sampleSheet(), { range: "F10:H20" });
+    expect(read.ok).toBe(false);
+    expect(read.reason).toContain("数据区");
+    expect(read.reason).toContain("A1:D5");
+    expect(read.rows).toEqual([]);
+    const empty = readRange(sheetOf([]), { range: "A1:B2" });
+    expect(empty.ok).toBe(false);
+    expect(empty.reason).toContain("空表");
+  });
+
+  it("列数同样有上限：超宽区域只读前 50 列，colCount 仍是真实列数", () => {
+    const columnCount = 60;
+    const wide = sheetOf([
+      Array.from({ length: columnCount }, (_, position) => `列${position + 1}`),
+      Array.from({ length: columnCount }, (_, position) => position),
+    ]);
+    const read = readRange(wide, { range: `A1:${indexToColName(columnCount - 1)}2` });
+    expect(read).toMatchObject({ ok: true, ref: `A1:${indexToColName(49)}2`, colCount: columnCount, truncated: true });
+    expect(read.rows[0]!.cells.length).toBe(50);
+  });
+
   it("区域写法认不出来时给理由，不抛异常（验收 B9）", () => {
     const read = readRange(sampleSheet(), { range: "这块区域写错了" });
     expect(read.ok).toBe(false);

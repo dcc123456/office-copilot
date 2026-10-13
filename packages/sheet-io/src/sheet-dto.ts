@@ -6,7 +6,8 @@
  * 渲染层要的是格子内容；保存时主进程重新从磁盘打开、把内容按 `applySheetPayload` 写回，
  * 于是原文永远不过 IPC，也不会被渲染层的副本污染。
  */
-import type { SheetLike, SheetModel, UnsupportedFeature } from "./model.js";
+import { formatRange } from "./address.js";
+import { isSheetEmpty, type SheetLike, type SheetModel, type UnsupportedFeature } from "./model.js";
 
 /** 一张表去掉 XML 原文后的可结构化克隆形状（其余字段全是 JSON 安全值）；结构化 op 也在这一层上做。 */
 export type SheetPayload = SheetLike;
@@ -37,6 +38,17 @@ export const EDITABLE_CELL_LIMIT = 200000;
  */
 export function usedCellCount(workbook: Pick<WorkbookPayload, "sheets">): number {
   return workbook.sheets.reduce((sum, sheet) => sum + Object.keys(sheet.cells).length, 0);
+}
+
+/**
+ * 已用区域的 A1 写法（表画像、区域取数的理由文案、CLI 的 `sheet info` 共用这一处，`AGENTS.md` §3.2）。
+ *
+ * @param sheet 表载荷（只用到两个下标，测试可传局部对象）。
+ * @returns 形如 `A1:D5`；空表返回 undefined，由调用方决定是显示"空表"还是报一句理由。
+ */
+export function usedRangeOf(sheet: Pick<SheetPayload, "lastColIndex" | "lastRowIndex">): string | undefined {
+  if (isSheetEmpty(sheet)) return undefined;
+  return formatRange({ start: { colIndex: 0, rowIndex: 0 }, end: { colIndex: sheet.lastColIndex, rowIndex: sheet.lastRowIndex } });
 }
 
 /**

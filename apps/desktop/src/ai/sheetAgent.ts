@@ -103,7 +103,7 @@ export function sheetContextOf(sheet: SheetPayload, hasHeader: boolean): string 
   if (profile.columnsTruncated) lines.push(`列太多，只描述前 ${profile.columns.length} 列，列数按 ${profile.columnCount} 算。`);
   lines.push(`列画像：${JSON.stringify(profile.columns)}`);
   if (sample?.ok) {
-    lines.push(`样本（${sample.ref}，共 ${sample.rowCount} 行）：${JSON.stringify(sample.rows)}`);
+    lines.push(`样本（${sample.ref}，共 ${sample.rowCount} 行 × ${sample.colCount} 列${sample.truncated ? "，超出上限的部分没上送" : ""}）：${JSON.stringify(sample.rows)}`);
     if (sample.truncated) lines.push(`样本只到第 ${sample.rows.at(-1)?.rowNumber ?? 0} 行，后面的行要用 sheet_read_range 接着读。`);
   }
   return lines.join("\n");

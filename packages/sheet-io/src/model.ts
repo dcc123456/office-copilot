@@ -131,8 +131,8 @@ export interface WorkbookModel {
 /** 一张表的形状去掉 XML 原文：跨界载荷与结构化 op 都只认这个（`sheet-dto.ts` 的 `SheetPayload` 即它）。 */
 export type SheetLike = Omit<SheetModel, "sourceXml">;
 
-/** 空表判定：`lastColIndex < 0` 即没有任何已用格。 */
-export function isSheetEmpty(sheet: SheetModel): boolean {
+/** 空表判定：`lastColIndex < 0` 即没有任何已用格（跨界载荷与模型都只认这两个下标）。 */
+export function isSheetEmpty(sheet: Pick<SheetLike, "lastColIndex" | "lastRowIndex">): boolean {
   return sheet.lastColIndex < 0 || sheet.lastRowIndex < 0;
 }
 
