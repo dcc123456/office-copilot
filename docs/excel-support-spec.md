@@ -63,7 +63,7 @@
 
 ## 二、选型研究结论（先取证，后写码 —— `AGENTS.md` §6.1/§6.2）
 
-以下版本号 / 许可证为本机 `npm view` 输出（2026-10-12，`registry.npmjs.org`），不是文档转述。
+以下版本号 / 许可证为本机 `npm view` 输出（2026-10-12，`registry.npmjs.org`，Chart.js 一行是 2026-10-13 补测），不是文档转述。
 
 | 候选 | 事实 | 结论 |
 | --- | --- | --- |
@@ -73,7 +73,8 @@
 | **Univer `@univerjs/*@1.0.4`**（Apache-2.0） | `@univerjs/charts`、`@univerjs/screens` 在 npm 上 **404 不存在**；社区报道与官方定位都把图表/透视表留在企业版 | **否决**：① 图表（我们的核心需求之一）不在开源包内；② 它自带渲染层与样式体系，违反全局约束 3；③ 它有自己的工作簿模型和序列化，等于把"未知部件保留"这条红线交给第三方 |
 | **`@visactor/vtable@1.26.8`** / **`ag-grid-community@36.2.0`** / **`@glideapps/glide-data-grid@6.0.3`**（均 MIT） | 只是网格/表格可视化组件，不含 OOXML IO；vtable 自带主题系统与 canvas 绘制 | **否决作为文档模型宿主**；`ag-grid-community` 可在阶段 2 之后作为**可选**网格替换候选（MIT、纯 DOM、可被我们的 CSS 覆盖）。第一版网格自己写，理由见决策 D2 |
 | **SpreadJS（葡萄城）/ Fortune-sheet** | SpreadJS 商业授权（npm 上取不到公开包）；`fortune-sheet` **已于 2022-06-19 从 npm 撤包** | **否决**：一个要钱，一个已死 |
-| **ECharts `6.1.0`**（Apache-2.0，依赖 zrender/tslib） | 成熟、支持 SSR 到 canvas、按需引入可控体积 | **采纳为图表渲染/交互层**（app 内查看与出图），但 `.xlsx` 里的图表**不用它**——见决策 D5 |
+| **ECharts `6.1.0`**（Apache-2.0，依赖 zrender/tslib） | 成熟、支持 SSR 到 canvas、按需引入可控体积 | **初评采纳，2026-10-13 被实测体积数据推翻**（本机 `npm view` 复核：unpacked 60.3 MB，还要带 zrender）——`.xlsx` 里的图表本来就不用它（决策 D5），app 内预览只要静态一张图，为这个装 60 MB 不值 |
+| **Chart.js `4.5.1`**（MIT，只依赖 `@kurkle/color`） | npm 实测 unpacked 6.18 MB、**不带 CSS 文件**（`AGENTS.md` §5.4 那条"样式只用 `src/styles/*.css`"因此不受威胁）、canvas 绘制、控制器与元素可按需 `register` | **最终采纳为 app 内预览层**（决策 D5，`23db5af`）。同批复核过的另外两个：`uplot@1.6.32`（MIT、0.55 MB）否决——**没有饼图**且自带 CSS；`recharts@3.10.1`（MIT、7.5 MB）否决——要拉 `react-redux`/`@reduxjs/toolkit`/`immer`/`reselect`，等于给桌面端装第二套状态栈，违反 §3"禁止第二套同类基础设施" |
 
 一手来源（规格与 API 形态以这些为准）：ECMA-376 Part 1 的 `18.2 SpreadsheetML / Sheet Data`、`18.6`（sharedStrings）、`18.5`（styles/numFmtId）、`20.3 Drawing`、`21.2 Chartparts`；Microsoft Learn 的 *Workbook part and structure* 与 *Introduction to the Office Open XML file format*；`@rgrove/parse-xml` 与 `jszip` 的仓库 README。
 
@@ -86,7 +87,7 @@
 | P3 | 日期/数字/公式在 `sheet1.xml` 里的真实形态 | 日期 = **纯序列号 + 样式决定显示**：`<c r="D2" s="2"><v>46053</v></c>`（2026-01-31 的序列号，与 `1899-12-30` 起算的推算值逐位相符；**没有 `t` 属性**，与数字无法从 `<c>` 本身区分）。`s` 是 **cellXfs 的位置索引**：`s="2"`→`numFmtId="164"`（自定义 `yyyy-mm-dd`），`s="5"`→`numFmtId="14"`（内建日期），`s="3"`→`numFmtId="10"`（百分比），`s="1"`→`numFmtId="3"`。自定义格式在 `<numFmts>` 里（`numFmtId>=164`）。公式 = `<c r="G2"><f>SUM(C2:C4)</f><v>360</v></c>`，**与决策 D4"写公式同时写缓存值"完全一致**。空但带样式的格会保留成 `<c r="H2"/>`，所以稀疏模型必须能存"只有格式没有值"的格。颜色一律 **ARGB 8 位十六进制**（`<color rgb="FFFF0000"/>`、`<color theme="1"/>` 两种形态并存） | 同上 "P3 sheet1.xml"、"P3 cellXfs" 行；`node -e` 取 `styles.xml` 的 `numFmts/cellXfs/fonts` |
 | P4 | 我们的 writer 产出的 `.xlsx` 能否被 WPS 正常打开并保留未建模部件 | `[!] BLOCKED`——本机 WPS 无可视验证通道（`AGENTS.md` §8、`docs/word-parity-spec.md` §8.12）。**替代证据形式**：读回解析一致 + OOXML 结构断言 + 用第三个独立库（exceljs `readXlsxFile`）读我们的产物作为交叉验证 | 阶段 1 的单测 |
 | P5 | `@rgrove/parse-xml` 处理带前缀命名空间的部件 | 三个部件全部解析通过：`sheet1.xml`（`xmlns` + `xmlns:r` + `xmlns:mc` + `mc:Ignorable="x14ac"` + `xmlns:x14ac`）、`sharedStrings.xml`、`styles.xml`。属性里的 `x14ac:dyDescent` 这类扩展属性**会原样出现在 attributes 里**，所以"重排/重建元素"就会丢它们 → 见下面 P5 派生出的硬约束 | 同上 "P5 parse OK …" 三行 |
-| P6 | ECharts 离屏 canvas → PNG 在 Electron 里的可行性 | 留到阶段 5 用最小探针验证；app 内跑不了 CDP harness（`AGENTS.md` §8），届时按 `css-verification-without-electron` 的先例用独立 Chromium 探针出证据，主流程仍标 BLOCKED | `[ ]` |
+| P6 | Chart.js 离屏 canvas → PNG 在 Electron 里的可行性（报告插图用，库按 §二 表末行定为 Chart.js） | 留到阶段 5 用最小探针验证；app 内跑不了 CDP harness（`AGENTS.md` §8），届时按 `css-verification-without-electron` 的先例用独立 Chromium 探针出证据，主流程仍标 BLOCKED。**2026-10-13 部分改写**：app 内的**预览**已经用真 CDP 探针跑通（§八 `23db5af` 那行，画布实像素计数 + 截图），离屏 → PNG 那条通路仍未做 | `[ ]` |
 | P7 | 手工拼原生 chart part 是否可行（D5 的前提，原计划阶段 0 做 spike） | **可行，不降级**。本机用 openpyxl 3.1.5 往同样的数据上插一张柱状图（`tmp/chart-ref.xlsx`）拆出最小集：`[Content_Types].xml` 两条 Override（`drawingml.chart+xml` / `drawing+xml`）+ `xl/charts/chart1.xml`（`c:chartSpace>chart>title/plotArea/<kind>Chart+catAx/valAx`）+ `xl/drawings/drawing1.xml`（`xdr:oneCellAnchor>from/ext>graphicFrame>…>c:chart r:id`）+ `xl/drawings/_rels/drawing1.xml.rels` + `xl/worksheets/_rels/sheet1.xml.rels`，**五件少一件即判损坏**。两条由此定死的约束：① `CT_Worksheet` 只允许一个 `<drawing>`，已有画图部件（图片/别的图表）的表**明确拒绝**而不是追加；② `@Target` 必须相对源部件目录（`../drawings/drawing1.xml`），少一层就断链。落地后由**第三方读取器交叉验证**（替代 P4 的 BLOCKED）：`tmp/chart-out-{bar,line,pie}.xlsx` 用 openpyxl 读回，`charts=1`、`val='销售'!$C$2:$C$4` 缓存 `120/150/90`、`cat` 缓存 `粗蓝/2月/3月`、锚点 `(col 4,row 1)`、含 `<&"` 的标题原样取回 | `tmp/chart-ref.xlsx`、`tmp/chart-check.py` 输出、`packages/sheet-io/src/xlsx-chart.test.ts`（`294ce88`） |
 | P8 | 只有 `xl/sharedStrings.xml` 部件本身够不够（阶段 5 由独立读取器抓出的缺陷，P1 的补强） | **不够**。来源表若全程用 `<c t="inlineStr">` 存文本（openpyxl 默认就这么写），包里本来没有 `xl/sharedStrings.xml`；我们第一次写文本会新建它，但只塞部件不够——必须在 `xl/_rels/workbook.xml.rels` 补一条 `Type="…/sharedStrings"` 的关系，并在 `[Content_Types].xml` 补 `/xl/sharedStrings.xml` 的 Override，两者少任一个：openpyxl 读回直接 `IndexError: list index out of range`（`shared_strings[int(value)]`），Excel 判文件损坏。原文件已有这张表时结构不动，只在"新建"这条分支补登记 | `tmp/chart-app.xlsx`（openpyxl 生成的 inlineStr 样本）、`tmp/sst-fix-probe.mjs`、`sheet-file.test.ts`「原文件没有字符串表时把新表登记齐全」（`fa693d2`） |
 | P9 | "能不能被办公软件直接打开"这句话在本机有什么可用通道（用户明确要求：导出要能在 office Excel 里直接打开） | **三条，都不如桌面 Excel，但合起来能机检**。① **openpyxl 3.1.5**（`tmp/pylibs`，`PYTHONPATH=tmp/pylibs python3`）：独立读取器，只读值与结构，**不做合规判定**，我们写歪了它照样返回（P8 那次是它读回直接 `IndexError` 才暴露问题）。② **Numbers.app 走 AppleScript**：`tell application "Numbers" to open POSIX file "…"` 之后能问 `count of tables/charts of sheet 1`、`value of cell "A1" of table 1`，**这是本机唯一能拿到"某个办公软件真的把你的文件读成了什么"的通道**；实测 `tmp/chart-out-line.xlsx` → `tables=1 charts=1 A1=月份`。要拆成两次 `osascript` 调用（open 与查询合在一段会报 `-2741` 语法错误），查完 `close d saving no`。③ **自己按 ECMA-376 写结构审计**（`compat-audit.ts`，`6b770f5`）：Excel 打开时真正会查的那几项硬约束（内容类型覆盖、关系可解析、`r:id` 有落点、`<worksheet>` 子元素顺序）翻成 8 个问题码。**判据的对照实验**：故意删掉 `xl/drawings/_rels/drawing1.xml.rels` 并把 `pageMargins` 插到 `dimension` 之前，审计报 2 条（`unresolved-relationship-id` + `worksheet-child-order`），**同一个文件交给 Numbers → 打得开，但 `charts=0`**（图表被静默丢掉），而修补前的产物是 `charts=1`。所以两条各自都不够：Numbers 宽容（能开 ≠ 内容都在），审计只能保证"规范明写的硬约束没违反" | `tmp/make-broken-xlsx.mjs`、`tmp/check-ours.log`、`tmp/check-broken.log`、上面两组 Numbers 读数、`packages/sheet-io/src/compat-audit.test.ts`（`6b770f5`） |
@@ -140,14 +141,22 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### D5 — 图表分两层，`.xlsx` 内必须是原生 chart part
 
-- **app 内**：AI 产出 `ChartSpec`（数据区域 + 图型 + 编码），用 ECharts 渲染/交互；导出 docx/PDF 时 canvas→PNG 插入（复用 `src/ai/diagramCanvas.ts:136 renderDiagram` 的现成思路）。
+- **app 内**：AI 产出 `ChartSpec`（数据区域 + 图型 + 编码），在提案卡片上画一张**预览图**，让用户点"插入图表"之前就看见结果；导出 docx/PDF 时 canvas→PNG 插入（复用 `src/ai/diagramCanvas.ts:136 renderDiagram` 的现成思路）。
 - **写进 `.xlsx`**：生成 OOXML 原生图表部件（`xl/charts/chart1.xml` + `xl/drawings/*` + 关系），这样在 Excel 里图表是**可编辑对象**并随数据更新。
 - **风险与门槛**：chart part 是 ECMA-376 里最繁琐的部分之一。阶段 0 必须先做一个最小 spike（一张柱状图，手工拼 chart XML + 关系 + drawing，读回断言，`tmp/` 里，不进主干 —— `AGENTS.md` §6.5），
   spike 失败则图表降级为"贴图插入工作表"，并**在本文档与 README 明确记录降级**，不许静默把贴图说成图表。
 - **spike 结论（2026-10-13，`294ce88`）**：**成功，不降级**。写侧已落地成引擎能力 `resolveChartSpec` + `SheetFile.addChart`，
   产物由 openpyxl 3.1.5 读回交叉验证（数字见 §二 P7）。两条实测出来的边界进了实现：`CT_Worksheet` 只能有一个 `<drawing>`
   （已有图片/图表的表明确拒绝，返回 `drawing-exists`，不去重排别人的关系），关系 `@Target` 必须相对源部件目录（`opc.ts:relativeTarget`）。
-  app 内的 ECharts 查看与 `sheet_create_chart` 工具面**还没接**，这是阶段 5 剩下的部分。
+  app 内的查看与 `sheet_create_chart` 工具面**还没接**，这是阶段 5 剩下的部分。
+- **app 内预览的库选型（2026-10-13，用户裁决"引入图表库"）**：本条原先写的 ECharts 是初评，装之前先用 `npm view` 复核了体积与依赖，结论换人：
+  **Chart.js `4.5.1`**（MIT，unpacked 6.18 MB，只依赖 `@kurkle/color`，不带 CSS 文件）胜出；ECharts 6.1.0 要 60.3 MB 并带 zrender/tslib，
+  uPlot 1.6.32 虽小（0.55 MB）但**没有饼图**且自带样式表（撞 `AGENTS.md` §5.4"样式只用 `src/styles/*.css`"），
+  recharts 3.10.1 会拉进 `react-redux`/`@reduxjs/toolkit`/`immer`/`reselect`——等于给桌面端装第二套状态栈，§3 明令禁止。
+  产物实测（同一入口两次 `vite build`，挂预览前 / 后）：`dist/assets/index-*.js` 1,110.93 kB（gzip 359.14 kB）→ **1,289.18 kB（gzip 421.41 kB）**，
+  即 **+178.25 kB raw / +62.27 kB gzip**；比按需 `register` 而不用 `chart.js/auto`（后者会打进二十种图型与全部比例尺）是这笔体积的主要来源。
+  预览配置刻意拆成纯模块 `apps/desktop/src/sheet/chartPreviewModel.ts`：桌面 vitest 跑在 node 环境、没有 canvas，
+  这样"引用→数据→图"的映射有单测可断言，`ChartPreview.tsx` 只负责把配置挂到 canvas 上（§3.3 引擎层装配分离）。
 
 ### D6 — AI 侧：新增 `sheet-tools` 工具面 + 桌面 `sheetAgent`，复用面板状态机
 
@@ -189,7 +198,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 落地的部件（与原计划文件的对应）：`opc.ts`（解 zip + 关系图 + `.xlsm` 拒绝）、`model.ts`/`address.ts`/`datetime.ts`/`color.ts`
 （唯一换算入口）、`xlsx-strings.ts`/`xlsx-styles.ts`（**只追加不重排**的 string 表与 `cellXfs`）、`xlsx-sheet.ts`
 （持有 `sourceXml`，写回时用正则**定点替换 `<sheetData>` 与 `<dimension>`**，其余元素与扩展属性原样搬运）、`sheet-file.ts`
-（惰性解析 + 快照/还原 + 只覆写变化过的部件）。夹具生成器 `scripts/make-sample-sheet.ts` 的 XML 逐字抄自 §二 的实测样本。
+（惰性解析 + 快照/还原 + 只覆写变化过的部件）。夹具生成器 `packages/sheet-io/scripts/make-sample-sheet.ts` 的 XML 逐字抄自 §二 的实测样本。
 
 **交叉验证（P4 的替代证据，`tmp/xlsx-probe/cross-read.mjs`）**：我们的 writer 产出 5508 字节 → 第三方独立库 exceljs 4.4.0 读回：
 工作表名 `销售/空表`、`A6="新增项目"`（新增共享字符串）、`C6=300`、`G6` 公式 `SUM(C2:C6)` 缓存值 `660`、
@@ -382,7 +391,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 
 ### 阶段 5 · 图表
 
-**目标**：AI 选区出图；app 内可看（ECharts），`.xlsx` 内为原生可编辑图表（D5 spike 成功）或明确记录的贴图降级。
+**目标**：AI 选区出图；app 内可看（Chart.js 预览，`23db5af`），`.xlsx` 内为原生可编辑图表（D5 spike 成功）或明确记录的贴图降级。
 **完成判定**：`ChartSpec` 校验与渲染单测；写出的 chart part 读回结构断言；导出 PDF/docx 报告时图以 PNG 出现；WPS/Excel 可视验证标 BLOCKED 并给出结构级替代证据。
 **进度（2026-10-13）**：写侧已落 `294ce88`——`ChartSpec` 校验单测（解析 3 条 + 落地 4 条）、chart part 的读回结构断言、
 以及 P4 口径的**第三方交叉验证**（openpyxl 3.1.5 把 bar/line/pie 三份产物都读回，系列引用/缓存值/锚点/标题逐条对上）。
@@ -391,7 +400,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 `addChart`，插不进就整批取消（§2.4）。真端点实测（`tmp/chart-agent-probe.mjs`，见 §八 该行）模型确实自己调了这个工具，
 折线图数值由引擎从现场表读成 `[100,120,150,150]`；**真实 app 也跑通**（§7.2，`tmp/chart-ui-probe2.mjs`：卡片→点"插入图表"→命令面板保存，数字见 §八）。
 这条路上独立读取器还抓出一个 §2 红线缺陷并修在 `fa693d2`（§二 P8）。
-未落：app 内 ECharts 查看、canvas→PNG 报告插图（都卡在 §6.4 那条"要不要引图表库"的表态）。Word/WPS 可视验证仍 `[!] BLOCKED`（本机无可视通道，`AGENTS.md` §8）。
+未落：canvas→PNG 报告插图（P6，要等 `sheet:*` → docx 那条需求真出现）。app 内的图表预览**已落**（§八 `23db5af`）：§6.4 那条"要不要引图表库"的表态由用户在 2026-10-13 给出（"引入图表库"），据此按 `npm view` 的实测体积选定 Chart.js，详见决策 D5。Word/WPS 可视验证仍 `[!] BLOCKED`（本机无可视通道，`AGENTS.md` §8）。
 
 ### 阶段 6 · 收口：CLI、文档、规则落地
 
@@ -439,7 +448,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 4 | 工具 schema 与 JSON 工具定义 | **实际**：`packages/sheet-tools/src/index.ts`（四个读工具）+ 引擎侧先补三条读口 `packages/sheet-io/src/analysis/sheet-table.ts`（`readRange`/`findRows`/`describeSheet` 的 `maxColumns`），理由见阶段 4 提交 12 | `b87a88b` + `dba6fb4` + `cd65c5b`（提交 12） |
 | 4 | 写侧工具 schema 与提案：`sheet_submit_proposal`（改格/改公式/插删行列/去重/列宽） | **实际**：`packages/sheet-tools/src/index.ts` 的 `SheetEdit` 四类 + `SubmitProposalArgs`。**已定的决策**：排序、拆合列、统一数字格式**不开**——现有四类 op 各自有安全的逆操作，第五类 move op 没建（要建得先解决"撤销整表前像"与 §2.5 的内容寻址），用一批 `setCellTextOp` 凑排序更会把用户后来的手工编辑牵连进去。边界写进工具描述与系统提示词，模型只能提这四项（理由见 §七同一行） | `dba6fb4` + `1f5ec47`（提交 13） |
 | 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | **实际**：`src/ai/sheetAgent.ts`（提示词、`sheetContextOf` 截断拼装、工具环、`sheetOpsOfProposal` 提案→op）+ `electron/aiHandlers.ts` 的 `ai:tool-turn` 一轮转发 + preload/`global.d.ts` 的跨界类型（§5.2 三处一起改）为 `c52c1b7` + `e69780e`（提交 13）。**卡片渲染分支已落**：`src/ai/AIPanel.tsx` 的表格分支（提案卡 / "应用到表格" / 全自动直接落地 / 暂停后"继续"），面板按模式各挂一份会话 key | `c52c1b7` + `e69780e` + `f0f9853` |
-| 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | **已落**：`packages/sheet-io/src/chart-spec.ts`（`resolveChartSpec` 只收 A1 引用，数值/引用串/显示串一律引擎从现场表取，失败给一句理由；px→EMU 只在这一处）。**未落**：`src/sheet/ChartView.tsx`（ECharts 查看）、canvas→PNG——卡在 §6.4 的图表库表态（P6 同一条）；`e19aece` 里卡片只把引擎解析好的引用/数值/落点排成中文行给用户看，不预先造第二套画图代码 | `294ce88`（未落部分待 §6.4 有结论） |
+| 5 | `ChartSpec` + app 内预览 + canvas→PNG | **已落**：`packages/sheet-io/src/chart-spec.ts`（`resolveChartSpec` 只收 A1 引用，数值/引用串/显示串一律引擎从现场表取，失败给一句理由；px→EMU 只在这一处）＋ `apps/desktop/src/sheet/{chartPreviewModel.ts,ChartPreview.tsx}`（Chart.js 预览，`23db5af`）。**未落**：canvas→PNG 报告插图（P6）。原计划的 `src/sheet/ChartView.tsx`（ECharts 查看）没有落地：§6.4 的图表库表态 2026-10-13 才拿到，且实测体积把初评的 ECharts 换成了 Chart.js（决策 D5）；`e19aece` 里卡片只把引擎解析好的引用/数值/落点排成中文行给用户看，不预先造第二套画图代码 | `294ce88`、`23db5af` |
 | 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | **实际**：`packages/sheet-io/src/xlsx-chart.ts`（纯 XML 拼装）+ `sheet-file.ts` 的 `SheetFile.addChart`（五件一起登记，`addedParts` 进 `toBytes`、`restoreSnapshot` 一起回退）+ `opc.ts:relativeTarget`（`resolveTarget` 的逆）。原计划的提交 14/15 合成一个 `294ce88`：解析与写入共用同一份测试文件，按文件粒度拆不开，硬拆只会造出编译不过的中间提交 | `294ce88` |
 | 5 | `sheet_create_chart` 工具面 + app 内侧的图表卡片与保存落地 | **实际**：`src/ai/sheetAgent.ts`（工具 case、`{kind:"chart"}` 回合出口、系统提示词那段"只给区域，数值由引擎读"）+ `src/ai/AIPanel.tsx`（三种模式各一条路：卡片行/计数/按钮/已应用文案，引擎只给码与结构化引用，中文在渲染层拼，§5.7）+ `src/App.tsx` 的 `pendingCharts`（按 `partPath` 暂存、同表换掉前一张、换文档与新建都清空）+ `electron/sheetHandlers.ts` 的 `saveSheetDoc(..., charts)` 与 `global.d.ts` 的 `SheetSaveRequest.charts`（§5.2 三处一起改，未开新通道） | `e19aece` |
 | 5 | 独立读取器复核保存路径时抓出的包结构缺陷（§二 P8） | `packages/sheet-io/src/sheet-file.ts`（`writeSharedStringsPart` 只在"原文件没有这张表"时补关系与 Override；追加关系那段收敛成 `relsWith`/`nextRelIdFor`，图表那条路复用同一处，§3.2）+ `xlsx-strings.ts` 三个常量 + `sheet-file.test.ts` 两条回归（inlineStr 来源、原有表逐字节不动） | `fa693d2` |
@@ -579,7 +588,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 26. `[x]` `pnpm dev:desktop` 起真实 app 手工走通主流程，收尾报告看到什么；跑不起来就如实说明卡点，不许用单测冒充可视验收。
    **实测**：阶段 3/4/5 用临时 CDP harness 驱动**构建产物**里的真实 app（等价于 dev 版，且避开了用户自己在跑的实例），走完"开表→改格→保存→撤销→再保存→插图表→再保存"，看到的卡片文案、按钮、状态与落盘五件部件都记在 §八 对应行；表格模式下没有文档工具栏（`App.tsx` 的 `!isSheet`），保存走命令面板这条已写进 `AGENTS.md` §8 环境事实。
 27. `[x]` 测试产物只落 `tmp/` 且清理；不新增任何二进制夹具入库（`AGENTS.md` §7.3）。
-    **实测**：夹具由 `scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
+    **实测**：夹具由 `packages/sheet-io/scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
     **已清**（2026-10-13）：阶段 5 的 app 探针目录里那份 `config.json`（从用户 `userData/config.json` **复制来的、含真实 Key**）已删掉，`tmp/chart-ui-profile/` 与 `profile2/` 两份都在；全仓 grep 那段 Key 的明文（含 `tmp/`）零命中，两份探针脚本只在运行时从配置读 `provider.apiKey`，不把密钥写进源码。仍要记住的前提：`tmp/` **没有 `.gitignore` 条目**，所以它一直以待跟踪目录出现在 `git status` 里，任何 `git add -A` 都会把当时的探针产物（可能含复制来的配置）一起带上——这条已写进 `AGENTS.md` §7.3，禁用 `git add -A` 不是可选项。
 28. `[x]` 提交信息中文、`<type>(<scope>)`、一事一提交，功能与格式化不夹带；已推送并复核远端。
     **实测**：阶段 6 拆成 `a72196e`（feat(cli)：只读子命令 + 该包第一条测试）与本提交（docs：README/AGENTS/spec 回填）两件事，各自推送后 `git status -sb` + `git ls-remote origin main` 双重复核；用户自己的未提交 WIP（`HistoryPanel.tsx`、`styles.css`）没有被夹带进任何一个提交。
@@ -603,12 +612,17 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | **"我们的文件能被 Excel 打开"只能靠自家 parser 自证**（用户明确要求导出可在办公软件直接打开） | 自家 parser 与自家 writer 是同一套理解，写歪了会一起读歪（P8 那次 `IndexError` 就是外部读取器抓的）；单测全绿也可能是一份 Excel 拒收的文件 | **已解决**（`6b770f5`+`72e95f6`）：`auditXlsxPackage` 按 ECMA-376 的显式约束（§10.1.2/§9.2/§13.2.1/§18.3.1.100）机检，`oc sheet check` 有问题时退出码 1；同一套判定钉进单测（夹具/写回/加图表三种产物各 0 条），并用一份故意做坏的文件证明它不是橡皮图章（报 2 条，Numbers 打得开但 `charts=0`）。**以后每次新增 OPC 部件都跑一遍这条**（§2.10 的机检面） |
 | **Numbers 打得开被当成"Excel 也没问题"** | Numbers 宽容：引用断了它照样开、把丢掉的内容静默省略，用它当判据会把坏文件放过去 | 已按实测划清口径（§二 P9）：Numbers 的读数只用作"第三方真的读过这份文件"的证据，**合规判定归结构审计**，两者结论不一致时（打得开但 `charts=0`）按审计走 |
 | **审计全绿被当成"内容也没变瘦"**（§二 P11 实测：`<c t="inlineStr"><is><r>` 的 run 保存一次就被拍平成纯文本，而审计写前写后都是 0 条） | 审计只判规范明写的硬约束（顺序、引用、登记齐全），"文件照样能开、用户的格式没了"它一个字都不报；只看自家 parser 读回同样看不见，因为读的时候本来就没建模 | **已解决**（`bbc7eba`）：按"未建模内容挂 `rawXml` 原样回写"这条既有口径补上 `inlineStr` 那一支（§2.3），改值时 `setCellTextOp` 造的新格子天生不带它，覆盖照常能生效（两条回归单测）。判据也补了一层：合规判据之外再加**逐特性对拍**（openpyxl 自写 10 份夹具 → 桌面真实保存路径 → openpyxl 再读，现在 10/10 逐字段一致）。以后新增"读不懂就留着"的分支都按这条对拍法验，不要只跑审计 |
+| **"画出来了"的断言只看像素数量不够**（§八 `23db5af`：预览首跑非透明像素 15,798 个，看着像成功了） | 图表预览给用户看却几乎看不见（Chart.js 默认系列色是浅灰），用户照样会点"插入图表" | 非透明像素计数只能证明"有东西"，**必须再看一次真截图**才证明"看得清"。本仓唯一可视通道是 CDP `Page.captureScreenshot`（带 `clip` + `scale:2`）打构建产物；就是这张图抓出浅灰线，补 8 色系列色板后重跑（15,798 → 16,261 像素）再由人眼确认蓝线清楚 |
 | 无法用 Word/WPS 目视验证 | 验收永远缺最后一环 | 沿用 Word 线的做法：结构级替代证据 + 明确 BLOCKED（`docs/word-parity-spec.md` §8.12） |
 | 引入 Univer/SheetJS 的诱惑（"省几周"） | 破坏全局约束 3/6 | 本文 §二 已留否决理由；未来若要改选，必须先推翻 §零.6 再讨论 |
 
 ---
 
 ## 八、总验收表（随进度填写，键为提交哈希）
+
+> 表里引用的 `tmp/**` 是本机探针与日志，按 `AGENTS.md` §6.5/§7.3 **不进主干**（`tmp/` 也没有 `.gitignore` 条目，
+> 所以靠"永不 `git add -A`"约束）：在别人的 fresh clone 里这些路径不存在，可复现的判据是同一条备注指向的**主干单测**
+> （如 `packages/sheet-io/src/sheet-file.test.ts`、`apps/desktop/src/sheet/chartPreviewModel.test.ts`）。
 
 | 阶段 | 提交 | 判据编号 | 状态 | 实测/BLOCKED 说明 |
 | --- | --- | --- | --- | --- |
@@ -638,23 +652,25 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 5 | `294ce88` | D5 的写侧（阶段 0 就标了风险的 P7） | `[x]`（写侧；查看/工具面待下一个提交） | `resolveChartSpec` 只收 A1 引用，数值/引用串/显示串一律引擎从现场表取；`SheetFile.addChart` 五件一起登记（图表本体、画图部件、两层关系、content types 两条 Override），表部件只插一个 `<drawing r:id>`。**独立读取器复核**：`tmp/chart-out-{bar,line,pie}.xlsx` 用 openpyxl 3.1.5 读回，`charts=1`、`val='销售'!$C$2:$C$4` 缓存 `120/150/90`、类别缓存 `粗蓝/2月/3月`、锚点 `(col 4,row 1)`、含 `<&"` 的标题原样取回；一张表已有 `<drawing>` 时第二次请求返回 `drawing-exists`，不重排别人的关系。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **183**（新增 `xlsx-chart.test.ts` 7 条）/ sheet-tools 11 / desktop 437 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 5 | `e19aece` | D5 的工具面与 app 内侧（`sheet_create_chart` → 卡片 → 随保存落地） | `[x]`（工具面与保存侧；ECharts 查看与 canvas→PNG 见下一行） | 引擎侧 `sheetAgent.ts` 多一条 `sheet_create_chart` 与 `{kind:"chart"}` 回合出口；面板三种模式各一条路（半自动挂"插入图表"卡片、聊天只念引用与数值、全自动直接排进待写清单）；`App.tsx` 用 `pendingCharts` 按 `partPath` 暂存（图表是包部件不是格子，不进工作簿载荷；同表再来一张换掉前一张，因为 `CT_Worksheet` 只允许一个 `<drawing>`）；`saveSheetDoc(..., charts)` 逐张 `addChart`，插不进就整批取消并回一句中文（§2.4/§5.7）。**真端点实跑**（`tmp/chart-agent-probe.mjs`，node 侧 import 同一个 `sheetAgent.ts`）：说"画成折线图"时模型 1 轮直接调 `sheet_create_chart`，引擎从现场表读成 `cat='销售'!$A$2:$A$4`、值 `[100,120,150,150]`，写盘 7902 字节；同一份表上说"画成柱状图"，模型这次改走 `sheet_aggregate`+`sheet_submit_proposal`（往 G1:H4 写辅助区）——工具可达但不被确定性选中，这条如实记进 §七。**真实 app 实跑**（§7.2，CDP 打构建产物 + 独立 `--user-data-dir` + 本地 config，`tmp/chart-ui-probe2.mjs`）：`tmp/chart-app.xlsx` 打开 → 切半自动 → "按月份把销售额画成折线图" → 卡片标题「AI 表格提案 / 插入一张折线图」、计数「1 张图表」、按钮 `插入图表/放弃/忽略` → 点后状态变「已排进待写清单」并如实提示"撤销栈管不到图表，要回退请用同名 .bak" → 表格模式没有文档工具栏（`App.tsx:1210` 的 `!isSheet`），保存走命令面板（⌘K→"保存"）→ 落盘产物五件齐全（`xl/charts/chart1.xml`、`xl/drawings/drawing1.xml` + 它的 rels、`xl/worksheets/_rels/sheet1.xml.rels`、两条 Override）+ `.bak` 在。**独立读取器复核 app 产物**：openpyxl 3.1.5 读回 `charts=1`、`LineChart`、`val='销售'!$C$2:$C$5` 缓存 `100/120/150/150`、`cat='销售'!$A$2:$A$5`、锚点 `(col 6,row 1)`、`A1=月份 C2=100 C5=150`、`5×5` 未变形。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **185** / sheet-tools 12 / desktop **439**（新增 chart 那条与"区域取不到数"那条）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 5 | `fa693d2` | §二 P8：只有 inlineStr 的来源表存盘后读方找不到字符串表（独立读取器抓出的 §2 红线） | `[x]` | 驱动 app 那条路时让 openpyxl 审计我们自己的产物，`tmp/chart-agent-out-折线图.xlsx` 直接 `IndexError: list index out of range`。比对 zip 清单定死原因：来源表全程 `<c t="inlineStr">`（openpyxl 就这么写）时包里没有 `xl/sharedStrings.xml`，我们新建部件却没登记 workbook 关系与 `[Content_Types]` Override。`writeSharedStringsPart` 只在"原文件没有这张表"时补这两处；原有表的结构逐字节不动（单测第二条钉住）。顺带把追加关系那段逻辑收敛成 `relsWith`/`nextRelIdFor` 给图表复用（§3.2）。重跑探针：`tmp/chart-app-saved.xlsx` 与二次保存的 `chart-app-saved2.xlsx`（幂等）都被 openpyxl 读回 `BarChart`、`cat='销售'!$A$2:$A$4`、缓存 `100/120/150`、`D2=已核对`；app 那次实跑的产物里 `xl/_rels/workbook.xml.rels` 也带上了这条关系 |
-| 5 | 待起 | D5 剩下的一半：ECharts 查看（`src/sheet/ChartView.tsx`）与 canvas→PNG 报告插图（P6） | `[ ]` | 需要先答 §6.4："现有依赖能否覆盖"——仓内没有图表库，相邻先例只有 `apps/desktop/src/ai/diagramCanvas.ts:136 renderDiagram`（canvas 2D → PNG dataURL）。本次刻意不预先造第二套画图代码：卡片把引擎解析好的引用/数值/落点排成中文给人看，真正的图在 `.xlsx` 里是原生对象 |
+| 5 | `23db5af` | D5 剩下的一半（app 内预览）：图表卡在点"插入图表"之前先画出图来 | `[x]`（预览；canvas→PNG 报告插图另起一行） | 用户 2026-10-13 对 §6.4 表态"引入图表库"，按 `npm view` 实测体积选 **Chart.js 4.5.1**（MIT、6.18 MB、只依赖 `@kurkle/color`、无 CSS 文件），否决 ECharts 6.1.0（60.3 MB + zrender/tslib）、uPlot 1.6.32（无饼图、自带样式表，撞 §5.4）、recharts 3.10.1（要装 react-redux/RTK/immer/reselect = 第二套状态栈，撞 §3）。产物体积同一入口两次构建：1,110.93 kB（gzip 359.14）→ 1,289.18 kB（gzip 421.41）。配置构造落 `apps/desktop/src/sheet/chartPreviewModel.ts`（纯模块，因为桌面 vitest 是 node 环境、没有 canvas），`ChartPreview.tsx` 只挂 canvas，样式并进 `styles/aiPanel.css`（§5.4 唯一样式入口）。**真实 app 实跑**（§7.2，`tmp/chart-preview-probe.mjs`：CDP 打构建产物 + 独立 `--user-data-dir` + **本地桩端点**（8899，返回 `sheet_create_chart` 的 tool_call），这样既不碰用户密钥又走的是真 `sheetAgent` 工具环）：打开 `tmp/chart-ui.xlsx` → 半自动 → "按月份把销售额画成折线图" → 桩请求 1 次、工具面 7 条 → 卡片出现折线预览，画布 CSS 尺寸 `[279,186]`、后备缓冲 `[558,372]`（2× DPR），**非透明像素 16,261 个**（这条才是"真画出来了"的判据，`window.Chart` 在打包后的 renderer 里不是全局量，探针那项 `knownToChartJs=false` 无意义）→ 点"插入图表"变「已排进待写清单」且预览仍在。截图 `tmp/chart-preview.png` 是唯一能"看见"的通道，也正是它暴露了缺陷：第一条预览是 Chart.js 默认浅灰线、几乎看不见，于是模型里补了 8 色系列色板（`#4e79a7` 起），重跑后非透明像素 15,798 → 16,261。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **446**（新增 `chartPreviewModel.test.ts` 4 条：引用与数值逐字搬、图型映射、图例/标题显隐规则、改预览配置不污染引擎数据）/ sheet-io **200** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
+| 5 | 待起 | canvas→PNG 报告插图（P6：把图表嵌进 docx/PDF 报告） | `[ ]` | 预览已经用真像素证明 Chart.js 在 Electron 里画得出来，离屏 → PNG 这条通路仍要等 `sheet:*` → docx 报告的需求真出现再做（§6.4：不为假想的未来做抽象） |
 | 6 | `a72196e` | 阶段 6 完成判定（三端一致）、D18、E24–E25、E27 | `[x]` | `apps/cli/src/sheet.ts` 六条只读子命令**只做装配**，import 的是桌面在用的同一份 `sheet-io`（不是各写一套再对拍），所以"三端对同一份 `.xlsx` 行为一致"结构性成立。同一份夹具上的实测数字：`oc sheet stats` → `C 销量 number 非空 3 互异 3  Σ 360 均值 120 中位 120 90~150`、`E 增长 … Σ 12.00% 缺失 2`、`F 备注 empty 缺失 3`；`oc sheet aggregate --by 地区 -m sum:销量 -m avg:销量` → `华东 2 行 sum(销量)=270 average(销量)=135` / `华北 1 行 sum=90 average=90` / `共 2 组`——与桌面网格显示的显示串、与 openpyxl 读回的缓存值同一口径（`3月` 那份 `sum=300` 也这样核过）。CLI 唯一新增依赖是仓内的 `@office-copilot/sheet-io`（§6.4：引擎已有，不引第三方表格库）。本次门禁：`pnpm build` EXIT=0（顺带抓出测试夹具里 `freeze: null` 的类型错——那个字段是"可选"不是"可空"）、`pnpm test` EXIT=0，逐包核对 **apps/cli 3**（该包第一条测试）/ sheet-io **185** / sheet-tools **12** / desktop **439** / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 6 | `3528019` | B9、B11（区域取数的收口） | `[x]` | 阶段 6 的 CLI 冒烟里抓出的缺陷：`oc sheet read -r Z99:ZZ2` 回了 `Z2:ZZ51 98 行 × 677 列` 全空。修法是 `readRange` 先与已用区域求交、列封顶 50，整块在区外时给一句含实际数据区的理由（同一条夹具现在回 `「Z99:ZZ2」在这张表的数据区（A1:J4）之外…`，`A1:AZ60` 收口成 `A1:J4 共 4 行 × 10 列`）。`ref` 改成"实际读出的范围"、`rowCount`/`colCount` 改成"求交后的真实值"，`truncated` 行列任一方向收口都算——所以模型看得见"剩下的没上送"而不是"表就这么大"。已用区域的 A1 写法抽成 `usedRangeOf`（表画像 / 取数理由 / CLI `sheet info` 三处共用，§3.2），空表判定复用包内既有 `isSheetEmpty`（它此前是个没人调用的导出，§3.5）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **188**（+3 条收口用例）/ desktop 439 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 3 / server 2 |
-| 6 | 本提交（docs） | 阶段 6 完成判定（§9 标清已落地/待落地）、E28 | `[x]` | `README.md`：`oc sheet` 命令表与只读说明、§三 下的 Excel 小节（网格/公式/op 撤销/五个读工具/原生图表/验收口径）、示例脚本第 5 条用真实输出、逐包通过数改成 2026-10-13 的实测、`已知边界` 里 Excel 一行改写成"已落 / 未落"、四节里写明 `tmp/` **没有 `.gitignore` 条目**。`AGENTS.md`：§0 范围加表格、§2 新增 **2.10 新建 OPC 部件三处一起登记**与 **2.11 数值一律由引擎算、模型只交引用**，§2.1/2.3/2.5/2.8/2.9 补上表格侧的单点与机检位置，§3 禁止第二套 xlsx 实现，§5.1 依赖方向写清表格侧，§7.3/§8 补两条环境事实（独立读取器代替可视通道、表格模式的保存入口），§9 表格里表格相关项逐条标"已落地"并写出测试文件。**仍未落**（照实标 `[ ]`）：app 内图表预览与 canvas→PNG（上一条那一行）、CLI 写侧、`sheet:*` 的 docx 报告嵌入；A4/A8 的 Word/Excel 真重算与可视验证本机没有通道，保持 `[!] BLOCKED` |
+| 6 | 本提交（docs） | 阶段 6 完成判定（§9 标清已落地/待落地）、E28 | `[x]` | `README.md`：`oc sheet` 命令表与只读说明、§三 下的 Excel 小节（网格/公式/op 撤销/五个读工具/原生图表/验收口径）、示例脚本第 5 条用真实输出、逐包通过数改成 2026-10-13 的实测、`已知边界` 里 Excel 一行改写成"已落 / 未落"、四节里写明 `tmp/` **没有 `.gitignore` 条目**。`AGENTS.md`：§0 范围加表格、§2 新增 **2.10 新建 OPC 部件三处一起登记**与 **2.11 数值一律由引擎算、模型只交引用**，§2.1/2.3/2.5/2.8/2.9 补上表格侧的单点与机检位置，§3 禁止第二套 xlsx 实现，§5.1 依赖方向写清表格侧，§7.3/§8 补两条环境事实（独立读取器代替可视通道、表格模式的保存入口），§9 表格里表格相关项逐条标"已落地"并写出测试文件。**仍未落**（照实标 `[ ]`）：canvas→PNG（app 内图表预览由 `23db5af` 落下，见上一行）、CLI 写侧、`sheet:*` 的 docx 报告嵌入；A4/A8 的 Word/Excel 真重算与可视验证本机没有通道，保持 `[!] BLOCKED` |
 | 6 | `6b770f5` | §二 P9/P10、A8 的机检那一半（用户要求：导出要能在办公软件里直接打开） | `[x]`（合规判定；目视仍 BLOCKED） | 新增 `packages/sheet-io/src/compat-audit.ts`：`auditXlsxPackage(bytes)` 把 Excel 打开时会查的显式硬约束翻成 8 个问题码——§10.1.2 每个部件都要被 `[Content_Types].xml` 覆盖（`part-not-declared` / `declared-part-missing`）、§9.2 关系 Target 必须存在且编号不重复、§13.2.1 部件里的 `r:id` 要在自己的关系表里查得到、§18.3.1.100 `<worksheet>` 子元素顺序与唯一必选的 `<sheetData>`、图表部件不许是空壳。依据用 MS-OFFMACRO2 公布的 schema 片段逐条核对过（不是"Excel 大概会喜欢"）。顺序判定**逐对相邻比**不用全程最大值，否则一处颠倒会把后面合规的元素全误报。引擎只出码不出文案（§5.7）。10 条单测：7 类问题各钉一条合成用例 + 我们自己的三种产物（原始夹具 / 改格写回 / 加图表写回）各 0 条。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **198**（+10）/ desktop 439 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 3 / server 2 |
 | 6 | `72e95f6` | P9 ③ 的落地入口（体检要能被人和脚本用起来） | `[x]` | `oc sheet check <file>`：逐条报"部件 + 一句能照着改的中文"，有问题时**退出码 1**，能当发布前闸门。文案表是 `Record<CompatIssue["code"], string>`，新增问题码漏配文案直接编译不过（不是运行时才发现）。实跑：`tmp/chart-out-line.xlsx` → `没有发现会让办公软件判损坏的结构问题。`（EXIT=0）；故意做坏的 `tmp/broken.xlsx`（删掉 `xl/drawings/_rels/drawing1.xml.rels` + 把 `pageMargins` 插到 `dimension` 前）→ 报 2 条（EXIT=1）。**同一份坏文件交给 Numbers 打得开、但 `charts=0`，好文件 `charts=1`**——审计的判定与办公软件的实际后果对上了（§二 P9 的对照实验）。apps/cli 测试 3 → **4** |
 | 6 | 本提交（docs） | P9/P10 取证入文、A8 改写、§七 两行、README 的验证口径 | `[x]` | `docs/excel-support-spec.md`：§二 新增 P9（本机三条可用通道：openpyxl 只读不判、Numbers 走 AppleScript 能问出 `charts=` 的实际读数、自写的结构审计；并划清"Numbers 打得开 ≠ Excel 认"）、P10（与 openpyxl 的 chart XML 逐元素对拍，我们不缺它写的任何东西，风险在引用与登记齐全度）；A8 从"三层替代证据"改成五层并说明**只剩目视那一半 BLOCKED**；§七 加两行（自家 parser 自证的假绿、把 Numbers 能开当成 Excel 没问题）。`AGENTS.md` §8 补 Numbers 可 AppleScript 驱动这条环境事实（含 `-2741` 的坑）。`README.md` 加"怎么确认导出的文件能在办公软件里打开"小节。**顺带修**上一条 `3528019` 行末重复的 `/ apps/cli 3` |
 | 6 | `bdf3ba4` | A5 的写盘前闸门（P9 ③ 接到桌面那条路上） | `[x]` | `saveSheetDoc` 出字节后、`写 .tmp → rename` 之前过审计：**只拦本次改动新引入的问题**（底包原本就有的放行，否则第三方导出的文件会让人存不了盘），拦下整批不写并回一句中文，渲染层用已有的红 toast（§2.4 的事务语义，不新增 preload 通道）。审计自己读不懂陌生 XML 时按"判不了"放行——判不出不许挡住保存。3 条判定单测（`electron/sheetHandlers.test.ts`，`vi.mock("electron")` 沿用 `aiHandlers.test.ts` 的先例）钉住"旧的放行 / 新的必拦 / 同码不同部件不互抵"。**闸门不误伤是实测**：`chart-app-saved.xlsx`、`chart-app-saved2.xlsx`（app 从这条路存过盘的）+ `chart-app/chart-ref/cli-sample/chart-out-{bar,pie}.xlsx` 共 7 份 → 全部 0 条。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 desktop **442**（39 个文件，+3）/ sheet-io **198** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli **4** / server 2 |
 | 6 | `bbc7eba` | A1、A2、§2.3（未建模内容不许拍平）＋ 新增 §二 P11 | `[x]` | 逐特性对拍（`tmp/compat-sweep/`，§6.5 只在 tmp 不入主干）抓出的真实缺陷：openpyxl 自写 **10 份各只压一类结构**的夹具，走**桌面的真实保存路径**（`fromBytes` → `sheetPayloadOf` → `applySheetPayload` → `writeSheet` → `toBytes`）后再让 openpyxl 读回来逐字段比。首轮 **9/10 一致、1 份丢了内容**——`<c t="inlineStr"><is><r>` 的 run（粗体 + `FF0000FF`）只剩拼接文本 `粗普通蓝`，还凭空新建一张 `xl/sharedStrings.xml`；其余 9 份（合并+居中+边框、冻结+列宽+换行、日期与自定义 numFmt、跨行跨表公式、条件格式+数据验证、超链接+批注+定义名、表对象、原生图表、行高+隐藏列+分组+打印设置）一字未变。修法是既有口径补一支：解析 `inlineStr` 时也把整格原文挂上 `rawXml`，`cellXml` 原样搬回去，`countStringReferences` 从此不为 inline 文本凭空建部件；改值那条路不受影响（`setCellTextOp` 造的是新格子对象、天生不带 `rawXml`）。**修复后 10/10**：`rt-feat-richtext-empty.xlsx` 的 `A1` 与原文逐字节相同，openpyxl 读回 `CellRichText([b=True 粗, 普通, color=FF0000FF 蓝])`，`xl/sharedStrings.xml` 不再存在；10 份的审计写前写后都 0 条。两条回归单测（没改过的保留 / 改过的照常覆盖）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **200**（14 个文件，+2）/ desktop 442 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
 | 6 | 本提交（docs） | P11 取证入文、A1/A2 回填、§七 加一行 | `[x]` | `docs/excel-support-spec.md`：§二 新增 P11（十份逐特性对拍的做法、首轮 9/10、抓到的那一条，以及"审计全绿不等于内容没变瘦"这条判据边界）；A1 补对拍结论、A2 补 inline 富文本这一支的来源与 openpyxl 的实测读数；§七 加一行"审计全绿被当成内容也没变瘦"并写明以后的验法。代码面的修复见上一行 |
+| 5 | 本提交（docs） | D5 的图表库裁决入文、§二 表末行与 P6 改写、§七 加一行、E 表阶段 5 行 | `[x]` | §一 候选表把 ECharts 那行改成"初评采纳、被实测体积推翻"，后面补一行 Chart.js（含 npm 实测数字与被否决的三个理由，§6.1 要求写否决理由）；D5 增"app 内预览的库选型"一段，记录用户 2026-10-13 的表态、选型依据、同一入口两次构建的体积差（1,110.93 kB/gzip 359.14 → 1,289.18 kB/gzip 421.41）与"配置拆纯模块是因为 node 环境没有 canvas"；P6 改成 Chart.js 并标出预览那半边已通；§七 加"像素数量证明不了看得清"；§五/§六 的阶段 5 目标、未落清单与 §八 上一行的"仍未落"同步。**另修两条真断链**：`scripts/make-sample-sheet.ts` 的两处根相对写法补全成 `packages/sheet-io/scripts/…`，附录 A 的 `README.md:366` 去掉会腐烂的行号；并在 §八 表头写明 `tmp/**` 证据本机存在、fresh clone 里要靠同一条备注指向的主干单测复现 |
 
 ---
 
 ## 附录 A · 现状盘点（本仓与表格相关的全部既有能力，带 `path:line` 证据）
 
-- 无 xlsx/csv/excel 相关实现：全仓 grep 仅命中 `README.md:366` 路线图（"Excel/PPT：新增 `packages/excel-client`… 复用服务端工具环"）与 `package.json` 描述里的"Word/Excel/PDF (Word first)"。
-- 无图表库依赖；唯一相邻能力是流程图渲染：`apps/desktop/src/ai/diagramSpec.ts` + `diagramCanvas.ts:136 renderDiagram`（canvas 2D → PNG dataURL）。
+- 无 xlsx/csv/excel 相关实现：全仓 grep 仅命中 `README.md` 的路线图（"Excel/PPT：新增 `packages/excel-client`… 复用服务端工具环"，原文不标行号，行号会随文档增长失效）与 `package.json` 描述里的"Word/Excel/PDF (Word first)"。
+- 图表库：`apps/desktop` 依赖 **Chart.js `4.5.1`**（`23db5af`，只为提案卡片上的预览，见决策 D5）；此前仓内没有任何图表库，唯一相邻能力是流程图渲染：`apps/desktop/src/ai/diagramSpec.ts` + `diagramCanvas.ts:136 renderDiagram`（canvas 2D → PNG dataURL）。
 - Word 表格（非网格引擎）已打通，可作概念对齐：`shared` 的 `insert_table` 提案（`packages/shared/src/index.ts:36`）、
   `word-tools` 的 `InsertTableArgs`（`packages/word-tools/src/index.ts:35`）、`docx-io` 的 `DocxFile.insertTable`（`packages/docx-io/src/docx.ts:753`）、
   Tiptap Table 注册在 `apps/desktop/src/editor/extensions/editorExtensions.ts:62-65`。
