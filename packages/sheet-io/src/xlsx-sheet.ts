@@ -466,13 +466,8 @@ function cellXml(cell: SheetCell, sharedStrings: SharedStringTable): string {
       valueText = String(cell.value ?? "");
     } else {
       typeAttr = "s";
-      const reusable =
-        cell.sharedStringIndex !== undefined &&
-        !cell.runs?.length &&
-        sharedStrings.at(cell.sharedStringIndex)?.text === String(cell.value ?? "")
-          ? cell.sharedStringIndex
-          : sharedStrings.intern(String(cell.value ?? ""), cell.runs);
-      valueText = String(reusable);
+      // 内容没变就沿用读入时那条 `<si>`：换索引等于换条目，格式只剩我们能重新序列化出来的那部分。
+      valueText = String(sharedStrings.reuseOrAppend(String(cell.value ?? ""), cell.runs, cell.sharedStringIndex));
     }
   } else if (cell.kind === "boolean") {
     typeAttr = "b";

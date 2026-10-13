@@ -6,7 +6,7 @@
  * 未解释的子元素（`<rPh>` 注音等）靠 `rawSi` 原文回写，不许丢。
  */
 import type { CellRun, SharedStringEntry } from "./model.js";
-import { argbToSheetColor } from "./color.js";
+import { argbToSheetColor, sheetColorToArgb } from "./color.js";
 import {
   SPREADSHEET_NS,
   XML_DECLARATION,
@@ -25,6 +25,8 @@ export class SharedStringTable {
   /** 原 `@count`，追加时按新增条目数同步增加（引用数只能由调用方补充增量）。 */
   private usageCount: number;
   private readonly textIndex = new Map<string, number>();
+  /** 富文本条目按 run 指纹复用：渲染层过来的载荷没有 `sharedStringIndex`，只靠它就每保存一次追加一条。 */
+  private readonly runIndex = new Map<string, number>();
   private addedDelta = 0;
 
   private constructor() {
@@ -46,7 +48,12 @@ export class SharedStringTable {
       const entry = SharedStringTable.readEntry(si);
       const index = table.entries.length;
       table.entries.push(entry);
-      if (!entry.runs && !table.textIndex.has(entry.text)) table.textIndex.set(entry.text, index);
+      if (!entry.runs) {
+        if (!table.textIndex.has(entry.text)) table.textIndex.set(entry.text, index);
+        continue;
+      }
+      const key = runSignature(entry.runs);
+      if (!table.runIndex.has(key)) table.runIndex.set(key, index);
     }
     return table;
   }
@@ -75,20 +82,44 @@ export class SharedStringTable {
    * 取或追加一个字符串索引。
    *
    * @param value 要写进表的文本。
-   * @param runs 富文本 run；给了就按 run 生成 `<si><r>…`，不再走纯文本复用。
-   * @returns 可写进 `<v>` 的索引。纯文本相同（且原条目无 run）时复用，避免重复条目。
+   * @param runs 富文本 run；给了就按 run 生成 `<si><r>…`，不走纯文本复用。
+   * @returns 可写进 `<v>` 的索引。纯文本相同（且原条目无 run）、或 run 逐字段相同，都复用原条目不追加。
    */
   intern(value: string, runs?: CellRun[]): number {
     if (!runs?.length) {
       const existing = this.textIndex.get(value);
       if (existing !== undefined) return existing;
+    } else {
+      const rich = this.runIndex.get(runSignature(runs));
+      if (rich !== undefined) return rich;
     }
     const index = this.entries.length;
-    const entry: SharedStringEntry = runs?.length ? { text: runs.map((r) => r.text).join(""), runs } : { text: value };
+    const entry: SharedStringEntry = runs?.length ? { text: runs.map((run) => run.text).join(""), runs } : { text: value };
     this.entries.push(entry);
-    if (!entry.runs) this.textIndex.set(value, index);
+    if (entry.runs) this.runIndex.set(runSignature(entry.runs), index);
+    else this.textIndex.set(value, index);
     this.addedDelta += 1;
     return index;
+  }
+
+  /**
+   * 该占哪个索引：读入时那个条目内容没变就沿用它，否则追加。
+   *
+   * 为什么单独有这一步：`<si>` 原文（`rawSi`）是回写时保格式的唯一凭据，沿用了原索引就沿用了原条目，
+   * 富文本的颜色/字体不必由我们重新序列化；换成 intern 则会追加一条新 `<si>`，
+   * 每保存一次多一条重复条目，且格式只剩我们能解释的那部分。
+   *
+   * @param value 要写进表的文本（富文本为各 run 拼接后的串）。
+   * @param runs 格子里的富文本 run；与条目逐字段相同才算同一个字符串。
+   * @param preferred 读入时的原索引，undefined 表示这格不是从字符串表读来的。
+   * @returns 可写进 `<v>` 的索引。
+   */
+  reuseOrAppend(value: string, runs?: CellRun[], preferred?: number): number {
+    if (preferred !== undefined) {
+      const entry = this.entries[preferred];
+      if (entry && entry.text === value && runSignature(entry.runs) === runSignature(runs)) return preferred;
+    }
+    return this.intern(value, runs);
   }
 
   /**
@@ -161,6 +192,9 @@ export class SharedStringTable {
         if (run.strike) marks.push("<strike/>");
         if (run.sizePt !== undefined) marks.push(`<sz val="${run.sizePt}"/>`);
         if (run.name) marks.push(`<rFont val="${escapeAttr(run.name)}"/>`);
+        // 颜色必须跟着走：把红字写成黑字就是拍平局部格式，`AGENTS.md` §2.3 不许。
+        const argb = run.color ? sheetColorToArgb(run.color) : undefined;
+        if (argb) marks.push(`<color rgb="${argb}"/>`);
         const rPr = marks.length ? `<rPr>${marks.join("")}</rPr>` : "";
         const preserve = run.text !== run.text.trim() ? ' xml:space="preserve"' : "";
         return `<r>${rPr}<t${preserve}>${escapeText(run.text)}</t></r>`;
@@ -168,6 +202,29 @@ export class SharedStringTable {
       .join("");
     return `<si>${body}</si>`;
   }
+}
+
+/**
+ * run 数组的指纹：逐字段列出 `writeEntry` 会写进 `<rPr>` 与 `<t>` 的全部内容。
+ *
+ * @param runs 格子里的富文本 run；纯文本条目传 undefined（签名为空串）。
+ * @returns 可直接比较的字符串。只有"序列化出来一模一样"的两段才算同一个字符串。
+ */
+function runSignature(runs?: CellRun[]): string {
+  return (runs ?? [])
+    .map((run) =>
+      JSON.stringify([
+        run.text,
+        run.bold ?? false,
+        run.italic ?? false,
+        run.underline ?? false,
+        run.strike ?? false,
+        run.sizePt ?? null,
+        run.name ?? null,
+        run.color ? (sheetColorToArgb(run.color) ?? null) : null,
+      ]),
+    )
+    .join(",");
 }
 
 function escapeText(value: string): string {

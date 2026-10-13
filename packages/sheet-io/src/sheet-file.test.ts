@@ -131,6 +131,47 @@ describe("回写保真（验收 A1：空改动不许动任何部件）", () => {
     expect(await partTexts(written)).toEqual(await partTexts(original));
   });
 
+  it("像桌面那样把每张表都写一遍：富文本格仍指原条目，颜色一个字都不许丢", async () => {
+    const original = await buildSampleWorkbookBytes();
+    const file = await SheetFile.fromBytes(original, { fileName: "sample.xlsx" });
+    for (let index = 0; index < file.sheetCount; index += 1) {
+      const sheet = await file.sheetAt(index);
+      if (sheet) file.writeSheet(sheet);
+    }
+    const parts = await partTexts(await file.toBytes());
+    // A2 是夹具里唯一的富文本格：换索引就是换条目，格式只剩能重新序列化的那部分，所以 `<v>` 必须还是 6
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="A2" t="s"><v>6</v></c>');
+    expect(parts["xl/sharedStrings.xml"]).toContain('<si><r><rPr><b/></rPr><t>粗</t></r><r><rPr><color rgb="FF0000FF"/></rPr><t>蓝</t></r></si>');
+    expect(parts["xl/sharedStrings.xml"]).toContain('uniqueCount="11"');
+    expect((parts["xl/sharedStrings.xml"].match(/<si>/g) ?? []).length).toBe(11);
+  });
+
+  it("桌面保存走的是载荷那条路，载荷里没有 sharedStringIndex——仍必须复用原富文本条目", async () => {
+    const file = await openSample();
+    for (let index = 0; index < file.sheetCount; index += 1) {
+      const model = (await file.sheetAt(index)) as SheetModel;
+      applySheetPayload(model, sheetPayloadOf(model));
+      file.writeSheet(model);
+    }
+    const parts = await partTexts(await file.toBytes());
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="A2" t="s"><v>6</v></c>');
+    expect(parts["xl/sharedStrings.xml"]).toContain('uniqueCount="11"');
+    expect((parts["xl/sharedStrings.xml"].match(/<si>/g) ?? []).length).toBe(11);
+  });
+
+  it("富文本真被改过时，重新序列化的条目必须把 run 颜色写回去", async () => {
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const rich = sheet.cells["A2"];
+    if (!rich?.runs) throw new Error("夹具缺少富文本格 A2");
+    rich.runs = [{ ...rich.runs[0]!, text: "浓" }, ...rich.runs.slice(1)];
+    rich.value = "浓蓝";
+    file.writeSheet(sheet);
+
+    const parts = await partTexts(await file.toBytes());
+    expect(parts["xl/sharedStrings.xml"]).toContain('<si><r><rPr><b/></rPr><t>浓</t></r><r><rPr><color rgb="FF0000FF"/></rPr><t>蓝</t></r></si>');
+  });
+
   it("改一格之后，未建模结构与其它部件仍然原样", async () => {
     const file = await openSample();
     const sheet = (await file.sheetAt(0)) as SheetModel;
