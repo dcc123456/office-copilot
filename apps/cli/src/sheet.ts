@@ -15,6 +15,7 @@ import path from "node:path";
 import {
   SheetFile,
   aggregateSheet,
+  auditXlsxPackage,
   describeSheet,
   duplicateGroups,
   findRows,
@@ -24,6 +25,7 @@ import {
   usedCellCount,
   usedRangeOf,
   type AggregateFunction,
+  type CompatIssue,
   type SheetPayload,
   type WorkbookPayload,
 } from "@office-copilot/sheet-io";
@@ -159,10 +161,32 @@ function hasHeaderOf(opts: { header?: boolean }): boolean {
   return opts.header ?? true;
 }
 
+/**
+ * 引擎的问题码翻成一句中文（`AGENTS.md` §5.7：引擎只出码，文案在装配层）。
+ *
+ * @param issue `auditXlsxPackage` 报出的一条结构问题。
+ * @returns 说明这条问题会让办公软件怎么做（打不开 / 忽略部件 / 丢内容），不含部件名。
+ */
+export function describeCompatIssue(issue: CompatIssue): string {
+  return COMPAT_ISSUE_TEXT[issue.code] + (issue.detail ? `：${issue.detail}` : "");
+}
+
+/** 每个问题码一句文案；键类型是 `CompatIssue["code"]`，新增码忘了配文案会编译不过。 */
+const COMPAT_ISSUE_TEXT: Record<CompatIssue["code"], string> = {
+  "part-not-declared": "部件没在 [Content_Types].xml 里登记，办公软件会直接忽略它",
+  "declared-part-missing": "内容类型表登记了一个包里不存在的部件，打开时报损坏",
+  "relationship-target-missing": "关系指向的部件不在包里，顺着这条引用会断",
+  "relationship-id-duplicate": "同一张关系表里关系编号重复，引用会指错地方",
+  "unresolved-relationship-id": "部件引用的关系编号在自己的关系表里查不到，这块内容会丢",
+  "worksheet-child-order": "表部件子元素顺序违反 §18.3.1.100 的序列，Excel 会拒绝解析",
+  "worksheet-missing-sheet-data": "表部件缺 <sheetData>，这是唯一的必选元素",
+  "chart-missing-chart": "图表部件是空壳，没有 <c:chart>，打开时报损坏",
+};
+
 export function registerSheetCommands(program: Command): void {
   const sheet = program
     .command("sheet")
-    .description("读 .xlsx：概览 / 列画像 / 取区域 / 筛选 / 分组聚合 / 重复行预览（与桌面同一份引擎，只读）");
+    .description("读 .xlsx：概览 / 列画像 / 取区域 / 筛选 / 分组聚合 / 重复行预览 / 兼容性体检（与桌面同一份引擎，只读）");
 
   sheet
     .command("info <file>")
@@ -329,5 +353,27 @@ export function registerSheetCommands(program: Command): void {
           warn("删行请回桌面 app：那里才有撤销与同名 .bak（`AGENTS.md` §2.4/§2.5）。");
         }
       });
+    });
+
+  sheet
+    .command("check <file>")
+    .description("兼容性体检：按 OOXML 的硬约束查这份文件会不会被 Excel / WPS 判成损坏")
+    .option("--json", "输出 JSON")
+    .action(async (file: string, opts: { json?: boolean }) => {
+      const abs = path.resolve(file);
+      if (!fs.existsSync(abs)) fail(`文件不存在：${abs}`);
+      let issues: CompatIssue[];
+      try {
+        issues = await auditXlsxPackage(new Uint8Array(await fs.promises.readFile(abs)));
+      } catch (error) {
+        fail(error instanceof Error ? error.message : String(error));
+      }
+      emit(opts.json, { fileName: path.basename(abs), ok: issues.length === 0, issues }, () => {
+        for (const issue of issues) log(`  ${pc.red(issue.part)}  ${describeCompatIssue(issue)}`);
+        if (issues.length === 0) log(pc.green("没有发现会让办公软件判损坏的结构问题。"));
+        else warn(`发现 ${issues.length} 处结构风险：Excel / WPS 可能打不开，或打开后丢内容。`);
+      });
+      // 体检要能当闸门用：有问题时给非零退出码，脚本里 `oc sheet check && ...` 才拦得住。
+      if (issues.length > 0) process.exitCode = 1;
     });
 }

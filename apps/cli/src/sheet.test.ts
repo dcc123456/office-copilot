@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseMetric, pickSheet, splitColumns } from "./sheet.js";
+import { describeCompatIssue, parseMetric, pickSheet, splitColumns } from "./sheet.js";
 import type { SheetPayload } from "@office-copilot/sheet-io";
 
 /**
@@ -43,5 +43,14 @@ describe("命令行参数怎么翻成引擎的入参", () => {
   it("分组键与判定键：逗号分隔，空白丢掉", () => {
     expect(splitColumns(" 月份, 地区 ,")).toEqual(["月份", "地区"]);
     expect(splitColumns("地区")).toEqual(["地区"]);
+  });
+
+  it("结构问题码：念出来的是一句能照着改的中文，detail 拼在冒号后", () => {
+    expect(describeCompatIssue({ code: "worksheet-child-order", part: "xl/worksheets/sheet1.xml", detail: "pageMargins -> dimension" })).toBe(
+      "表部件子元素顺序违反 §18.3.1.100 的序列，Excel 会拒绝解析：pageMargins -> dimension",
+    );
+    expect(describeCompatIssue({ code: "worksheet-missing-sheet-data", part: "xl/worksheets/sheet1.xml", detail: "" })).toBe(
+      "表部件缺 <sheetData>，这是唯一的必选元素",
+    );
   });
 });
