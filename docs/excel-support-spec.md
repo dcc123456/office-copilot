@@ -380,11 +380,11 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
     **实测**（`3d1c357`）：`packages/sheet-io/src/sheet-edit.test.ts` 13 条 + 桌面 `sheetHistory.test.ts` 5 条。
     其中「落地后撤销，格子与已用区域都回到原样」「新写的格被撤销后整格消失，已用区域缩回原大小」钉住逆操作本身；
     「插入行把内容整体下移后，撤销仍命中原来那一行」钉内容寻址；`sheet-file.test.ts` 那条把整条链路做到真实 `.xlsx` 上（改→写盘→重开→撤销→再写盘→读回原样）。
-16. `[~]` 插入/删除行列后再撤销早期改动，**不牵连**用户在这期间的手工编辑（用一条专门单测钉死）。
-    **已到位**：位移后的撤销有专门单测（上一条），"之后的手工编辑不牵连"在两层各钉一条——
-    `sheet-edit.test.ts` 现场被改过时报"认不出这一行"、`sheetHistory.test.ts` 撤销 A1 不把手工改过的 A2 退回去。
-    **未到位**：**插入/删除行列的 op 本身还没写**（阶段 3 偏差 2），上面的位移是用手工构造下移后的表来模拟的，
-    不是真按 op 插出来的。补上 op 才升 `[x]`。
+16. `[x]` 插入/删除行列后再撤销早期改动，**不牵连**用户在这期间的手工编辑（用一条专门单测钉死）。
+    **已到位**：`sheet-edit.test.ts` 现场被改过时报"认不出这一行"、`sheetHistory.test.ts` 撤销 A1 不把手工改过的 A2 退回去；
+    插删的 op 本体在 `ec4bda4`（`insertTracksOp`/`deleteTracksOp` + `applyShiftOp` 位移与逆操作）落地，
+    不再是"手工构造下移后的表来模拟"；入口（表头右键菜单）在 `e662914`。
+    **实测**：真实 app 里插一行 → 保存（`A1:I5`）→ Cmd+Z → 再保存，`sheet1.xml` 与 `sharedStrings.xml` 与插入前逐字节一致。
 17. `[x]` 无法安全回滚时明确报"部分撤销"；modlog 仍每文档 ≤60 条、路径不变。
     **实测**：`App.undoLastSheetEdit` 里 `outcome.failed.length` 时 toast「部分撤销（x/y）：理由…」，与 Word 那条（`ai/agent.ts` 的同款文案）一致；
     存储走 `electron/modlog.ts` 现有四条通道，`CAP = 60` 与 `userData/modlog/<slug(docKey)>.json` 一字未改（没有新建第二份历史，D18 因此仍是 `[x]`）。
