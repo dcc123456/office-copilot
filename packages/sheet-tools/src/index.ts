@@ -1,0 +1,209 @@
+/**
+ * 表格的 AI 工具面（spec 决策 D6）：给模型看的 JSON 工具定义 + zod 入参校验。
+ *
+ * 与 `word-tools` 同构，守同一条红线：模型只产出**入参与提案**，取值、统计、落地全部由
+ * `@office-copilot/sheet-io` 做（`AGENTS.md` §2.8、spec §零.4，验收 B10）。
+ * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `sheet-io`**——它只管"这套入参合不合法"，
+ * 执行由调用方（桌面 `sheetAgent`，提交 13）拿校验过的入参去调引擎函数。
+ * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
+ */
+import { z } from "zod";
+
+/**
+ * 列引用：列字母（`C`）或表头原文（`销售额`）；同名表头用 `销售额#2` 取第二个。
+ * 真正的解析口径在 `sheet-io` 的 `resolveColumnRef`，这里只约束长度，避免出现第二套判定（§3.1）。
+ */
+const ColumnRef = z.string().min(1).max(60).describe("列引用：列字母（C）或表头原文（销售额）。同名表头写成「表头#2」。");
+
+/** 首行是否当表头；所有读工具共用这一个口径。 */
+const HasHeader = z.boolean().default(true).describe("首行是不是表头。为 true 时首行不进统计、也不参与行号定位。");
+
+/** `sheet_describe` 的入参。 */
+export const DescribeArgs = z
+  .object({
+    hasHeader: HasHeader,
+    maxColumns: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .default(50)
+      .describe("最多描述多少列，默认 50。宽表只回前若干列的画像，其余只报列数。"),
+  })
+  .strict();
+
+/** `sheet_read_range` 的入参。 */
+export const ReadRangeArgs = z
+  .object({
+    range: z.string().min(1).max(20).describe("A1 区域写法，例如 A1:D20；也可以写单格 C2。"),
+    maxRows: z.number().int().min(1).max(200).default(50).describe("最多读多少行，默认 50；剩下的行只报总数。"),
+  })
+  .strict();
+
+/** 一个聚合：函数 + 作用列（口径与 `sheet-io` 的 `AggregateSpec` 一致）。 */
+const AggregateSpec = z
+  .object({
+    fn: z.enum(["count", "sum", "average", "min", "max"]).describe("聚合函数；只允许这五个，其它写法请落成 Excel 公式。"),
+    column: ColumnRef,
+  })
+  .strict();
+
+/** `sheet_aggregate` 的入参。 */
+export const AggregateArgs = z
+  .object({
+    groupBy: z.array(ColumnRef).min(1).max(3).describe("分组列，1~3 个。再多就不是分析而是把整表搬过来。"),
+    aggregates: z.array(AggregateSpec).min(1).max(5).describe("要算的聚合，1~5 个；数值一律由引擎算出。"),
+    hasHeader: HasHeader,
+    limit: z.number().int().min(1).max(100).default(50).describe("最多回多少个分组，默认 50；分组总数不受它影响。"),
+  })
+  .strict();
+
+/** `sheet_find` 的入参。 */
+export const FindArgs = z
+  .object({
+    column: ColumnRef,
+    criteria: z
+      .string()
+      .min(1)
+      .max(80)
+      .describe("COUNTIF 风格的条件：>100、<=2、<>北京、直接写要等于的值。文本比较不区分大小写；日期列按序列号比较。"),
+    hasHeader: HasHeader,
+    limit: z.number().int().min(1).max(200).default(50).describe("最多回多少条命中，默认 50；命中总数不受它影响。"),
+  })
+  .strict();
+
+/** 工具名 → 入参 schema；`parseToolArguments` 按这个名字分派。 */
+export const SHEET_TOOL_SCHEMAS = {
+  sheet_describe: DescribeArgs,
+  sheet_read_range: ReadRangeArgs,
+  sheet_aggregate: AggregateArgs,
+  sheet_find: FindArgs,
+} as const;
+
+/** 工具名（模型回调时能出现的合法集合，用来拦住不存在的方法名）。 */
+export type SheetToolName = keyof typeof SHEET_TOOL_SCHEMAS;
+
+export type DescribeArgsT = z.infer<typeof DescribeArgs>;
+export type ReadRangeArgsT = z.infer<typeof ReadRangeArgs>;
+export type AggregateArgsT = z.infer<typeof AggregateArgs>;
+export type FindArgsT = z.infer<typeof FindArgs>;
+
+/** 入参解析结果：`ok:false` 时 `reason` 是直接回给模型的错误串（验收 B9）。 */
+export type ToolArgsOutcome<T> = { ok: true; args: T } | { ok: false; reason: string };
+
+/**
+ * 解析模型给的入参：JSON 语法错、缺字段、多字段、越界都变成错误串，**永不抛异常**。
+ *
+ * @param name 工具名；不在 `SHEET_TOOL_SCHEMAS` 里时给"不认识的工具"。
+ * @param rawArguments 模型回包里的 `function.arguments` 原文（JSON 字符串）。
+ * @returns 校验过的入参，或给模型看的失败理由。
+ */
+export function parseToolArguments<T extends SheetToolName>(name: T, rawArguments: string): ToolArgsOutcome<z.infer<(typeof SHEET_TOOL_SCHEMAS)[T]>> {
+  const schema = SHEET_TOOL_SCHEMAS[name];
+  if (!schema) return { ok: false, reason: `不认识的工具：${String(name)}` };
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(rawArguments);
+  } catch {
+    return { ok: false, reason: `工具 ${name} 的入参不是合法 JSON，请按 schema 重写。` };
+  }
+  const result = schema.safeParse(parsedJson);
+  if (result.success) return { ok: true, args: result.data as z.infer<(typeof SHEET_TOOL_SCHEMAS)[T]> };
+  const details = result.error.issues.map((issue) => `${issue.path.join(".") || "(根对象)"}：${issue.message}`).join("；");
+  return { ok: false, reason: `工具 ${name} 的入参不合：${details}` };
+}
+
+/** 一条工具定义（OpenAI function-calling 形状，与 `WORD_TOOLS` 同形）。 */
+export interface SheetToolDefinition {
+  type: "function";
+  function: {
+    name: SheetToolName;
+    description: string;
+    /** JSON Schema 的极小子集：我们只用 `properties` / `required` / `additionalProperties` 这三样。 */
+    parameters: { type: "object"; properties?: Record<string, unknown>; required?: string[]; additionalProperties: false };
+  };
+}
+
+/** 给模型的读工具定义，直接进请求的 `tools` 数组。 */
+export const SHEET_TOOLS: SheetToolDefinition[] = [
+  {
+    type: "function",
+    function: {
+      name: "sheet_describe",
+      description: "读出当前表的结构画像：列数、数据行数、每列的类型推断、缺失数、众数、数值统计与异常值。要做任何分析或整理之前先调用它。",
+      parameters: {
+        type: "object",
+        properties: {
+          hasHeader: { type: "boolean", default: true },
+          maxColumns: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_read_range",
+      description: "读一块区域的显示文本（与网格里看到的一致：日期、千分位、百分比都按单元格格式显示）。需要看具体数据长什么样时用，别整表上送。",
+      parameters: {
+        type: "object",
+        properties: {
+          range: { type: "string", minLength: 1, maxLength: 20 },
+          maxRows: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+        },
+        required: ["range"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_aggregate",
+      description: "按 1~3 列分组，对指定列算 count/sum/average/min/max。**数值由表格引擎算出，不要自己心算**。",
+      parameters: {
+        type: "object",
+        properties: {
+          groupBy: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 3 },
+          aggregates: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                fn: { type: "string", enum: ["count", "sum", "average", "min", "max"] },
+                column: { type: "string" },
+              },
+              required: ["fn", "column"],
+              additionalProperties: false,
+            },
+            minItems: 1,
+            maxItems: 5,
+          },
+          hasHeader: { type: "boolean", default: true },
+          limit: { type: "integer", minimum: 1, maximum: 100, default: 50 },
+        },
+        required: ["groupBy", "aggregates"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_find",
+      description: "按条件定位数据行，返回行号与单元格地址。条件写法与 Excel 的 COUNTIF 一致（>100、<=2、<>北京、直接写要等于的值）。",
+      parameters: {
+        type: "object",
+        properties: {
+          column: { type: "string" },
+          criteria: { type: "string", minLength: 1, maxLength: 80 },
+          hasHeader: { type: "boolean", default: true },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+        },
+        required: ["column", "criteria"],
+        additionalProperties: false,
+      },
+    },
+  },
+];
