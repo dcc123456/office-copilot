@@ -18,7 +18,7 @@ import {
   type SheetPayload,
   type WorkbookPayload,
 } from "@office-copilot/sheet-io";
-import { fileExists } from "./fsutil.js";
+import { fileExists, writeFileAtomically } from "./fsutil.js";
 
 /** 渲染层据此决定走表格那条路；`.xlsm` 由 `SheetFile` 明确拒绝，不在可打开的扩展名里。 */
 export const SHEET_EXT = /\.xlsx$/i;
@@ -158,9 +158,7 @@ export async function saveSheetDoc(
     if (await fileExists(targetPath)) {
       await fs.copyFile(targetPath, `${targetPath}.bak`);
     }
-    const tmp = `${targetPath}.tmp`;
-    await fs.writeFile(tmp, out);
-    await fs.rename(tmp, targetPath);
+    await writeFileAtomically(targetPath, out);
     return { ok: true, path: targetPath };
   } catch (err) {
     return { ok: false, message: `保存失败：${err instanceof Error ? err.message : String(err)}` };

@@ -14,7 +14,7 @@ import {
   type StyleEdit,
 } from "@office-copilot/docx-io";
 import type { PMDoc } from "@office-copilot/docx-io/src/pm-schema.js";
-import { fileExists } from "./fsutil.js";
+import { fileExists, writeFileAtomically } from "./fsutil.js";
 
 /** 两种部件的固定遍历顺序：脚注在前，与 Word 窗格里的排布一致。 */
 const FOOTNOTE_KINDS: readonly FootnoteKind[] = ["footnote", "endnote"];
@@ -349,9 +349,7 @@ async function saveDocx(
     if (hf.styles?.length) await docx.applyStyleEdits(hf.styles);
     await docx.replaceProseMirror(pmDoc);
     const out = await docx.toBytes();
-    const tmp = filePath + ".tmp";
-    await fs.writeFile(tmp, out);
-    await fs.rename(tmp, filePath);
+    await writeFileAtomically(filePath, out);
     return { ok: true, path: filePath };
   } catch (err) {
     return {
