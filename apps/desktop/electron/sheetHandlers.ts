@@ -11,7 +11,9 @@ import path from "node:path";
 import {
   SheetFile,
   applySheetPayload,
+  auditXlsxPackage,
   workbookPayload,
+  type CompatIssue,
   type ResolvedChart,
   type SheetPayload,
   type WorkbookPayload,
@@ -114,7 +116,8 @@ export async function openSheetDoc(filePath: string): Promise<SheetOpenResult> {
  * @param basePath 未建模部件的来源路径（通常是当前文档；另存为时是原文件）。
  * @param sheets 渲染层带回的表内容。
  * @param charts 本次要新插入的原生图表（AI 出图那条，spec 决策 D5）；省略即不碰图表部件。
- * @returns ok:true + 落盘路径；表配不上、图表插不进（那张表已有画图部件）都整批不写（§2.4 的事务语义）。
+ * @returns ok:true + 落盘路径；表配不上、图表插不进（那张表已有画图部件）、写出会新引入结构问题，
+ *   都整批不写并回一句中文（§2.4 的事务语义）。
  */
 export async function saveSheetDoc(
   targetPath: string,
@@ -142,6 +145,16 @@ export async function saveSheetDoc(
       }
     }
     const out = await file.toBytes();
+    // 保存前过一次结构审计：写坏了用户是打不开的，而这时磁盘上的文件还没动（§2.4 的整批放弃）。
+    const outIssues = await auditQuietly(out);
+    // 只在"输出有问题"时才去审底包——正常保存这条路只多一次解压，不翻倍。
+    const introduced = outIssues.length === 0 ? [] : newlyIntroducedIssues(await auditQuietly(baseBytes), outIssues);
+    if (introduced.length > 0) {
+      return {
+        ok: false,
+        message: `保存已取消：这次改动会新引入 ${introduced.length} 处让办公软件判损坏的结构问题（${[...new Set(introduced.map((issue) => issue.part))].join("、")}），磁盘上的文件一个字都没动。`,
+      };
+    }
     if (await fileExists(targetPath)) {
       await fs.copyFile(targetPath, `${targetPath}.bak`);
     }
@@ -152,6 +165,39 @@ export async function saveSheetDoc(
   } catch (err) {
     return { ok: false, message: `保存失败：${err instanceof Error ? err.message : String(err)}` };
   }
+}
+
+/**
+ * 出字节后过一次结构审计，**审计自己读不懂就回空**。
+ *
+ * @param bytes 准备写盘（或底包里原有）的 `.xlsx` 字节。
+ * @returns 发现的问题；`@office-copilot/docx-io` 的 XML 解析器认不出的陌生部件会整包判读失败，
+ *   那时按"判不了"处理而不是"坏了"——判不出不许把用户正在编辑的东西挡在保存门外。
+ */
+async function auditQuietly(bytes: Uint8Array): Promise<CompatIssue[]> {
+  try {
+    return await auditXlsxPackage(bytes);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 只留"这次保存新引入的"结构问题。
+ *
+ * @param baseIssues 底包（磁盘上原来那份）审计出来的问题。
+ * @param outIssues 准备写出的字节审计出来的问题。
+ * @returns 底包里没有的那些。底包本来就不合规（第三方导出器留下的）不该让用户没法保存，
+ *   这里只对**本次事务**负责（`AGENTS.md` §2.4）。
+ */
+export function newlyIntroducedIssues(baseIssues: CompatIssue[], outIssues: CompatIssue[]): CompatIssue[] {
+  const seen = new Set(baseIssues.map(issueKey));
+  return outIssues.filter((issue) => !seen.has(issueKey(issue)));
+}
+
+/** 一条问题的身份键：码 + 部件 + 细节，同一个包审两遍会得到同一个键。 */
+function issueKey(issue: CompatIssue): string {
+  return `${issue.code}@${issue.part}@${issue.detail}`;
 }
 
 /**
