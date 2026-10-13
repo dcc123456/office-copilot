@@ -21,7 +21,7 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(DuplicatesArgs.parse({ keys: ["月份", "区域"] })).toEqual({ keys: ["月份", "区域"], hasHeader: true, limit: 50 });
   });
 
-  it("提案里的四类改动各自收得下来，插入行数有默认值", () => {
+  it("提案里的五类改动各自收得下来，插入行数与排序方向有默认值", () => {
     const parsed = SubmitProposalArgs.parse({
       summary: "补上合计列并把过窄的列放宽",
       edits: [
@@ -30,10 +30,12 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
         { type: "set_column_width", column: "销售额", widthPx: 120 },
         { type: "insert_rows", row: 3 },
         { type: "delete_rows", rows: [7, 9] },
+        { type: "sort_rows", range: "A2:D10", column: "销售额" },
       ],
     });
-    expect(parsed.edits).toHaveLength(5);
+    expect(parsed.edits).toHaveLength(6);
     expect(parsed.edits[3]).toEqual({ type: "insert_rows", row: 3, count: 1 });
+    expect(parsed.edits[5]).toEqual({ type: "sort_rows", range: "A2:D10", column: "销售额", order: "asc" });
   });
 
   it("多余的键一律拒收：模型不许把我们没定义的条件塞进工具入参", () => {
@@ -41,9 +43,11 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(reasonOf("sheet_read_range", '{"range":"A1:B2","maxRows":10,"orderBy":"C"}')).toContain("orderBy");
   });
 
-  it("提案里出现没有逆操作的改动（排序 / 拆合列）或越界数值一律拒收", () => {
-    expect(reasonOf("sheet_submit_proposal", '{"summary":"排一下","edits":[{"type":"sort_rows","column":"C"}]}')).toContain("入参不合");
+  it("提案里出现仍没立项的改动（拆合列 / 统一格式）或模型自己报行序一律拒收", () => {
     expect(reasonOf("sheet_submit_proposal", '{"summary":"整列改成日期格式","edits":[{"type":"set_number_format","column":"D","formatCode":"yyyy-mm-dd"}]}')).toContain("入参不合");
+    // 排序只许交"区域 + 键列"，行序由引擎算（§2.11）：自己报一个次序数组进不来
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"排一下","edits":[{"type":"sort_rows","column":"C","order":[4,1,2,3]}]}')).toContain("入参不合");
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"排一下","edits":[{"type":"sort_rows","range":"A2:C10","column":"C","order":"降序"}]}')).toContain("order");
     expect(reasonOf("sheet_submit_proposal", '{"summary":"放宽","edits":[{"type":"set_column_width","column":"C","widthPx":5}]}')).toContain("widthPx");
     expect(reasonOf("sheet_submit_proposal", '{"summary":"空提案","edits":[]}')).toContain("edits");
     expect(reasonOf("sheet_submit_proposal", '{"summary":"","edits":[{"type":"set_cell","address":"C2","text":"1"}]}')).toContain("summary");

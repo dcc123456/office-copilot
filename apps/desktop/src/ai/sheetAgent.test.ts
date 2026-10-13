@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { columnWidthCharsToPx, runSheetOps, type SheetPayload } from "@office-copilot/sheet-io";
+import { columnWidthCharsToPx, revertSheetOps, runSheetOps, type SheetPayload } from "@office-copilot/sheet-io";
 import { SHEET_TOOLS, type SheetEditT } from "@office-copilot/sheet-tools";
 import type { ToolTurnRequest, ToolTurnResult } from "../global.js";
 import { runSheetAgent, sheetContextOf, sheetOpsOfProposal } from "./sheetAgent.js";
@@ -80,7 +80,7 @@ describe("sheetContextOf：上送的只有摘要与截断过的样本", () => {
   });
 });
 
-describe("sheetOpsOfProposal：只有能安全撤销的四类才变成 op", () => {
+describe("sheetOpsOfProposal：只有能安全撤销的五类才变成 op", () => {
   it("改值 / 列宽 / 删行各成一条 op，按现场核对全部落得下", () => {
     const sheet = sampleSheet();
     const edits: SheetEditT[] = [
@@ -98,6 +98,29 @@ describe("sheetOpsOfProposal：只有能安全撤销的四类才变成 op", () =
     expect(result.ops).toHaveLength(4);
     // 从大到小删：两条 deleteTracks 都落在自己那一行上，第二行的公式没被牵连。
     expect(result.after.cells.D2?.formula).toBe("C2*2");
+  });
+
+  it("按销售额降序重排成一条 sortRows op，落地后撤销整表回到原样", () => {
+    const sheet = sampleSheet();
+    const edits: SheetEditT[] = [{ type: "sort_rows", range: "A2:C5", column: "销售额", order: "desc" }];
+    const { ops, notes } = sheetOpsOfProposal(sheet, edits);
+    expect(ops.map((op) => op.kind)).toEqual(["sortRows"]);
+    expect(notes).toEqual([]);
+
+    const result = runSheetOps(sheet, ops);
+    expect(result.ok, result.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(result.after.cells.A2?.value).toBe("3月");
+    expect(result.after.cells.C2?.value).toBe(150);
+    expect(result.after.cells.A5?.value).toBe("1月");
+    expect(revertSheetOps(result.after, result.inverses).after.cells).toEqual(sheet.cells);
+  });
+
+  it("引擎按硬约束拒绝的排序，理由原样进 notes 而不是一条 op", () => {
+    const sheet = sampleSheet();
+    // 销售额这一列本来就是升序，排序等于空改动；引擎给的理由要能被上层看到
+    const { ops, notes } = sheetOpsOfProposal(sheet, [{ type: "sort_rows", range: "A2:C5", column: "销售额", order: "asc" }]);
+    expect(ops).toEqual([]);
+    expect(notes[0]).toContain("已经是升序");
   });
 
   it("提案里删掉公式正引用的行时，引擎的现场核对会挡住，代理不自己猜", () => {

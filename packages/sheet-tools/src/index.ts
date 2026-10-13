@@ -3,9 +3,9 @@
  *
  * 与 `word-tools` 同构，守同一条红线：模型只产出**入参与提案**，取值、统计、落地全部由
  * `@office-copilot/sheet-io` 做（`AGENTS.md` §2.8、spec §零.4，验收 B10）。
- * 写面只有 `sheet_submit_proposal` 一个出口，它的四类改动（改格 / 列宽 / 插行 / 删行）与
- * `sheet-edit.ts` 里**自带逆操作**的四类 op 一一对应——表达不了的（排序、拆合列、统一数字格式）
- * 宁可不提供，也不发一批没有逆操作的直写（§2.5，spec §七"整理写侧缺 op"）。
+ * 写面只有 `sheet_submit_proposal` 一个出口，它的五类改动（改格 / 列宽 / 插行 / 删行 / 按列重排整行）
+ * 与 `sheet-edit.ts` 里**自带逆操作**的五类 op 一一对应——表达不了的（拆合列、统一数字格式）
+ * 宁可不提供，也不发一批没有逆操作的直写（§2.5，spec §七"整理写侧缺 op"；排序按决策 D7 立项后才有 op）。
  * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `sheet-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 `sheetAgent`，提交 13）拿校验过的入参去调引擎函数。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
@@ -158,15 +158,34 @@ export const CreateChartArgs = z
   })
   .strict();
 
-/** 提案里的一条改动。刻意只留这四类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
+/**
+ * 一条按一列重排整行的请求（spec 决策 D7）。
+ *
+ * 行序由引擎从现场表算（§2.11）：这里只交区域、键列与升降，模型不许自己报一个新行序，
+ * 也不许交"排序后的值"。
+ */
+const SortRowsEdit = z
+  .object({
+    type: z.literal("sort_rows"),
+    range: z
+      .string()
+      .min(3)
+      .max(20)
+      .describe("参与重排的数据行区域（不含表头那一行），如 A2:D10；起止都要写全，整列写法（A:C）会被拒。列范围必须盖住一条记录的所有格子。"),
+    column: ColumnRef,
+    order: z.enum(["asc", "desc"]).default("asc").describe("升序 asc / 降序 desc，默认升序。"),
+  })
+  .strict();
+
+/** 提案里的一条改动。刻意只留这五类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
 export const SheetEdit = z
-  .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit]);
+  .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit, SortRowsEdit]);
 
 /**
  * `sheet_submit_proposal` 的入参。
  *
- * 排序、拆合列、统一数字格式**这里没有**：现有 op 面表达不了（见 spec §七"整理写侧缺 op"），
- * 模型只能提这四项。
+ * 排序后来按 spec 决策 D7 单独立项补成了 `sort_rows`；**仍不在这里**的是拆合列与统一数字格式
+ * （见 spec §七"整理写侧缺 op"），模型只能提这五项。
  */
 export const SubmitProposalArgs = z
   .object({
@@ -375,7 +394,7 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
     function: {
       name: "sheet_submit_proposal",
       description:
-        "把你打算对表格做的修改打包成提案返回。用户会看到逐条改动与跳过原因并确认后才落地。一次回答只提交一份提案。改格用 set_cell（文本以 = 开头当公式），列宽用 set_column_width（px），整行用 insert_rows / delete_rows；排序、拆合列、统一数字格式现在提不了。",
+        "把你打算对表格做的修改打包成提案返回。用户会看到逐条改动与跳过原因并确认后才落地。一次回答只提交一份提案。改格用 set_cell（文本以 = 开头当公式），列宽用 set_column_width（px），整行用 insert_rows / delete_rows，按一列重排整行用 sort_rows（只交区域与键列，行序由引擎算）；拆合列、统一数字格式现在提不了。",
       parameters: {
         type: "object",
         properties: {
@@ -409,6 +428,17 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
                   type: "object",
                   properties: { type: { const: "delete_rows" }, rows: { type: "array", items: { type: "integer" } } },
                   required: ["type", "rows"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "sort_rows" },
+                    range: { type: "string" },
+                    column: { type: "string" },
+                    order: { type: "string", enum: ["asc", "desc"], default: "asc" },
+                  },
+                  required: ["type", "range", "column"],
                   additionalProperties: false,
                 },
               ],

@@ -23,6 +23,7 @@ import {
   setCellFormulaOp,
   setCellTextOp,
   setColumnWidthOp,
+  sortRowsOp,
   type ResolvedChart,
   type SheetCoreOp,
   type SheetPayload,
@@ -41,11 +42,13 @@ const MAX_TOOL_TURNS = 8;
 
 const SHEET_SYSTEM = `你是 Excel 表格代理，看得见的是当前工作表的结构摘要与前若干行样本，不是整张表。
 - 要数字就先调工具：sheet_describe / sheet_read_range / sheet_aggregate / sheet_find / sheet_duplicates。不许凭样本心算整表结论。
-- 要改表只能调 sheet_submit_proposal，条目只有 set_cell、set_column_width、insert_rows、delete_rows 四种；
+- 要改表只能调 sheet_submit_proposal，条目只有 set_cell、set_column_width、insert_rows、delete_rows、sort_rows 五种；
   行号与列引用必须来自前面工具的回包，不许自己数行号。提案经用户确认才会落地。
 - 要出图调 sheet_create_chart，只报区域（类别轴 + 每条系列的数值区域 + 落点那一格），数字一律由引擎读表得到；
   一张表只能挂一个图表，区域取不到数时引擎会回一句理由，改区域再调。经用户确认后才会随文件保存。
-- 排序、拆合列、统一数字格式这些这里做不了，遇到就直说做不了，别绕着改坏用户的表。
+- 排序用 sort_rows：只交数据行区域（不含表头那一行）与键列，新的行序由引擎算，不许自己报次序。
+  区域必须盖住一条记录的全部格子；带里有公式、或这些行在区域外还有内容时引擎会拒绝，照它给的理由改区域或直说做不了。
+- 拆合列、统一数字格式这些这里做不了，遇到就直说做不了，别绕着改坏用户的表。
 - 纯分析的问题直接回答，不要为了回答去提提案。回答用中文，带上你实际查到的数字。`;
 
 /** `runSheetAgent` 的输入。 */
@@ -170,8 +173,8 @@ function executeToolCall(
 /**
  * 把提案里的条目翻成自带逆操作的 op。
  *
- * 只翻这四类：它们各自有安全的撤销路径（§2.5）。翻不动的（列认不出、地址非法、公式造不出 op）
- * 逐条记进 `notes`，不许静默丢掉半份提案。
+ * 只翻这五类：它们各自有安全的撤销路径（§2.5）。翻不动的（列认不出、地址非法、公式造不出 op、
+ * 排序被引擎的硬约束拒绝）逐条记进 `notes`，不许静默丢掉半份提案。
  *
  * @param sheet 提案要落在这张表上（按现场构造前像）。
  * @param edits `sheet_submit_proposal` 校验过的条目。
@@ -220,6 +223,13 @@ export function sheetOpsOfProposal(
           if (op) ops.push(op);
           else notes.push(`第 ${rowNumber} 行删不了，已跳过。`);
         }
+        break;
+      }
+      case "sort_rows": {
+        // 行序由引擎算（§2.11）：这里只把区域与键列交过去，被拒绝时把引擎那句理由原样报给上层。
+        const made = sortRowsOp(sheet, { range: edit.range, column: edit.column, order: edit.order, hasHeader });
+        if (made.ok) ops.push(made.op);
+        else notes.push(`这条排序没落地：${made.reason}`);
         break;
       }
     }

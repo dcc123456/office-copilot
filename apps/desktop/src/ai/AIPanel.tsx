@@ -176,6 +176,8 @@ function sheetEditLines(edits: readonly SheetEditT[]): string[] {
         return `在第 ${edit.row} 行之前插入 ${edit.count} 行`;
       case "delete_rows":
         return `删掉第 ${[...edit.rows].sort((left, right) => left - right).join("、")} 行`;
+      case "sort_rows":
+        return `把 ${edit.range.toUpperCase()} 这些行按 ${edit.column} 列${edit.order === "desc" ? "从大到小" : "从小到大"}重排`;
     }
   });
 }
@@ -216,7 +218,7 @@ const SHEET_WELCOME_ITEM: Item = {
   t: "msg",
   role: "assistant",
   text:
-    "直接说要对这张表做什么，比如「各区域销售额汇总」「找出销售额最高的三个月」「删掉重复的行」「把这一列拉宽」。数字由表格引擎算，不是我估的；能改的只有写格子、列宽、插行删行四类，每次改动都要你点「应用到表格」才落地，落地后能在修改历史里单独撤销。",
+    "直接说要对这张表做什么，比如「各区域销售额汇总」「找出销售额最高的三个月」「删掉重复的行」「按销售额把这批行重排」「把这一列拉宽」。数字由表格引擎算，不是我估的；能改的只有写格子、列宽、插行删行、按一列重排整行五类，每次改动都要你点「应用到表格」才落地，落地后能在修改历史里单独撤销。",
 };
 
 /** 会话历史浮层宽度（px），须与 `styles/aiPanel.css` 的 `.ai-session-pop` 一致。 */
