@@ -5,7 +5,7 @@ import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
 import { revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
-import type { SheetModel } from "./model.js";
+import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
   "[Content_Types].xml",
@@ -41,6 +41,31 @@ function xfsOf(stylesXml: string): string[] {
 
 async function openSample(): Promise<SheetFile> {
   return SheetFile.fromBytes(await buildSampleWorkbookBytes(), { fileName: "sample.xlsx" });
+}
+
+/**
+ * 走一遍桌面的保存路径：重新打开夹具、按 partPath 配对写回载荷、存盘再读回来。
+ *
+ * @param payload op 落地后的表载荷（不含 XML 原文，渲染层能碰到的就是它）。
+ * @param sheetIndex 写第几张表，默认第一张。
+ * @returns 读回来的表模型，外加它那份部件文本（断言未建模结构没被牵连时用）。
+ */
+async function writeAndReopen(payload: SheetPayload, sheetIndex = 0): Promise<{ sheet: SheetModel; partXml: string }> {
+  const file = await openSample();
+  const model = (await file.sheetAt(sheetIndex)) as SheetModel;
+  applySheetPayload(model, payload);
+  file.writeSheet(model);
+  const bytes = await file.toBytes();
+  const reopened = await SheetFile.fromBytes(bytes, { fileName: "sample.xlsx" });
+  return {
+    sheet: (await reopened.sheetAt(sheetIndex)) as SheetModel,
+    partXml: (await partTexts(bytes))[`xl/worksheets/sheet${sheetIndex + 1}.xml`] ?? "",
+  };
+}
+
+/** 列宽分段的 `[起始列, 结束列, 字符宽]` 三元组：断言时比整对象好读，也不会因 `attrs` 键序假红。 */
+function widthSegments(sheet: SheetModel): Array<[number, number, number | undefined]> {
+  return sheet.columns.map((column) => [column.minColIndex, column.maxColIndex, column.widthChars] as [number, number, number | undefined]);
 }
 
 describe("打开真实形态的 .xlsx（spec 阶段 1 / 验收 A2–A4）", () => {
@@ -327,6 +352,46 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
     const readBack = await backAgain.sheetAt(0);
     expect(readBack?.cells["C2"]?.value).toBe(originalValue);
     expect(readBack?.columns).toEqual(payload.columns);
+  });
+
+  it("拖出来的列宽真的存进 `<cols>`，撤销后又是原来那两段", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    // 把 B 列拖成 103px（= 14 个字符宽）：原来 1–3 列那一段必须被劈开
+    const applied = runSheetOps(payload, [setColumnWidthOp(payload, 1, 103)!]);
+    expect(applied.ok).toBe(true);
+
+    const edited = await writeAndReopen(applied.after);
+    expect(widthSegments(edited.sheet)).toEqual([
+      [0, 0, 12],
+      [1, 1, 14],
+      [2, 2, 12],
+      [3, 3, 14],
+    ]);
+    // 部件里的属性也得是劈开后的样子：劈出来的段不许留着旧 `min`/`max`/`width`
+    expect(edited.partXml).toContain(
+      '<cols><col min="1" max="1" width="12" customWidth="1"/><col min="2" max="2" width="14" customWidth="1"/><col min="3" max="3" width="12" customWidth="1"/><col min="4" max="4" width="14" customWidth="1"/></cols>',
+    );
+    // 改写 `<cols>` 不许牵连同一张表里其它没建模的结构
+    expect(edited.partXml).toContain('<mergeCell ref="H1:I2"/>');
+    expect(edited.partXml).toContain("<conditionalFormatting");
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(widthSegments((await writeAndReopen(reverted.after)).sheet)).toEqual([
+      [0, 2, 12],
+      [3, 3, 14],
+    ]);
+  });
+
+  it("表里本来没有 `<cols>` 时，第一次设列宽把区间插在 `<sheetData>` 之前", async () => {
+    // 夹具的第二张表是空表，`<sheetFormatPr/>` 后面直接就是 `<sheetData/>`
+    const blank = sheetPayloadOf((await (await openSample()).sheetAt(1)) as SheetModel);
+    const applied = runSheetOps(blank, [setColumnWidthOp(blank, 0, 103)!]);
+    expect(applied.ok).toBe(true);
+
+    const written = await writeAndReopen(applied.after, 1);
+    expect(written.partXml).toContain('<cols><col min="1" max="1" width="14" customWidth="1"/></cols><sheetData/>');
+    expect(widthSegments(written.sheet)).toEqual([[0, 0, 14]]);
   });
 
   it("警告与未建模部件清单必须一路带进载荷，不许在跨界处丢（spec §零.7）", async () => {

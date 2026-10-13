@@ -125,16 +125,58 @@ export function parseSheet(input: ParseSheetInput): SheetModel {
 /**
  * 生成一张表的新 XML。
  *
- * @param sheet 可能已被改过格子的表。
+ * @param sheet 可能已被改过格子、列宽或合并区的表。
  * @param sharedStrings 工作簿共享的字符串表（新字符串会往里追加）。
- * @returns 完整的 `sheetN.xml` 部件文本：只有 `<sheetData>` 与 `<dimension>` 变了。
+ * @returns 完整的 `sheetN.xml` 部件文本：只有 `<sheetData>`、`<dimension>` 与 `<cols>` 变了。
  */
 export function serializeSheetXml(sheet: SheetModel, sharedStrings: SharedStringTable): string {
   const inner = buildSheetDataInner(sheet, sharedStrings);
   const replacement = inner ? `<sheetData>${inner}</sheetData>` : "<sheetData/>";
   let out = sheet.sourceXml.replace(SHEET_DATA_PATTERN, () => replacement);
   out = out.replace(DIMENSION_PATTERN, () => `<dimension ${dimensionAttributes(sheet)}/>`)
-  return out;
+  return replaceOrInsertCols(out, sheet.columns);
+}
+
+/** `<cols>` 区间；与 `<sheetData>` 一样按原文定点替换，不许整篇重序列化。 */
+const COLS_PATTERN = /<cols(?:\s[^>]*)?\s*\/>|<cols(?:\s[^>]*)?>[\s\S]*?<\/cols>/;
+
+/**
+ * 把列宽定义写回 `<cols>` 区间，其余字节仍然原样带着。
+ *
+ * 为什么必须动它：`<col min max>` 是一段范围，拖一列的宽度会把它劈成三段，
+ * 只写 `<sheetData>` 的话用户的列宽根本存不进文件（实测：写出去读回来还是原来那两段）。
+ *
+ * @param xml 已替换过 `<sheetData>` 与 `<dimension>` 的部件文本。
+ * @param columns 表当前的列宽分段（`sheet-edit.ts` 已按列号排好）。
+ * @returns 带上新 `<cols>` 的文本；一段自定义宽度都没有时删掉原区间（Excel 也是这么写的）。
+ */
+function replaceOrInsertCols(xml: string, columns: SheetColumn[]): string {
+  const region = columns.length ? `<cols>${columns.map(colXml).join("")}</cols>` : "";
+  if (COLS_PATTERN.test(xml)) return xml.replace(COLS_PATTERN, () => region);
+  // 原来没有 `<cols>`（这张表从没设过自定义宽度）：按 CT_Worksheet 的顺序插在 `<sheetData>` 之前
+  return xml.replace(SHEET_DATA_PATTERN, (sheetData) => region + sheetData);
+}
+
+/**
+ * 序列化一段 `<col>`。
+ *
+ * `attrs` 存的是读入时的全部属性（含 `min`/`max`/`width`/`customWidth`/`hidden`），
+ * 这几个一律以模型字段为准重写——否则劈段后会写出与 `minColIndex` 矛盾的旧值；
+ * 其余属性（`style`、`bestFit`、`x14ac:width`…）原样搬。
+ *
+ * @param column 一个列宽分段。
+ * @returns `<col .../>` 自闭合标签（`min`/`max` 是 1 基，这里 +1 换算）。
+ */
+function colXml(column: SheetColumn): string {
+  const attrs: string[] = [`min="${column.minColIndex + 1}"`, `max="${column.maxColIndex + 1}"`];
+  if (column.widthChars !== undefined) attrs.push(`width="${column.widthChars}"`);
+  for (const [key, value] of Object.entries(column.attrs ?? {})) {
+    if (["min", "max", "width", "hidden", "customWidth"].includes(key)) continue;
+    attrs.push(`${key}="${escapeAttr(value)}"`);
+  }
+  if (column.customWidth) attrs.push('customWidth="1"');
+  if (column.hidden) attrs.push('hidden="1"');
+  return `<col ${attrs.join(" ")}/>`;
 }
 
 /**
