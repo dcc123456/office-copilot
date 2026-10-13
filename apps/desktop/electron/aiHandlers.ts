@@ -16,6 +16,39 @@ interface TransformRequest {
 /** 一次请求回填给模型的最近轮数：够接上文，又不至于把整段会话原文上送。 */
 const HISTORY_TURNS = 12;
 
+/**
+ * 工具回路里的一条消息（OpenAI `/chat/completions` 的 `messages` 形状）。
+ *
+ * `messages` 由渲染层攒——表格载荷只在渲染层，工具在哪边执行、上下文就在哪边长。
+ */
+export interface ToolTurnMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string;
+  /** `role:"tool"` 时回填这条结果属于哪次调用。 */
+  tool_call_id?: string;
+  /** assistant 这一轮要调哪些工具（续跑时要把原样带回去）。 */
+  tool_calls?: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
+}
+
+/** 模型要求的一次工具调用；`arguments` 是原文 JSON 串，由渲染层过 zod 校验。 */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/** `ai:tool-turn` 的请求：一整段上下文 + 给模型看的工具定义。 */
+export interface ToolTurnRequest {
+  messages: ToolTurnMessage[];
+  tools: unknown[];
+  providerId?: string;
+}
+
+/** 一轮的回应：要么模型只说话（`content`），要么模型要求调工具（`toolCalls`）。 */
+export type ToolTurnResult =
+  | { ok: true; content: string; toolCalls: ToolCall[] }
+  | { ok: false; message: string; needsSetup?: boolean };
+
 type StreamEvent =
   | { requestId: string; kind: "delta"; text: string }
   /** `stopped` 区分"用户按了暂停"和"模型写完了"：界面据此给出「继续」，半截内容不算失败。 */
@@ -77,6 +110,38 @@ function chatUrl(provider: ProviderConfig): string {
   return `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`;
 }
 
+/** 一次 LLM 请求的超时：流式与非流式同一口径，超时按"用户按了暂停"以外的失败报。 */
+const LLM_TIMEOUT_MS = 120_000;
+
+/**
+ * 向服务商发一次 `/chat/completions` 请求（三条调用路径共用这一处，避免第三份 fetch 形状）。
+ *
+ * @param provider 解析好的服务商配置；`extraBody` 原样并进请求体（各家网关的私有开关）。
+ * @param body 请求体里除 `model`/`temperature`/`extraBody` 之外的部分（`messages`、`stream`、`tools` 等）。
+ * @param signal 超时/取消信号。
+ * @returns 原始 `Response`；HTTP 层错误不在这判，由调用方按流式或非流式各自处理。
+ */
+async function postChat(
+  provider: ProviderConfig,
+  body: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Response> {
+  return fetch(chatUrl(provider), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${provider.apiKey ?? ""}`,
+    },
+    body: JSON.stringify({
+      model: provider.model,
+      temperature: provider.temperature ?? 0.3,
+      ...body,
+      ...(provider.extraBody ?? {}),
+    }),
+    signal,
+  });
+}
+
 async function resolveProvider(providerId?: string): Promise<ProviderConfig | null> {
   const settings = await loadSettings();
   return providerId
@@ -89,20 +154,13 @@ const NO_PROVIDER_MESSAGE =
 
 export function registerAIHandlers(ipc: IpcMain): void {
   ipc.handle("ai:transform", async (_e, req: TransformRequest) => {
-    try {
-      const provider = await resolveProvider(req.providerId);
-      if (!provider) {
-        return {
-          ok: false,
-          needsSetup: true,
-          message: NO_PROVIDER_MESSAGE,
-        };
-      }
-      return callLLM(provider, req);
-    } catch (err) {
-      return { ok: false, message: err instanceof Error ? err.message : String(err) };
-    }
+    const resolved = await providerFor(req.providerId);
+    if (!resolved.ok) return resolved;
+    return callLLM(resolved.provider, req);
   });
+
+  // 工具回路按"一轮"走：上下文与工具在哪执行都属于渲染层（表格载荷只在那边），主进程只转发。
+  ipc.handle("ai:tool-turn", (_e, req: ToolTurnRequest) => toolTurn(req));
 
   const inflight = new Map<string, { ctrl: AbortController; canceled: boolean }>();
 
@@ -117,18 +175,9 @@ export function registerAIHandlers(ipc: IpcMain): void {
       const send = (ev: StreamEvent) => {
         if (!wc.isDestroyed()) wc.send("ai:stream", ev);
       };
-      let provider: ProviderConfig | null;
-      try {
-        provider = await resolveProvider(req.providerId);
-      } catch (err) {
-        return {
-          ok: false,
-          message: err instanceof Error ? err.message : String(err),
-        };
-      }
-      if (!provider) {
-        return { ok: false, needsSetup: true, message: NO_PROVIDER_MESSAGE };
-      }
+      const resolved = await providerFor(req.providerId);
+      if (!resolved.ok) return resolved;
+      const provider = resolved.provider;
 
       const ctrl = new AbortController();
       const entry = { ctrl, canceled: false };
@@ -180,20 +229,7 @@ async function runStream(
   signal: AbortSignal,
   onDelta: (text: string) => void,
 ): Promise<void> {
-  const res = await fetch(chatUrl(provider), {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${provider.apiKey ?? ""}`,
-    },
-    body: JSON.stringify({
-      model: provider.model,
-      temperature: provider.temperature ?? 0.3,
-      messages: buildMessages(req),
-      stream: true,
-      ...(provider.extraBody ?? {}),
-    }),
-  });
+  const res = await postChat(provider, { messages: buildMessages(req), stream: true }, signal);
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`LLM ${res.status}: ${text.slice(0, 500)}`);
@@ -260,22 +296,9 @@ export async function callLLM(
   req: TransformRequest,
 ): Promise<{ ok: true; text: string } | { ok: false; message: string; needsSetup?: boolean }> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 120_000);
+  const t = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
   try {
-    const res = await fetch(chatUrl(provider), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${provider.apiKey ?? ""}`,
-      },
-      body: JSON.stringify({
-        model: provider.model,
-        temperature: provider.temperature ?? 0.3,
-        messages: buildMessages(req),
-        ...(provider.extraBody ?? {}),
-      }),
-      signal: ctrl.signal,
-    });
+    const res = await postChat(provider, { messages: buildMessages(req) }, ctrl.signal);
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       return { ok: false, message: `LLM ${res.status}: ${text.slice(0, 500)}` };
@@ -287,8 +310,99 @@ export async function callLLM(
     if (!text) return { ok: false, message: "模型返回为空。" };
     return { ok: true, text };
   } catch (err) {
-    return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    return { ok: false, message: errorMessage(err) };
   } finally {
     clearTimeout(t);
+  }
+}
+
+/**
+ * 工具回路的一轮请求：整段上下文与工具定义都由渲染层给，主进程只管转发与超时。
+ *
+ * @param req `messages`（含 `role:"tool"` 的回填）、`tools`、可选 `providerId`。
+ * @returns 这一轮的正文与模型点名的工具调用；没配服务商时 `needsSetup`，HTTP/超时都是 `ok:false` + 消息。
+ */
+export async function toolTurn(req: ToolTurnRequest): Promise<ToolTurnResult> {
+  const resolved = await providerFor(req.providerId);
+  if (!resolved.ok) return resolved;
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), LLM_TIMEOUT_MS);
+  try {
+    const res = await postChat(
+      resolved.provider,
+      { messages: req.messages, tools: req.tools, tool_choice: "auto" },
+      ctrl.signal,
+    );
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return { ok: false, message: `LLM ${res.status}: ${text.slice(0, 500)}` };
+    }
+    return toolTurnOf(await res.json());
+  } catch (err) {
+    return { ok: false, message: errorMessage(err) };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * 拆响应体：这一轮模型是说话还是要调工具。
+ *
+ * @param data 网关返回的 JSON。
+ * @returns 正文（已去首尾空白）与工具调用数组；`function.name` 为空的调用条目丢掉（各家网关偶发只回 id）。
+ *          两者都空时判为"模型返回为空"——不许把空回包静默当成"没有工具调用"。
+ */
+export function toolTurnOf(data: unknown): ToolTurnResult {
+  const message = (
+    data as {
+      choices?: Array<{ message?: { content?: unknown; tool_calls?: unknown } }>;
+    }
+  )?.choices?.[0]?.message;
+  const content = typeof message?.content === "string" ? message.content.trim() : "";
+  const rawCalls: Array<{ id?: unknown; function?: { name?: unknown; arguments?: unknown } }> =
+    Array.isArray(message?.tool_calls) ? message?.tool_calls : [];
+  const toolCalls: ToolCall[] = rawCalls
+    .map((call) => ({
+      id: typeof call.id === "string" ? call.id : "",
+      name: typeof call.function?.name === "string" ? call.function.name : "",
+      arguments: typeof call.function?.arguments === "string" ? call.function.arguments : "",
+    }))
+    .filter((call) => call.name !== "");
+  if (content === "" && toolCalls.length === 0) return { ok: false, message: "模型返回为空。" };
+  return { ok: true, content, toolCalls };
+}
+
+/**
+ * 把异常换成给人看的一句话。
+ *
+ * @param err `fetch`/解析抛出的异常。
+ * @returns 超时单独说明（`AbortError` 既来自 120 秒超时，也来自用户按暂停）。
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error && err.name === "AbortError") {
+    return `请求超时（${LLM_TIMEOUT_MS / 1000} 秒未完成）。`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** 解析服务商的两种失败要分开：配置读不出来带原因，读出来没配才是"去添加模型服务商"。 */
+type ProviderResolution =
+  | { ok: true; provider: ProviderConfig }
+  | { ok: false; message: string; needsSetup?: boolean };
+
+/**
+ * 按 `providerId` 取服务商（省略时取当前激活的那个）。
+ *
+ * @param providerId 渲染层指定的服务商 id；`undefined` 用设置里的默认。
+ * @returns 取到就是 `{ok:true, provider}`；没配是 `needsSetup`；读配置失败是带原因的 `ok:false`。
+ */
+async function providerFor(providerId?: string): Promise<ProviderResolution> {
+  try {
+    const provider = await resolveProvider(providerId);
+    return provider
+      ? { ok: true, provider }
+      : { ok: false, needsSetup: true, message: NO_PROVIDER_MESSAGE };
+  } catch (err) {
+    return { ok: false, message: errorMessage(err) };
   }
 }

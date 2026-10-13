@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { ToolTurnRequest, ToolTurnResult } from "./aiHandlers.js";
 import type { SessionRecord, SessionSummary, SessionTurn } from "./sessionStore.js";
 import type { SheetOpenResult, SheetSavePayload, SheetSaveResult } from "./sheetHandlers.js";
 
@@ -122,6 +123,12 @@ const api = {
     ipcRenderer.invoke("clipboard:read"),
   aiTransform: (payload: AITransformPayload): Promise<AIResult> =>
     ipcRenderer.invoke("ai:transform", payload),
+  /**
+   * 工具回路的一轮：上下文与工具定义都由渲染层攒（表格载荷只在那边），
+   * 主进程只把这一轮转给服务商，原样回抛模型要调的工具。
+   */
+  aiToolTurn: (payload: ToolTurnRequest): Promise<ToolTurnResult> =>
+    ipcRenderer.invoke("ai:tool-turn", payload),
   aiStreamStart: (
     payload: { requestId: string } & AITransformPayload & {
       providerId?: string;

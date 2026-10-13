@@ -70,6 +70,40 @@ export interface SessionRecord {
   turns: SessionTurn[];
 }
 
+/**
+ * 工具回路里的一条消息，结构见 electron/aiHandlers.ts 的 ToolTurnMessage。
+ * `role:"tool"` 的回填必须带 `tool_call_id`，告诉模型这条结果对应哪一次调用。
+ */
+export interface ToolTurnMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content?: string;
+  tool_call_id?: string;
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
+}
+
+/** 模型要求的一次工具调用；`arguments` 是原文 JSON 串，落地前必须过 zod 校验（AGENTS §2.8）。 */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
+}
+
+/** 一轮工具回路的请求：上下文与工具定义都在渲染层攒，主进程只转发给服务商。 */
+export interface ToolTurnRequest {
+  messages: ToolTurnMessage[];
+  tools: unknown[];
+  providerId?: string;
+}
+
+/** 一轮的回应：模型只说话时 `toolCalls` 为空数组；`needsSetup` 表示还没配服务商。 */
+export type ToolTurnResult =
+  | { ok: true; content: string; toolCalls: ToolCall[] }
+  | { ok: false; message: string; needsSetup?: boolean };
+
 /** 打开对话框的选择结果：只有路径，读 docx 还是 xlsx 由渲染层按扩展名分派。 */
 export interface OpenPickResult {
   ok: boolean;
@@ -143,6 +177,8 @@ interface OfficeCopilotAPI {
     /** 续聊时带上的历史轮次，主进程截到最近若干轮再上送。 */
     history?: SessionTurn[];
   }) => Promise<{ ok: true; text: string } | { ok: false; message: string; needsSetup?: boolean }>;
+  /** 工具回路的一轮：见 electron/aiHandlers.ts 的 `ai:tool-turn`。上下文由调用方攒。 */
+  aiToolTurn: (payload: ToolTurnRequest) => Promise<ToolTurnResult>;
   aiStreamStart: (payload: {
     requestId: string;
     action: string;
