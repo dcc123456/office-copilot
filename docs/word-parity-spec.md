@@ -619,7 +619,7 @@ Word 自己写的 `{ PAGEREF _Ref2 \h }` 指令被丢掉、存回去就是死文
 补上 `comments+xml` 登记。用 Word / WPS 打开验证：本机没装，**BLOCKED**。
 
 
-⑥ 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP，`tmp/track-app-probe.mjs`）：打开一份
+⑥ 的实测（本机 macOS，桌面 app 独立 `--user-data-dir` + CDP，`tmp/track-app-probe.mjs`——探针已按 `AGENTS.md` §7.3 在收尾时清掉，下面的读数即一手证据）：打开一份
 **没有任何修订**的两段 `.docx`，设置里署名写"修订者甲"。点工具栏「修订」后按钮 `active` 亮起；在第一段句末
 用真实输入通道打五个字，编辑器里出现 1 个 `span[data-revision="ins"]`，`title` 写着
 "插入：修订者甲（2026-10-10T23:01:15Z）"；拖选第二段里的"几个字"按 Backspace，出现第二个芯片
@@ -1298,7 +1298,7 @@ URL 是 404，别再试）。两档抬起/沉下的语义含"有则缩小"，`ba
 - 类型 + 测试：`pnpm build` EXIT=0（`grep -c "error TS"` = 0）；`pnpm test` EXIT=0，逐包 docx-io **274**
   （7 个文件）/ desktop **326**（29 个文件，+14 全在 `TrackChanges.test.ts`）/ word-client 8 /
   word-tools 6 / server 2；`apps/cli`、`packages/shared`、`apps/task-pane` 仍无测试文件。
-- UI：真实 app 探针（`tmp/track-app-probe.mjs`，独立 `--user-data-dir` + CDP，一份**没有**修订的
+- UI：真实 app 探针（`tmp/track-app-probe.mjs`，独立 `--user-data-dir` + CDP，收尾已按 §7.3 清掉；一份**没有**修订的
   `.docx`），实跑读回的数记在 §四 的"⑥ 的实测"那段：按钮 `active` 双向切换、`ins`/`del` 芯片的
   `title` 带署名与时间、存盘后 `<w:ins w:id="1" …>` 与 `<w:del w:id="2" …><w:delText>` 各一条、
   ⌘Z 以后只剩 `ins` 且文字回来、关掉开关再打字不记（二次存盘 `IDS2` 仍只有 `w:id="1"`，
