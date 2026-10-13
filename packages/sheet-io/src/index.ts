@@ -72,3 +72,24 @@ export {
   type SheetCoreOp,
   type SheetOpsResult,
 } from "./sheet-edit.js";
+export {
+  aggregateSheet,
+  describeSheet,
+  duplicateGroups,
+  resolveColumnRef,
+  type AggregateFunction,
+  type AggregateGroup,
+  type AggregateInput,
+  type AggregateResult,
+  type AggregateSpec,
+  type DescribeOptions,
+  type DuplicateGroup,
+  type DuplicateResult,
+  type SheetProfile,
+} from "./analysis/sheet-table.js";
+export {
+  type ColumnOutlier,
+  type ColumnProfile,
+  type ColumnValueType,
+  type NumericSummary,
+} from "./analysis/column-profile.js";
