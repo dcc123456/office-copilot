@@ -1,13 +1,15 @@
 /**
- * 表格视图（spec 阶段 2/3）：虚拟滚动的网格、选区、就地编辑、列宽拖动与表签。
+ * 表格视图（spec 阶段 2/3）：虚拟滚动的网格、选区、就地编辑、列宽拖动、整行整列插删与表签。
  *
  * 这里只做装配：几何与单位换算在 `sheetGridModel` 与 `@office-copilot/sheet-io`，
  * 改动一律收成 op 交给上层落地（组件自己不写载荷，也不碰 Node 能力，`AGENTS.md` §3.3 / §5.2）。
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import {
+  deleteTracksOp,
   formatA1,
   indexToColName,
+  insertTracksOp,
   rangeContains,
   readOnlyReason,
   setCellTextOp,
@@ -31,6 +33,7 @@ import {
   visibleSlotRange,
 } from "./sheetGridModel.js";
 import { startPointerDrag } from "../hooks/usePointerDrag.js";
+import { menuRect } from "../editor/contextMenu.js";
 import "../styles/sheet.css";
 
 export interface SheetViewProps {
@@ -56,6 +59,9 @@ const ORIGIN: A1Address = { colIndex: 0, rowIndex: 0 };
 /** 列宽热区宽度（px），只影响命中，不改变文档里的宽度。 */
 const RESIZE_HOTZONE_PX = 6;
 
+/** 表头右键菜单的估算宽高（px）：两项插入 + 分隔线 + 一项删除，只用来贴边翻转。 */
+const TRACK_MENU_SIZE_PX = { width: 168, height: 96 };
+
 /**
  * 表格视图。
  *
@@ -79,6 +85,8 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
   const [anchor, setAnchor] = useState<A1Address>(ORIGIN);
   const [editing, setEditing] = useState<{ address: string; text: string } | null>(null);
   const [resizing, setResizing] = useState<{ colIndex: number; widthPx: number } | null>(null);
+  /** 表头右键菜单：点的那条整行/整列（0 基下标）与视口坐标（px）。 */
+  const [trackMenu, setTrackMenu] = useState<{ axis: "row" | "col"; index: number; left: number; top: number } | null>(null);
 
   const range = selectionRectOf(anchor, active);
 
@@ -114,6 +122,21 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
     observer.observe(el);
     return () => observer.disconnect();
   }, [applyScroll]);
+
+  // 表头右键菜单挂在指针位置：点别处或按 Esc 收起，与正文那两个右键菜单同一套收起规则。
+  useEffect(() => {
+    if (!trackMenu) return;
+    const close = () => setTrackMenu(null);
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [trackMenu]);
 
   const scrollToAddress = useCallback((address: A1Address) => {
     const el = scrollRef.current;
@@ -364,6 +387,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
                   key={colIndex}
                   className={`sheet-colhead${selected ? " is-selected" : ""}`}
                   style={{ left: layout.colOffsetPx[slot] ?? 0, width: widthPx }}
+                  onContextMenu={(event) => openTrackMenu(event, "col", colIndex)}
                 >
                   {indexToColName(colIndex)}
                   {isReadOnly ? null : (
@@ -388,6 +412,7 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
                   key={rowIndex}
                   className={`sheet-rowhead${selected ? " is-selected" : ""}`}
                   style={{ top: layout.rowOffsetPx[slot] ?? 0, height: layout.rowHeightPx[slot] ?? 20 }}
+                  onContextMenu={(event) => openTrackMenu(event, "row", rowIndex)}
                 >
                   {rowIndex + 1}
                 </div>
@@ -403,6 +428,8 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
           onScroll={(event) => {
             const el = event.currentTarget;
             applyScroll(el.scrollLeft, el.scrollTop);
+            // 菜单按视口坐标贴住那条表头：表格一滚表头就挪位，留着它就是在指另一条。
+            setTrackMenu(null);
           }}
         >
           <div className="sheet-canvas" style={{ width: layout.totalWidthPx, height: layout.totalHeightPx }} onPointerDown={onCanvasPointerDown}>
@@ -469,8 +496,69 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
           {selectionSize.cols > 1 || selectionSize.rows > 1 ? ` · ${selectionSize.cols}×${selectionSize.rows}` : ""}
         </span>
       </div>
+
+      {/* 整行/整列的插删入口：样式沿用正文的 .ctx-menu；拦下 mousedown 免得吹走编辑框焦点、让 onBlur 抢在同一次落地里提交 */}
+      {trackMenu ? (
+        <div
+          className="ctx-menu"
+          style={{ left: trackMenu.left, top: trackMenu.top }}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          <button type="button" className="ctx-item" onClick={() => applyTrackOp("insertTracks", 0)}>
+            {trackMenu.axis === "row" ? "↑ 在上方插入行" : "← 在左侧插入列"}
+          </button>
+          <button type="button" className="ctx-item" onClick={() => applyTrackOp("insertTracks", 1)}>
+            {trackMenu.axis === "row" ? "↓ 在下方插入行" : "→ 在右侧插入列"}
+          </button>
+          <div className="ctx-sep" />
+          <button type="button" className="ctx-item danger" onClick={() => applyTrackOp("deleteTracks", 0)}>
+            {trackMenu.axis === "row" ? "删除本行" : "删除本列"}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
+
+  /**
+   * 在整行/整列的表头上打开插删菜单。
+   *
+   * @param event 表头上的右键事件；只用它的指针视口坐标。
+   * @param axis 点的是列表头还是行表头。
+   * @param index 被点那一条行/列的 0 基下标。
+   */
+  function openTrackMenu(event: ReactMouseEvent<HTMLDivElement>, axis: "row" | "col", index: number) {
+    if (isReadOnly) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const position = menuRect(
+      { x: event.clientX, y: event.clientY },
+      TRACK_MENU_SIZE_PX,
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    setTrackMenu({ axis, index, left: position.left, top: position.top });
+  }
+
+  /**
+   * 把菜单选中的整行/整列插删交给上层落地（现场核对、逆操作与历史都在 `commitSheetOps` 那头）。
+   *
+   * @param kind 插入还是删除。
+   * @param offset 插入点相对被点表头的偏移：0 在它上面/左侧，1 在它下面/右侧；删除时忽略。
+   */
+  function applyTrackOp(kind: "insertTracks" | "deleteTracks", offset: number) {
+    if (!sheet || !trackMenu) return;
+    const isRow = trackMenu.axis === "row";
+    const trackLabel = isRow ? "行" : "列";
+    const index = trackMenu.index + (kind === "insertTracks" ? offset : 0);
+    const op = kind === "insertTracks"
+      ? insertTracksOp(sheet, trackMenu.axis, index)
+      : deleteTracksOp(sheet, trackMenu.axis, index);
+    setTrackMenu(null);
+    scrollRef.current?.focus();
+    if (!op) return;
+    const where = isRow ? `第 ${index + 1} 行` : `${indexToColName(index)} 列`;
+    const side = offset === 0 ? (isRow ? "上方" : "左侧") : isRow ? "下方" : "右侧";
+    onCommitOps([op], kind === "insertTracks" ? `在 ${where} 的${side}插入一${trackLabel}` : `删除 ${where}`);
+  }
 
   /**
    * 开始拖列宽：热区上按下后由指针捕获跟随。
