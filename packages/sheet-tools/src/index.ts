@@ -3,6 +3,9 @@
  *
  * 与 `word-tools` 同构，守同一条红线：模型只产出**入参与提案**，取值、统计、落地全部由
  * `@office-copilot/sheet-io` 做（`AGENTS.md` §2.8、spec §零.4，验收 B10）。
+ * 写面只有 `sheet_submit_proposal` 一个出口，它的四类改动（改格 / 列宽 / 插行 / 删行）与
+ * `sheet-edit.ts` 里**自带逆操作**的四类 op 一一对应——表达不了的（排序、拆合列、统一数字格式）
+ * 宁可不提供，也不发一批没有逆操作的直写（§2.5，spec §七"整理写侧缺 op"）。
  * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `sheet-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 `sheetAgent`，提交 13）拿校验过的入参去调引擎函数。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
@@ -72,12 +75,83 @@ export const FindArgs = z
   })
   .strict();
 
+/** `sheet_duplicates` 的入参（去重前先数清楚"能安全删掉几行"）。 */
+export const DuplicatesArgs = z
+  .object({
+    keys: z.array(ColumnRef).min(1).max(5).describe("判定重复的键列，1~5 个；要求这些列在同一行上完全相同。"),
+    hasHeader: HasHeader,
+    limit: z.number().int().min(1).max(200).default(50).describe("最多回多少组，默认 50；重复组总数与多余行数不受它影响。"),
+  })
+  .strict();
+
+/** 一条改格请求：地址 + 要写进去的文本。 */
+const SetCellEdit = z
+  .object({
+    type: z.literal("set_cell"),
+    address: z.string().min(1).max(12).describe("单元格地址，如 C5（1 基，与网格里看到的一致）。"),
+    text: z
+      .string()
+      .max(2000)
+      .describe("要写的文本。以 = 开头当公式（由引擎算缓存值）；日期写 2026-01-31 这种完整形式，`1-2` 会被当文本。"),
+  })
+  .strict();
+
+/** 一条列宽请求。 */
+const SetColumnWidthEdit = z
+  .object({
+    type: z.literal("set_column_width"),
+    column: ColumnRef,
+    /** 单位说在描述里：模型只会给"多宽"，换算成 Excel 的字符宽度由引擎做（AGENTS.md §2.1）。 */
+    widthPx: z.number().min(20).max(2000).describe("列宽，单位是屏幕像素（px，不是 pt 也不是字符数）；换算由表格引擎做。"),
+  })
+  .strict();
+
+/** 一条插入整行的请求。 */
+const InsertRowsEdit = z
+  .object({
+    type: z.literal("insert_rows"),
+    row: z.number().int().min(1).max(1_048_576).describe("在这一行**之前**插入（1 基行号）。"),
+    count: z.number().int().min(1).max(500).default(1).describe("插入几行，默认 1。"),
+  })
+  .strict();
+
+/** 一条删除整行的请求。 */
+const DeleteRowsEdit = z
+  .object({
+    type: z.literal("delete_rows"),
+    rows: z
+      .array(z.number().int().min(1).max(1_048_576))
+      .min(1)
+      .max(500)
+      .describe("要删除的行号（1 基，来自 sheet_find / sheet_duplicates，别自己数）。"),
+  })
+  .strict();
+
+/** 提案里的一条改动。刻意只留这四类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
+export const SheetEdit = z
+  .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit]);
+
+/**
+ * `sheet_submit_proposal` 的入参。
+ *
+ * 排序、拆合列、统一数字格式**这里没有**：现有 op 面表达不了（见 spec §七"整理写侧缺 op"），
+ * 模型只能提这四项。
+ */
+export const SubmitProposalArgs = z
+  .object({
+    summary: z.string().min(1).max(200).describe("一句话中文说明这份提案要做什么。"),
+    edits: z.array(SheetEdit).min(1).max(500).describe("按顺序落地的改动，1~500 条。"),
+  })
+  .strict();
+
 /** 工具名 → 入参 schema；`parseToolArguments` 按这个名字分派。 */
 export const SHEET_TOOL_SCHEMAS = {
   sheet_describe: DescribeArgs,
   sheet_read_range: ReadRangeArgs,
   sheet_aggregate: AggregateArgs,
   sheet_find: FindArgs,
+  sheet_duplicates: DuplicatesArgs,
+  sheet_submit_proposal: SubmitProposalArgs,
 } as const;
 
 /** 工具名（模型回调时能出现的合法集合，用来拦住不存在的方法名）。 */
@@ -87,6 +161,9 @@ export type DescribeArgsT = z.infer<typeof DescribeArgs>;
 export type ReadRangeArgsT = z.infer<typeof ReadRangeArgs>;
 export type AggregateArgsT = z.infer<typeof AggregateArgs>;
 export type FindArgsT = z.infer<typeof FindArgs>;
+export type DuplicatesArgsT = z.infer<typeof DuplicatesArgs>;
+export type SubmitProposalArgsT = z.infer<typeof SubmitProposalArgs>;
+export type SheetEditT = z.infer<typeof SheetEdit>;
 
 /** 入参解析结果：`ok:false` 时 `reason` 是直接回给模型的错误串（验收 B9）。 */
 export type ToolArgsOutcome<T> = { ok: true; args: T } | { ok: false; reason: string };
@@ -202,6 +279,73 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
           limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
         },
         required: ["column", "criteria"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_duplicates",
+      description: "按若干键列找完全重复的行，返回每组的行号与「能安全删掉几行」。要去重之前先调它数清楚，别凭印象删行。",
+      parameters: {
+        type: "object",
+        properties: {
+          keys: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
+          hasHeader: { type: "boolean", default: true },
+          limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+        },
+        required: ["keys"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_submit_proposal",
+      description:
+        "把你打算对表格做的修改打包成提案返回。用户会看到逐条改动与跳过原因并确认后才落地。一次回答只提交一份提案。改格用 set_cell（文本以 = 开头当公式），列宽用 set_column_width（px），整行用 insert_rows / delete_rows；排序、拆合列、统一数字格式现在提不了。",
+      parameters: {
+        type: "object",
+        properties: {
+          summary: { type: "string", minLength: 1, maxLength: 200 },
+          edits: {
+            type: "array",
+            minItems: 1,
+            maxItems: 500,
+            items: {
+              type: "object",
+              oneOf: [
+                {
+                  type: "object",
+                  properties: { type: { const: "set_cell" }, address: { type: "string" }, text: { type: "string" } },
+                  required: ["type", "address", "text"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: { type: { const: "set_column_width" }, column: { type: "string" }, widthPx: { type: "number" } },
+                  required: ["type", "column", "widthPx"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: { type: { const: "insert_rows" }, row: { type: "integer" }, count: { type: "integer", default: 1 } },
+                  required: ["type", "row"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: { type: { const: "delete_rows" }, rows: { type: "array", items: { type: "integer" } } },
+                  required: ["type", "rows"],
+                  additionalProperties: false,
+                },
+              ],
+            },
+          },
+        },
+        required: ["summary", "edits"],
         additionalProperties: false,
       },
     },

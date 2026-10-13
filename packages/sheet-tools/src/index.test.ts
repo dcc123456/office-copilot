@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AggregateArgs, DescribeArgs, FindArgs, ReadRangeArgs, SHEET_TOOLS, SHEET_TOOL_SCHEMAS, parseToolArguments, type SheetToolName } from "./index.js";
+import { AggregateArgs, DescribeArgs, DuplicatesArgs, FindArgs, ReadRangeArgs, SHEET_TOOLS, SHEET_TOOL_SCHEMAS, SubmitProposalArgs, parseToolArguments, type SheetToolName } from "./index.js";
 
 /**
  * 解析一段入参并只取失败理由，断言"B9：给模型的是错误串"时用。
@@ -18,11 +18,36 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(DescribeArgs.parse({})).toEqual({ hasHeader: true, maxColumns: 50 });
     expect(ReadRangeArgs.parse({ range: "A1:D20" })).toEqual({ range: "A1:D20", maxRows: 50 });
     expect(FindArgs.parse({ column: "C", criteria: ">100" })).toEqual({ column: "C", criteria: ">100", hasHeader: true, limit: 50 });
+    expect(DuplicatesArgs.parse({ keys: ["月份", "区域"] })).toEqual({ keys: ["月份", "区域"], hasHeader: true, limit: 50 });
+  });
+
+  it("提案里的四类改动各自收得下来，插入行数有默认值", () => {
+    const parsed = SubmitProposalArgs.parse({
+      summary: "补上合计列并把过窄的列放宽",
+      edits: [
+        { type: "set_cell", address: "E2", text: "=C2+D2" },
+        { type: "set_cell", address: "F2", text: "2026-01-31" },
+        { type: "set_column_width", column: "销售额", widthPx: 120 },
+        { type: "insert_rows", row: 3 },
+        { type: "delete_rows", rows: [7, 9] },
+      ],
+    });
+    expect(parsed.edits).toHaveLength(5);
+    expect(parsed.edits[3]).toEqual({ type: "insert_rows", row: 3, count: 1 });
   });
 
   it("多余的键一律拒收：模型不许把我们没定义的条件塞进工具入参", () => {
     expect(reasonOf("sheet_find", '{"column":"C","criteria":">100","sheetName":"销售"}')).toContain("入参不合");
     expect(reasonOf("sheet_read_range", '{"range":"A1:B2","maxRows":10,"orderBy":"C"}')).toContain("orderBy");
+  });
+
+  it("提案里出现没有逆操作的改动（排序 / 拆合列）或越界数值一律拒收", () => {
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"排一下","edits":[{"type":"sort_rows","column":"C"}]}')).toContain("入参不合");
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"整列改成日期格式","edits":[{"type":"set_number_format","column":"D","formatCode":"yyyy-mm-dd"}]}')).toContain("入参不合");
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"放宽","edits":[{"type":"set_column_width","column":"C","widthPx":5}]}')).toContain("widthPx");
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"空提案","edits":[]}')).toContain("edits");
+    expect(reasonOf("sheet_submit_proposal", '{"summary":"","edits":[{"type":"set_cell","address":"C2","text":"1"}]}')).toContain("summary");
+    expect(reasonOf("sheet_duplicates", '{"keys":[]}')).toContain("keys");
   });
 
   it("越界与空值给理由，不抛异常", () => {
@@ -61,6 +86,8 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(requiredOf("sheet_aggregate")).toEqual(["aggregates", "groupBy"]);
     expect(requiredOf("sheet_find")).toEqual(["column", "criteria"]);
     expect(requiredOf("sheet_describe")).toEqual([]);
+    expect(requiredOf("sheet_duplicates")).toEqual(["keys"]);
+    expect(requiredOf("sheet_submit_proposal")).toEqual(["edits", "summary"]);
   });
 
   it("校验过的聚合入参能直接交给引擎：函数名与列引用原样带过去", () => {
