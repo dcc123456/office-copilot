@@ -340,6 +340,31 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
   本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **161**（12 个文件）/ desktop **416**（37 个文件）/
   docx-io 296 / word-client 8 / word-tools 6 / server 2。
 
+**提交 12 的实际结果**（`b87a88b` 引擎读面 + `dba6fb4` 新包 `packages/sheet-tools`）：
+
+- 计划的落点只有 `packages/sheet-tools/src/index.ts`，实际**先补了引擎的三条读口**（`b87a88b`），否则工具层只能拿到
+  `describeSheet`/`aggregateSheet`，模型连"这几行长什么样"都没法问：新增 `readRange`（区域 → 显示文本）、
+  `findRows`（条件 → 行号与地址），并给 `describeSheet` 加 `maxColumns`。三条口都是"认不出来给理由串"而不是抛异常（B9）。
+- **条件口径复用公式层**（§3.1）：`findRows` 直接用 `formula-eval.toCriteria`，所以工具筛出的行与 `COUNTIF` 数出的行
+  同一套判定；带 `<f>` 的格按缓存值参与比较，没有缓存值就当空——Excel 重算前它本来就没有可比数字。
+  `toCriteria` 因此从包内私有改成包内导出（**没有**进 `index.ts` 的公开面）。
+- **上限写两处**：引擎侧是默认值（≤50 行样本、单格 ≤120 字、≤50 列画像、≤50 组/命中），schema 侧是硬边界（越界即拒收）。
+  引擎的默认值给 CLI 用，schema 的边界给模型用，两边都有单测（B11）。
+- 新包按 spec §三 的边界**只依赖 zod、不 import `sheet-io`**：它只判定"这套入参合不合法"，取值与统计全部由调用方
+  拿校验过的入参去调引擎（B10）。列引用与条件的语义解释只在引擎里，schema 只约束长度，避免第二套判定。
+- `parseToolArguments` 是包内唯一入口，永不抛异常（非法 JSON / 多余键 / 越界 / 不认识的工具名 → 错误串）。
+  Word 侧同类逻辑目前是 `apps/server/src/agent.ts:98-123` 里逐工具内联的 try/catch；提交 13 **不许在桌面再抄一份**，
+  要么复用这个入口，要么把 Word 侧也并进来（§3.2）。
+- 工具定义与 schema 不许长歪：单测逐条比对两边的**工具名集合、参数键集合、必填项集合**（模型只能填它看得见的键）。
+- **真实 `.xlsx` 上的落盘证据**（`sheet-file.test.ts` 新增 3 条，跑在阶段 1 夹具上）：表画像 `A1:J4` / 3 数据行 / 10 列，
+  销量列 `sum=360` 与表里 `SUM(C2:C4)` 那条公式留下的缓存值**是同一个数**；`readRange` 出来的显示串仍按各格自己的
+  数字格式（`120` 走内建 3、`0.12` 显示 `12.00%`、日期序列号显示成 `2026-01-31`、富文本 `粗蓝` 合成一句、空格拉成空串）；`findRows` 的 `>100` 命中
+  `C2/C3`、`<>华东` 命中第 4 行、`3月` 命中 `A4`，表头行不进命中。
+- 本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 **sheet-io 176**（12 个文件，+15）/ **sheet-tools 9**（新包）/
+  desktop 416 / docx-io 296 / word-client 8 / word-tools 6 / server 2。
+- **仍没做**：写侧工具与 `sheet_submit_proposal`（→ 提交 13）、桌面 `sheetAgent` 的工具环与真实端点探针（B12–B14）。
+  `sheet_create_chart` 按计划属阶段 5，不在本次工具面里（这条偏差在此显式记录）。
+
 ### 阶段 5 · 图表
 
 **目标**：AI 选区出图；app 内可看（ECharts），`.xlsx` 内为原生可编辑图表（D5 spike 成功）或明确记录的贴图降级。
@@ -378,7 +403,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | 公式子集求值（D4 的函数白名单）+ 缓存值写入 | **实际**：`packages/sheet-io/src/formula-eval.ts`（单文件递归下降，计划的 `src/formula/**` 目录没建，理由见阶段 4 提交 11）+ `sheet-edit.ts` 的 `setCellFormulaOp` + `SheetView.tsx` 的 `=` 入口 | `0e7cb74`（提交 11） |
 | 4 | 一批 op 里同一行的多条改动要都能落地（提交 12 的前置，见 §七） | `packages/sheet-io/src/sheet-edit.ts`（`applyOps` 的批内重新锚定 + `reanchorOp`/`rememberReanchor`） | `7de845f` |
 | 4 | 一批里改多列列宽要都能落地（同一族的列轴问题，见 §七） | `packages/sheet-io/src/sheet-edit.ts`（`applyColumnWidthOp` 先精确整段、不一致时按现场重算覆盖带，`splitColumnBand`/`sameColumnWidth` 抽出复用） | 512fb0f |
-| 4 | 工具 schema 与 JSON 工具定义 | `packages/sheet-tools/src/index.ts` | 提交 12 |
+| 4 | 工具 schema 与 JSON 工具定义 | **实际**：`packages/sheet-tools/src/index.ts`（四个读工具）+ 引擎侧先补三条读口 `packages/sheet-io/src/analysis/sheet-table.ts`（`readRange`/`findRows`/`describeSheet` 的 `maxColumns`），理由见阶段 4 提交 12 | `b87a88b` + `dba6fb4` + `cd65c5b`（提交 12） |
+| 4 | 写侧工具 schema 与提案：`sheet_submit_proposal`（改格/改公式/插删行列/去重/列宽） | `packages/sheet-tools/src/index.ts`（读面已落 `dba6fb4`，写面随提交 13 一起进）。**动手前要定的决策**：排序没有现成 op——四类 `SheetCoreOp` 里"重排整行"要么发一批 `setCellTextOp`（每格一条，撤销按内容寻址仍成立但前像很大），要么给 `sheet-edit.ts` 加第五类 move op；拆合列与统一数字格式同理 | 提交 13 |
 | 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | `src/ai/sheetAgent.ts` `src/ai/AIPanel.tsx` | 提交 13 |
 | 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | `packages/sheet-io/src/chart-spec.ts` `src/sheet/ChartView.tsx` | 提交 14 |
 | 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | `packages/sheet-io/src/xlsx-chart.ts` | 提交 15 |
@@ -420,9 +446,14 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 ### B. AI 行为（对应 §零.4/§零.5）
 
-9. `[ ]` 所有表格工具入参过 zod `.strict()`，非法入参返回给模型的是错误串而不是崩溃（对齐 `apps/server/src/agent.ts:117` 的做法）。
-10. `[ ]` **数字来自引擎**：单测固定住"聚合值由 `sheet-io` 计算"，模型给出的数字若与引擎不符，以引擎为准并记 warning。
-11. `[ ]` 上送内容默认截断（表头 + ≤50 行样本 + 结构摘要），有单测锁死这个上限。
+9. `[x]`（读工具四个，`dba6fb4`）所有表格工具入参过 zod `.strict()`，非法入参返回给模型的是错误串而不是崩溃（对齐 `apps/server/src/agent.ts:117` 的做法）。
+   **实测**：`parseToolArguments` 是唯一入口，9 条单测钉住非法 JSON / 空串 / 数组 / 多余键 / 越界 / 不认识的工具名都成串不成异常；写侧工具随提交 13 补。
+10. `[x]`（引擎侧，`b87a88b`）**数字来自引擎**：单测固定住"聚合值由 `sheet-io` 计算"，模型给出的数字若与引擎不符，以引擎为准并记 warning。
+    **实测**：`describeSheet`/`aggregateSheet`/`findRows`/`readRange` 的值全部由引擎算，并有 3 条用例跑在真实 `.xlsx` 夹具上（画像 `sum=360` 与表里 `SUM` 的缓存值同为一条断言）。
+    "模型给的数字与引擎不符时记 warning" 要等提交 13 的工具环落地才能测。
+11. `[x]`（上限已锁，`b87a88b` `dba6fb4`）上送内容默认截断（表头 + ≤50 行样本 + 结构摘要），有单测锁死这个上限。
+    **实测**：`readRange` 默认 ≤50 行、单格 ≤120 字，`describeSheet` 默认 ≤50 列并回报 `columnsTruncated`，聚合/命中默认 ≤50 条而计数不受影响；各有单测。
+    "表头 + 样本 + 摘要"这条**拼装**发生在桌面 agent，随提交 13 验。
 12. `[ ]` 半自动模式：提案必须用户点确认才落地；全自动模式的每步仍受 §2.5 撤销约束。
 13. `[ ]` 真实端点探针（一次性、`tmp/`）跑通"分析 / 整理 / 计算"各 ≥1 个任务，记录：模型实际调用的工具序列、失败样本、未转义引号这类解析坑（本仓已有 ark 回包先例）。
 14. `[ ]` 暂停/继续行为与 Word 一致：中断后半截提案留在卡上，点"继续"能接着写。
@@ -491,6 +522,7 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 本地公式求值与 Excel 结果不一致 | AI"数据计算"可信度 | 只支持白名单函数；UI 与 modlog 里标注缓存值来源；不一致的场景（循环引用、volatile 函数如 `TODAY()`）一律留空 `<v>` |
 | **一批 op 里同一行改两格时第二条被"认不出这一行"跳过**（阶段 4 实测发现，`0e7cb74` 的交叉读探针钉出） | AI 的"加两列计算值""整表整理"都要每行发多条 op，按现状会**静默少改**，只剩 `skipped` 里一条理由 | **已解决**（`7de845f`）：批内记"旧指纹 → 改后的指纹"的锚点表，只在同一批内部生效；同一格两次、批外改动仍按 C15 拦住，四条单测钉住 |
 | 同一族的**列轴**版本：一批里改多列列宽时，第一条把 `<col>` 分段劈开，第二条期望的分段形状对不上就被跳过 | "统一列宽 / 自动列宽"这类整理任务会静默少改若干列 | **已解决**（`512fb0f`）：现场分段与记录逐段一致时走精确路径整段换回（撤销能还原成原来那一段写法），不一致时只核对目标列自己的宽度没变、再按现场重算覆盖带；同一列两次、用户改过宽度仍按 C15 拦住，七条单测 + 一条 `.xlsx` 落盘往返钉住 |
+| **整理写侧缺 op**：现有四类 `SheetCoreOp`（改值/改公式/列宽/插删行列）里没有"重排整行""拆一列成两列""统一数字格式"的构造 | 阶段 4 的"数据整理"只能做去重与列宽两项；排序若用一批改值凑出来，前像整表那么大且撤销语义要说清 | 待做（提交 13 前要定的决策，见 §五"写侧工具 schema 与提案"行）：要么给 `sheet-edit.ts` 加第五类 move/格式 op（自带逆操作），要么明确只支持能用现有 op 安全表达的整理项并在提示词里写死边界。**不许**为了凑功能发一批无逆操作的直写 |
 | 无法用 Word/WPS 目视验证 | 验收永远缺最后一环 | 沿用 Word 线的做法：结构级替代证据 + 明确 BLOCKED（`docs/word-parity-spec.md` §8.12） |
 | 引入 Univer/SheetJS 的诱惑（"省几周"） | 破坏全局约束 3/6 | 本文 §二 已留否决理由；未来若要改选，必须先推翻 §零.6 再讨论 |
 
@@ -518,7 +550,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | `0e7cb74` | A4（写侧）、B9（求值器不崩） | `[~]`（A4 的"Excel 真重算"仍 BLOCKED） | 白名单函数当场算出 `<v>`，算不出的只写 `<f>`；两条形状有落盘单测，第三方 exceljs 交叉读到 `formula/result` 与"只有 formula"。逐包核对 sheet-io **152** / desktop **416**，`pnpm build`+`pnpm test` EXIT=0 |
 | 4 | `7de845f` | C15 在批内的死角（同一行多条 op） | `[x]` | 交叉读探针实测：一批里改同一行的两格，第二条被"认不出这一行"跳过。`applyOps` 改成批内重新锚定（`reanchorOp`/`rememberReanchor`），四条单测钉住；探针重跑 `op ok: true`，exceljs 读到 `C2={formula:"C3+C4",result:240}`（见 §七） |
 | 4 | `512fb0f` | C15 同族的列宽批内死角 | `[x]` | `applyColumnWidthOp` 原先要求现场 `<cols>` 分段与记录逐段一致，一批里改第二条就被跳过。现在精确路径优先、不一致时按现场重算覆盖带；七条单测 + 一条落盘往返（批内两列都落地、撤销后 `widthSegments` 与批前逐段相等） |
-| 4 | — | B9–B14 | `[ ]` | |
+| 4 | `b87a88b` `dba6fb4` `cd65c5b` | B9、B10、B11（读侧） | `[x]`（读工具面；B10 的"与引擎不符记 warning"与 B11 的"拼装上送"仍待提交 13） | 引擎新增 `readRange`/`findRows`/`describeSheet` 的 `maxColumns`，条件判定复用 `formula-eval.toCriteria`（筛出的行与 `COUNTIF` 同一口径）；新包 `packages/sheet-tools` 只依赖 zod、不 import `sheet-io`，`parseToolArguments` 永不抛异常。三条读路径各有真实 `.xlsx` 夹具上的落盘用例。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **176**（12 个文件）/ **sheet-tools 9**（新包）/ desktop 416 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 4 | — | B12–B14 | `[ ]` | |
 | 5 | — | D5 落地 | `[ ]` | |
 | 6 | — | D18/E24–E28 | `[ ]` | |
 
