@@ -35,6 +35,9 @@ importers:
       '@office-copilot/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@office-copilot/sheet-io':
+        specifier: workspace:*
+        version: link:../../packages/sheet-io
       '@office-copilot/word-tools':
         specifier: workspace:*
         version: link:../../packages/word-tools

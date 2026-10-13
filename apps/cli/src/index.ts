@@ -6,13 +6,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadDocx, saveDoc, log, warn, fail } from "./fsutil.js";
 import { runAgent } from "./agent.js";
+import { registerSheetCommands } from "./sheet.js";
 import type { ProposedEdit } from "@office-copilot/shared";
 
 const program = new Command();
 program
   .name("oc")
-  .description("Office 智能助手 CLI —— 直接修改 .docx，Word 和 WPS 都能打开。")
+  .description("Office 智能助手 CLI —— 直接修改 .docx、只读分析 .xlsx，Word 和 WPS 都能打开。")
   .version("0.1.0");
+
+registerSheetCommands(program);
 
 program
   .command("list <file>")
