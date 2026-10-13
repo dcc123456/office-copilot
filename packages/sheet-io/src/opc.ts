@@ -112,6 +112,24 @@ export function resolveTarget(sourcePartPath: string, target: string): string {
   return normalizeSegments(folder ? `${folder}/${target}` : target);
 }
 
+/**
+ * `resolveTarget` 的反向：把包内绝对路径写成关系文件里该出现的相对 `@Target`。
+ *
+ * 只在**新建**关系时用（`SheetFile.addChart`）。写错一层目录 Excel 会直接判文档损坏，
+ * 所以这里给出唯一的拼法，并且保证 `resolveTarget(src, relativeTarget(src, dst)) === dst`。
+ *
+ * @param sourcePartPath 源部件路径，如 `xl/worksheets/sheet1.xml`。
+ * @param targetPartPath 目标部件的包内路径，如 `xl/drawings/drawing1.xml`。
+ * @returns 相对源部件目录的写法，如 `../drawings/drawing1.xml`。
+ */
+export function relativeTarget(sourcePartPath: string, targetPartPath: string): string {
+  const base = sourcePartPath.includes("/") ? sourcePartPath.slice(0, sourcePartPath.lastIndexOf("/")).split("/") : [];
+  const target = normalizeSegments(targetPartPath).split("/");
+  let shared = 0;
+  while (shared < base.length && shared < target.length - 1 && base[shared] === target[shared]) shared += 1;
+  return `${"../".repeat(base.length - shared)}${target.slice(shared).join("/")}`;
+}
+
 function normalizeSegments(path: string): string {
   const resolved: string[] = [];
   for (const segment of path.split("/")) {

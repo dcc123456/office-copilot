@@ -4,7 +4,20 @@
  * 这里是渲染层 / CLI / AI 工具层能碰到的**唯一**表格 IO 面：
  * 单位（日期序列号、pt、字符宽度、ARGB）的解释只在本包内部发生，外面只拿到结构化模型。
  */
-export { SheetFile, SheetOpenError, type SheetOpenOptions, type SheetRef, type SheetSnapshot } from "./sheet-file.js";
+export { SheetFile, SheetOpenError, type ChartAddResult, type SheetOpenOptions, type SheetRef, type SheetSnapshot } from "./sheet-file.js";
+export {
+  CHART_KINDS,
+  chartExtentEmu,
+  quotedSheetPrefix,
+  resolveChartSpec,
+  type ChartKind,
+  type ChartResolveResult,
+  type ChartSeries,
+  type ChartSeriesInput,
+  type ChartSpecInput,
+  type ResolvedChart,
+} from "./chart-spec.js";
+export { buildChartParts, CHART_CONTENT_TYPE, DRAWING_CONTENT_TYPE, type ChartPartSet } from "./xlsx-chart.js";
 export {
   cellAt,
   isSheetEmpty,

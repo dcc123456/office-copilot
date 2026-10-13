@@ -6,9 +6,11 @@
  * 2. 单位/颜色/序列号的解释只发生在本包（`AGENTS.md` §2.1 的同一条纪律，换成表格域）。
  * 3. 读不懂的东西记进 `warnings`/`unsupported` 一路带到 UI，不许静默丢弃。
  */
-import { isWorksheetRelationship, loadPackage, readText, resolveTarget, type OpcPackage } from "./opc.js";
+import { isWorksheetRelationship, loadPackage, readText, relativeTarget, resolveTarget, type OpcPackage } from "./opc.js";
 import { children, isElement, parseDocument, type Element } from "./xml.js";
 import type { SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
+import type { ResolvedChart } from "./chart-spec.js";
+import { buildChartParts, CHART_CONTENT_TYPE, DRAWING_CONTENT_TYPE, DRAWING_REL_TYPE } from "./xlsx-chart.js";
 import { SharedStringTable } from "./xlsx-strings.js";
 import { StyleTable } from "./xlsx-styles.js";
 import { parseSheet, recalculateSheetExtent, serializeSheetXml } from "./xlsx-sheet.js";
@@ -40,6 +42,46 @@ export interface SheetSnapshot {
   parts: Record<string, string>;
 }
 
+/** 一次图表写入的结果。失败只给错误码，文案由渲染层组装（`AGENTS.md` §5.7）。 */
+export type ChartAddResult =
+  | { ok: true; chartPartPath: string; drawingPartPath: string; sheetPartPath: string }
+  | { ok: false; code: "sheet-missing" | "drawing-exists" | "no-worksheet-root" };
+
+/** 关系属性的命名空间，`<drawing r:id>` 要用它前缀。 */
+const DRAWING_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/** 排在 `<drawing>` **之后**的 `CT_Worksheet` 元素（ECMA-376 Part 1 §18.3.1.100 的序列），插入点取第一个命中的。 */
+const AFTER_DRAWING_PATTERN =
+  /<(?:legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b/;
+
+/** 表里已经有画图部件时的兜底 content types 根（原文件连 `[Content_Types].xml` 都缺才用得到）。 */
+const TYPES_SKELETON =
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>';
+
+/**
+ * 在表部件里放一个 `<drawing r:id>`，指向本次新建的画图部件。
+ *
+ * 一张表按规范只能有一个 `<drawing>`，所以**已有画图部件（图片、其它图表）的表这里直接拒绝**：
+ * 往里追加要重排既有 drawing 的关系，做错了会牵连用户的图片（`AGENTS.md` §2.4 的整批放弃语义）。
+ *
+ * @param xml 表部件原文。
+ * @param relId 本次新建关系用的编号。
+ * @returns 新文本；连 `</worksheet>` 都找不到时返回 null，调用方据此不落任何部件。
+ */
+function insertDrawingElement(xml: string, relId: string): string | null {
+  const root = /<worksheet\b[^>]*>/.exec(xml);
+  if (!root) return null;
+  // 关系属性要 `r` 前缀；原文件没声明过就补一次（补在根标签上，别处不动）。
+  const withNs = root[0].includes("xmlns:r=")
+    ? xml
+    : xml.replace(root[0], `${root[0].slice(0, -1)} xmlns:r="${DRAWING_REL_NS}">`);
+  const element = `<drawing r:id="${relId}"/>`;
+  const anchor = AFTER_DRAWING_PATTERN.exec(withNs);
+  if (anchor?.index !== undefined) return withNs.slice(0, anchor.index) + element + withNs.slice(anchor.index);
+  const close = withNs.lastIndexOf("</worksheet>");
+  return close < 0 ? null : `${withNs.slice(0, close)}${element}${withNs.slice(close)}`;
+}
+
 /** 会破坏"打开即回写也不坏"承诺的部件前缀；命中只记进 `unsupported`，内容仍原样保留。 */
 const UNSUPPORTED_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   ["xl/vbaProject.bin", "macro"],
@@ -57,6 +99,8 @@ const UNSUPPORTED_PREFIXES: ReadonlyArray<readonly [string, string]> = [
 export class SheetFile {
   private readonly loadedSheets = new Map<string, SheetModel>();
   private readonly rewrittenParts = new Map<string, string>();
+  /** 原文件里没有、本次保存要新增的部件（图表本体、画图部件、它们的关系与 content types）。 */
+  private readonly addedParts = new Map<string, string>();
   private readonly originalParts = new Map<string, string>();
   private readonly refs: SheetRef[];
   private readonly sharedStrings: SharedStringTable;
@@ -231,6 +275,136 @@ export class SheetFile {
   }
 
   /**
+   * 把 `sheet-io` 解析好的图表作为**原生图表部件**加进某张表（spec 决策 D5）。
+   *
+   * 一次登记五件事，少一件 Excel 就判文件损坏：图表部件本体、画图部件、画图部件→图表的关系、
+   * 表→画图部件的关系、`[Content_Types].xml` 的两条 Override。表部件里只插一个 `<drawing r:id>`，
+   * 其余字节照旧由 `serializeSheetXml` 的定点替换带着走，所以已有的图片/图形/超链接不受牵连。
+   *
+   * @param sheetPartPath 目标表的包内部件路径（来自 `SheetPayload.partPath`）。
+   * @param chart `resolveChartSpec` 通过的结果；本方法不复核数据，数据校验只在那一层。
+   * @returns 新部件的路径；表不存在或表部件里找不到插入点时返回错误码，本次不落任何部件。
+   */
+  async addChart(sheetPartPath: string, chart: ResolvedChart): Promise<ChartAddResult> {
+    const index = this.refs.findIndex((ref) => ref.partPath === sheetPartPath);
+    if (index < 0) return { ok: false, code: "sheet-missing" };
+    const sheet = await this.sheetAt(index);
+    if (!sheet) return { ok: false, code: "sheet-missing" };
+    const relId = this.nextDrawingRelId(sheetPartPath);
+    if (/<drawing\b/.test(sheet.sourceXml)) return { ok: false, code: "drawing-exists" };
+    const withDrawing = insertDrawingElement(sheet.sourceXml, relId);
+    if (!withDrawing) return { ok: false, code: "no-worksheet-root" };
+
+    const parts = buildChartParts(chart, {
+      chart: this.nextPartIndex("xl/charts/chart", ".xml"),
+      drawing: this.nextPartIndex("xl/drawings/drawing", ".xml"),
+    });
+    sheet.sourceXml = withDrawing;
+    this.writeSheet(sheet);
+    this.stagePart(parts.chartPartPath, parts.chartXml);
+    this.stagePart(parts.drawingPartPath, parts.drawingXml);
+    this.stagePart(parts.drawingRelsPath, parts.drawingRelsXml);
+    this.stagePart(
+      this.relsPathFor(sheetPartPath),
+      await this.sheetRelsWithDrawing(sheetPartPath, parts.drawingPartPath, relId),
+    );
+    this.stagePart(
+      "[Content_Types].xml",
+      await this.contentTypesWith([
+        [`/${parts.chartPartPath}`, CHART_CONTENT_TYPE],
+        [`/${parts.drawingPartPath}`, DRAWING_CONTENT_TYPE],
+      ]),
+    );
+    return { ok: true, chartPartPath: parts.chartPartPath, drawingPartPath: parts.drawingPartPath, sheetPartPath };
+  }
+
+  /**
+   * 关系文件的位置：`xl/worksheets/sheet1.xml` → `xl/worksheets/_rels/sheet1.xml.rels`。
+   *
+   * @param partPath 源部件路径。
+   * @returns 对应的 `.rels` 路径。
+   */
+  private relsPathFor(partPath: string): string {
+    const slash = partPath.lastIndexOf("/");
+    return `${partPath.slice(0, slash)}/_rels/${partPath.slice(slash + 1)}.rels`;
+  }
+
+  /**
+   * 这张表下一个可用的关系编号。
+   *
+   * @param sheetPartPath 表部件路径。
+   * @returns `rIdN` 形式的 id；已有的超链接关系原样让位，不许撞号。
+   */
+  private nextDrawingRelId(sheetPartPath: string): string {
+    const existing = this.pkg.relsBySourcePart.get(sheetPartPath) ?? [];
+    const highest = existing.reduce((max, rel) => Math.max(max, Number(/^rId(\d+)$/.exec(rel.id)?.[1] ?? 0)), 0);
+    return `rId${highest + 1}`;
+  }
+
+  /**
+   * 表的关系文件：保留原文，追加一条指向画图部件的关系。
+   *
+   * @param sheetPartPath 表部件路径。
+   * @param drawingPartPath 本次新建的画图部件路径。
+   * @param relId 表部件里 `<drawing r:id>` 用的编号。
+   * @returns 可直接写回的 `.rels` 文本；原文件没有这个部件时整篇新建。
+   */
+  private async sheetRelsWithDrawing(sheetPartPath: string, drawingPartPath: string, relId: string): Promise<string> {
+    const target = relativeTarget(sheetPartPath, drawingPartPath);
+    const relationship = `<Relationship Id="${relId}" Type="${DRAWING_REL_TYPE}" Target="${target}"/>`;
+    const original = await readText(this.pkg.zip, this.relsPathFor(sheetPartPath));
+    return original
+      ? original.replace("</Relationships>", `${relationship}</Relationships>`)
+      : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
+  }
+
+  /**
+   * 给 `[Content_Types].xml` 追加 Override 声明。
+   *
+   * @param entries `[部件路径, 内容类型]` 二元组，路径要带前导斜杠。
+   * @returns 新的部件文本；同名 Override 已存在时不重复追加。
+   */
+  private async contentTypesWith(entries: ReadonlyArray<readonly [string, string]>): Promise<string> {
+    const original = (await readText(this.pkg.zip, "[Content_Types].xml")) ?? TYPES_SKELETON;
+    return entries.reduce((xml, [partName, contentType]) => {
+      if (xml.includes(`PartName="${partName}"`)) return xml;
+      return xml.replace("</Types>", `<Override PartName="${partName}" ContentType="${contentType}"/></Types>`);
+    }, original);
+  }
+
+  /**
+   * 下一个可用的同名部件序号，避开文件里已有的图表/画图部件。
+   *
+   * @param prefix 部件路径前缀，如 `xl/charts/chart`。
+   * @param suffix 扩展名，如 `.xml`。
+   * @returns 已有数量 + 1（1 基）。
+   */
+  private nextPartIndex(prefix: string, suffix: string): number {
+    const taken = (names: string[]) => names.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).length;
+    return taken(this.pkg.entryNames) + taken([...this.addedParts.keys()]) + 1;
+  }
+
+  /**
+   * 登记一个部件的内容：原文件里有的走改写，没有的走新增。
+   *
+   * @param path 包内部件路径。
+   * @param content 部件正文。
+   */
+  private stagePart(path: string, content: string): void {
+    if (this.originalParts.has(path)) this.rewrittenParts.set(path, content);
+    else this.addedParts.set(path, content);
+  }
+
+  /**
+   * 当前包里已有的部件名（测试与验收用它核对"新部件真的进去了"）。
+   *
+   * @returns 已存在的 + 本次新增的路径集合，已排序。
+   */
+  partNames(): string[] {
+    return [...new Set([...this.pkg.entryNames, ...this.addedParts.keys()])].sort();
+  }
+
+  /**
    * 把上层表达的"显示意图"收敛成 `cellXfs` 位置索引（只追加或复用，**绝不重排**，实测 §二 P3）。
    *
    * 渲染层只带 `numberFormat`（它在 IO 层读到的语义），不自己数样式索引；
@@ -272,6 +446,7 @@ export class SheetFile {
   restoreSnapshot(snapshot: SheetSnapshot | undefined): void {
     if (!snapshot) return;
     this.rewrittenParts.clear();
+    this.addedParts.clear();
     for (const [path, text] of Object.entries(snapshot.parts)) this.originalParts.set(path, text);
     this.loadedSheets.clear();
   }
@@ -287,6 +462,8 @@ export class SheetFile {
     for (const [path, content] of this.rewrittenParts) {
       if (this.originalParts.has(path)) this.pkg.zip.file(path, content);
     }
+    // 本次新建的部件（图表、画图部件、它们的关系、补过的 content types）原文件里没有，要凭空造出来。
+    for (const [path, content] of this.addedParts) this.pkg.zip.file(path, content);
     // 改写过任何一张表就要让 Excel 开文件时全量重算：我们只写缓存值，不维护 `calcChain`。
     const workbookXml = this.originalParts.get("xl/workbook.xml");
     if (this.rewrittenParts.size > 0 && workbookXml) {
