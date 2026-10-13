@@ -50,7 +50,16 @@ import {
 } from "./agent.js";
 import { toast } from "../components/ui/Toast.js";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
-import type { AppSettings, ProviderConfig, SessionSummary, SessionTurn } from "../global.js";
+import { runSheetAgent } from "./sheetAgent.js";
+import type { SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
+import type { SheetEditT } from "@office-copilot/sheet-tools";
+import type {
+  AppSettings,
+  ProviderConfig,
+  SessionSummary,
+  SessionTurn,
+  ToolTurnMessage,
+} from "../global.js";
 import {
   listSessions,
   newSessionId,
@@ -101,6 +110,28 @@ interface RewriteCard {
   stopped?: boolean;
 }
 
+/**
+ * 表格提案卡：模型交出的改动条目 + 引擎算好的可落地 op。
+ *
+ * 与文档那张的差别只在"没有逐字流式"：工具回合是一整轮一整轮回来的，
+ * 中途能展示的只有"正在核对表格"，所以 `status` 停在 streaming 时不显示正文。
+ */
+interface SheetPlanCard {
+  summary: string;
+  /** 模型提的条目原样留着，卡片按它列改动清单（op 是引擎的表示，给人看的是这个）。 */
+  edits: SheetEditT[];
+  /** 能落地的部分；空数组意味着这份提案落不了地，卡片不会挂出来。 */
+  ops: SheetCoreOp[];
+  /** 没能变成 op 的条目原因，逐条给人看。 */
+  notes: string[];
+  status: CardStatus;
+  message?: string;
+  stopped?: boolean;
+  /** 续跑要用同一条诉求，以及暂停时攒下的 transcript（spec 验收 B14）。 */
+  instruction: string;
+  messages: ToolTurnMessage[];
+}
+
 type Item =
   | {
       id: string;
@@ -113,7 +144,33 @@ type Item =
       prompt?: string;
     }
   | { id: string; t: "plan"; label: string; card: PlanCard }
-  | { id: string; t: "rewrite"; label: string; card: RewriteCard };
+  | { id: string; t: "rewrite"; label: string; card: RewriteCard }
+  | { id: string; t: "sheet"; label: string; card: SheetPlanCard };
+
+/**
+ * 提案条目 → 卡片上的一行中文说明。
+ *
+ * 引擎只输出结构化 op 与错误码，文案在渲染层组装（`AGENTS.md` §5.7）。
+ *
+ * @param edits `sheet_submit_proposal` 校验过的条目。
+ * @returns 与条目同序的中文行；长文本截到 40 字，清单要能一眼扫完。
+ */
+function sheetEditLines(edits: readonly SheetEditT[]): string[] {
+  return edits.map((edit) => {
+    switch (edit.type) {
+      case "set_cell": {
+        const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
+        return `${edit.address.toUpperCase()} ← ${value || "（清空）"}`;
+      }
+      case "set_column_width":
+        return `列 ${edit.column} 的宽度改为 ${Math.round(edit.widthPx)}px`;
+      case "insert_rows":
+        return `在第 ${edit.row} 行之前插入 ${edit.count} 行`;
+      case "delete_rows":
+        return `删掉第 ${[...edit.rows].sort((left, right) => left - right).join("、")} 行`;
+    }
+  });
+}
 
 const uid = () => crypto.randomUUID();
 
@@ -126,6 +183,15 @@ const WELCOME_ITEM: Item = {
   role: "assistant",
   text:
     "选中文字后点快捷按钮就改那几段，不选中就是改整篇；也可以直接写下你的要求（比如「把第三节改成表格」「全文纠正错别字」）。默认是「半自动」：我先给 diff 预览，你确认后才写入文档；「全自动」直接改文档，「聊天」只给建议。每次改动都能在修改历史里看 diff 并单独撤销。",
+};
+
+/** 打开 .xlsx 时的引导语：说的是这张表能做什么，不是文档的选区改写。 */
+const SHEET_WELCOME_ITEM: Item = {
+  id: WELCOME_ID,
+  t: "msg",
+  role: "assistant",
+  text:
+    "直接说要对这张表做什么，比如「各区域销售额汇总」「找出销售额最高的三个月」「删掉重复的行」「把这一列拉宽」。数字由表格引擎算，不是我估的；能改的只有写格子、列宽、插行删行四类，每次改动都要你点「应用到表格」才落地，落地后能在修改历史里单独撤销。",
 };
 
 /** 会话历史浮层宽度（px），须与 `styles/aiPanel.css` 的 `.ai-session-pop` 一致。 */
@@ -161,6 +227,24 @@ function turnsOfItems(items: readonly Item[]): SessionTurn[] {
               ? `未写入（${c.stopped ? "已暂停" : c.message ?? "失败"}）`
               : `${c.ops.length} 处改动待确认`;
       turns.push({ role: "assistant", text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}` });
+      continue;
+    }
+    if (it.t === "sheet") {
+      const c = it.card;
+      if (c.status === "streaming") continue;
+      const result =
+        c.status === "applied"
+          ? "已写入表格"
+          : c.status === "dismissed"
+            ? "用户放弃了这份提案"
+            : c.status === "failed"
+              ? `未写入（${c.stopped ? "已暂停" : c.message ?? "失败"}）`
+              : `${c.ops.length} 处改动待确认`;
+      const lines = sheetEditLines(c.edits);
+      turns.push({
+        role: "assistant",
+        text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}${lines.length ? `\n· ${lines.join("\n· ")}` : ""}`,
+      });
       continue;
     }
     const c = it.card;
@@ -210,6 +294,17 @@ const DOC_ACTION_CHIPS = [
 
 const DOC_BY_LABEL = new Map(DOC_ACTION_CHIPS.map((d) => [d.label, d]));
 
+/**
+ * 表格模式下三种模式各说一句人话：这里没有逐字 diff，只有提案卡与"部分写入"。
+ *
+ * @see MODES —— 文档那套提示词，形状一样，说的是另一件事。
+ */
+const SHEET_MODE_HINTS: Record<AiMode, string> = {
+  chat: "聊天模式：AI 只回答与给建议，不会改动表格。",
+  semi: "半自动：AI 给出提案卡，你点「应用到表格」才写入，落地后能在修改历史里单独撤销。",
+  auto: "全自动：AI 给出提案就直接写入表格，改动记录在修改历史里，可单独撤销。",
+};
+
 const MODES: Array<{ id: AiMode; label: string; icon: typeof MessageSquare; title: string; hint: string }> = [
   {
     id: "chat",
@@ -238,9 +333,24 @@ const MODES: Array<{ id: AiMode; label: string; icon: typeof MessageSquare; titl
 /* Panel                                                               */
 /* ------------------------------------------------------------------ */
 
+/** 表格面板要接的东西：当前这张表的载荷（只读）与唯一的落地口。 */
+export interface SheetPanelBridge {
+  /** 当前工作表的载荷；代理只读它，写入一律经 `onCommitOps`（spec 决策 D6）。 */
+  payload: SheetPayload;
+  /**
+   * 提案落地的回调（`App.tsx` 的 `commitSheetOps`）：核对现场、换进工作簿、记一条修改历史。
+   *
+   * @param ops 提案里能被现有 op 表达的部分。
+   * @param summary 一句话说明，进修改历史。
+   * @returns 落地结果，用于在卡上如实报"部分写入"；当前表已不在时返回 null。
+   */
+  onCommitOps: (ops: SheetCoreOp[], summary: string) => SheetOpsResult | null;
+}
+
 export function AIPanel({
   editor,
   docKey,
+  sheet,
   collapsed,
   onToggle,
   onOpenHistory,
@@ -248,12 +358,14 @@ export function AIPanel({
 }: {
   editor: Editor;
   docKey: string;
+  /** 打开 .xlsx 时给；没有它就是文档模式，走原来那套选区改写与方案卡。 */
+  sheet?: SheetPanelBridge;
   collapsed: boolean;
   onToggle: () => void;
   onOpenHistory?: () => void;
   onChanged: () => void;
 }) {
-  const [items, setItems] = useState<Item[]>([WELCOME_ITEM]);
+  const [items, setItems] = useState<Item[]>([sheet ? SHEET_WELCOME_ITEM : WELCOME_ITEM]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AiMode>("semi");
   const modeRef = useRef<AiMode>("semi");
@@ -278,6 +390,11 @@ export function AIPanel({
   const listRef = useRef<HTMLDivElement>(null);
   const activeRequestRef = useRef<string | null>(null);
   const busyRef = useRef(false);
+  /**
+   * 暂停标志：表格的工具回合是整轮整轮回来的，没有可取消的流式请求，
+   * 于是「暂停」只置这个位，代理在两轮请求之间读到它就停下（spec 验收 B14）。
+   */
+  const pausedRef = useRef(false);
   /** 当前会话的编号，同时是 userData/sessions 下的文件名。 */
   const sessionIdRef = useRef<string>(newSessionId());
   /** 最近一次存盘的会话内容：一样就不重复写盘，免得效果循环。 */
@@ -289,6 +406,9 @@ export function AIPanel({
     busyRef.current = v;
     setBusy(v);
   }, []);
+
+  /** 新会话开头那句引导语：表格与文档说的不是一回事。 */
+  const welcomeItem = sheet ? SHEET_WELCOME_ITEM : WELCOME_ITEM;
 
   const refreshSettings = useCallback(async () => {
     const s = (await window.officeCopilot.getSettings()) as AppSettings;
@@ -368,9 +488,9 @@ export function AIPanel({
     if (turns.length) await saveSession({ id: sessionIdRef.current, turns });
     sessionIdRef.current = newSessionId();
     savedTurnsRef.current = "[]";
-    setItems([WELCOME_ITEM]);
+    setItems([welcomeItem]);
     setSessions(await listSessions());
-  }, [items]);
+  }, [items, welcomeItem]);
 
   /**
    * 打开历史里的某个会话，接着聊。
@@ -399,10 +519,10 @@ export function AIPanel({
     if (id === sessionIdRef.current) {
       sessionIdRef.current = newSessionId();
       savedTurnsRef.current = "[]";
-      setItems([WELCOME_ITEM]);
+      setItems([welcomeItem]);
     }
     setSessions(await listSessions());
-  }, []);
+  }, [welcomeItem]);
 
   const selectionText = useCallback(() => {
     const { from, to } = editor.state.selection;
@@ -581,6 +701,183 @@ export function AIPanel({
       });
     },
     [runAgent],
+  );
+
+  /* ------------- sheet: run the tool loop, land on confirm ------- */
+
+  const patchSheetCard = useCallback((id: string, fn: (c: SheetPlanCard) => SheetPlanCard) => {
+    setItems((prev) =>
+      prev.map((it) => (it.id === id && it.t === "sheet" ? { ...it, card: fn(it.card) } : it)),
+    );
+  }, []);
+
+  /**
+   * 确认落地一张表格提案：op 交给 app 的唯一写入口，它自己核对现场并记修改历史。
+   *
+   * @param id 卡片条目 id。
+   * @param card 待落地的提案。
+   */
+  const applySheetPlan = useCallback(
+    async (id: string, card: SheetPlanCard) => {
+      patchSheetCard(id, (c) => ({ ...c, status: "applying" }));
+      const result = sheet?.onCommitOps(card.ops, card.summary);
+      if (!result || !result.ops.length) {
+        patchSheetCard(id, (c) => ({
+          ...c,
+          status: "failed",
+          message:
+            result?.skipped.map((item) => item.reason).join("；") || "表格内容已经变化，这次没有写入。",
+        }));
+        return;
+      }
+      // 落地条数与提案条数不一致时必须说出来：剩下那些没生效（AGENTS.md §2.5）。
+      const partial = result.skipped.length
+        ? `部分写入（${result.ops.length}/${card.ops.length}）：${result.skipped.map((item) => item.reason).join("；")}`
+        : undefined;
+      patchSheetCard(id, (c) => ({ ...c, status: "applied", message: partial }));
+      onChanged();
+      if (partial) toast(partial, "error");
+    },
+    [onChanged, patchSheetCard, sheet],
+  );
+
+  /**
+   * 跑一次表格任务：转工具回合，结果落到指定或新建的提案卡上。
+   *
+   * @param opts.instruction 用户原话；点「继续」时还是这一句。
+   * @param opts.label 卡片标题。
+   * @param opts.cardId 复用已有卡片（点「继续」时），不给就新挂一张。
+   * @param opts.messages 暂停时攒下的 transcript；给了就从这一串往后接着跑，不让模型重读整表。
+   */
+  const runSheetAsk = useCallback(
+    async (opts: {
+      instruction: string;
+      label: string;
+      cardId?: string;
+      messages?: ToolTurnMessage[];
+    }) => {
+      const payload = sheet?.payload;
+      if (!payload) return;
+      const id = opts.cardId ?? uid();
+      if (opts.cardId) {
+        patchSheetCard(id, (c) => ({ ...c, status: "streaming", message: undefined, stopped: false }));
+      } else {
+        push({
+          id,
+          t: "sheet",
+          label: opts.label,
+          card: {
+            summary: "",
+            edits: [],
+            ops: [],
+            notes: [],
+            status: "streaming",
+            instruction: opts.instruction,
+            messages: [],
+          },
+        });
+      }
+      setBusyBoth(true);
+      pausedRef.current = false;
+      try {
+        const outcome = await runSheetAgent({
+          sheet: payload,
+          instruction: opts.instruction,
+          providerId: activeProviderId ?? undefined,
+          messages: opts.messages,
+          isPaused: () => pausedRef.current,
+        });
+        if (outcome.kind === "paused") {
+          patchSheetCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            stopped: true,
+            messages: outcome.messages,
+            message: "已暂停，工具回合停在两轮之间。点「继续」接着跑。",
+          }));
+          return;
+        }
+        if (outcome.kind === "failed") {
+          if (outcome.needsSetup) setSettingsOpen(true);
+          patchSheetCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            messages: outcome.messages,
+            message: outcome.message,
+          }));
+          return;
+        }
+        // 纯分析问题（汇总、找极值）不出提案：这一轮的正文就是答复。
+        if (outcome.kind === "answer") {
+          dismiss(id);
+          note(outcome.text);
+          return;
+        }
+        if (!outcome.ops.length) {
+          dismiss(id);
+          note(`这份提案里没有能落地的改动：${outcome.notes.join("；") || outcome.summary}`);
+          return;
+        }
+        const card: SheetPlanCard = {
+          summary: outcome.summary,
+          edits: outcome.edits,
+          ops: outcome.ops,
+          notes: outcome.notes,
+          status: "pending",
+          instruction: opts.instruction,
+          messages: outcome.messages,
+        };
+        if (modeRef.current === "chat") {
+          // 聊天模式不动表：把想改的地方念出来，不挂一张点了会落地的卡（§2.8）。
+          dismiss(id);
+          const lines = sheetEditLines(card.edits);
+          note(
+            `按你说的，这张表可以这么改（聊天模式没有动它）：${card.summary}\n· ${lines.join("\n· ")}${
+              card.notes.length ? `\n${card.notes.map((n) => `· ${n}`).join("\n")}` : ""
+            }\n要落地请切到「半自动」或「全自动」。`,
+          );
+          return;
+        }
+        patchSheetCard(id, () => card);
+        // 半自动要用户点「应用到表格」；全自动是用户显式选的例外，仍然逐条记进修改历史可撤销（§2.8）。
+        if (modeRef.current === "auto") {
+          toast("全自动：已直接写入表格，可在修改历史里撤销这次改动。", "success");
+          await applySheetPlan(id, card);
+        }
+      } catch (e) {
+        const err = e as Error & { needsSetup?: boolean };
+        if (err.needsSetup) setSettingsOpen(true);
+        patchSheetCard(id, (c) => ({ ...c, status: "failed", message: "调用失败：" + (err.message ?? String(e)) }));
+      } finally {
+        setBusyBoth(false);
+      }
+    },
+    [activeProviderId, applySheetPlan, dismiss, note, patchSheetCard, push, setBusyBoth, sheet],
+  );
+
+  /**
+   * 用户那句诉求 → 表格代理。
+   *
+   * @param instruction 原话（已 trim）。
+   * @param label 卡片标题。
+   */
+  const askSheet = useCallback(
+    async (instruction: string, label = "AI 表格提案") => {
+      const trimmed = instruction.trim();
+      if (!trimmed || busyRef.current || !sheet) return;
+      push({ id: uid(), t: "msg", role: "user", text: trimmed });
+      await runSheetAsk({ instruction: trimmed, label });
+    },
+    [push, runSheetAsk, sheet],
+  );
+
+  /** 点「继续」：把暂停时攒下的 transcript 原样送回，工具回合从这一轮往后跑。 */
+  const continueSheetPlan = useCallback(
+    async (id: string, card: SheetPlanCard, label: string) => {
+      if (busyRef.current || !card.messages.length) return;
+      await runSheetAsk({ instruction: card.instruction, label, cardId: id, messages: card.messages });
+    },
+    [runSheetAsk],
   );
 
   /* ------------- selection rewrite: stream then apply -------------- */
@@ -899,16 +1196,23 @@ export function AIPanel({
     async (raw: string) => {
       const text = raw.trim();
       if (!text || busyRef.current) return;
+      // 表格没有"选区改写"这条路：分析、整理、计算都交给代理决定出不出提案。
+      if (sheet) {
+        await askSheet(text);
+        return;
+      }
       if (modeRef.current !== "chat") {
         await askAgent(text);
         return;
       }
       await runChat({ prompt: text });
     },
-    [askAgent, runChat],
+    [askAgent, askSheet, runChat, sheet],
   );
 
   const stopStream = useCallback(() => {
+    // 表格那条没有流式请求可取消，靠这个位在两轮之间停下；文档那条两种都要。
+    pausedRef.current = true;
     const id = activeRequestRef.current;
     if (id) window.officeCopilot.aiStreamCancel(id);
   }, []);
@@ -1268,6 +1572,88 @@ export function AIPanel({
               );
             }
 
+            if (it.t === "sheet") {
+              const c = it.card;
+              const lines = sheetEditLines(c.edits);
+              // 卡片沿用文档方案卡的那套类名（`.ai-card*` / `.op-list`），只换标题图标与文案。
+              return (
+                <div key={it.id} className={`ai-card ${c.status}`}>
+                  <div className="ai-card-head">
+                    <Table2 size={13} />
+                    <span className="ai-card-title">{it.label}</span>
+                    {c.status === "streaming" ? (
+                      <span className="ai-card-streaming">
+                        <Loader2 size={12} className="spin" />
+                        正在核对表格…
+                      </span>
+                    ) : (
+                      <span className="ai-card-count">{c.ops.length} 处改动</span>
+                    )}
+                  </div>
+                  {c.summary && <div className="ai-card-summary">{c.summary}</div>}
+                  {lines.length > 0 && (
+                    <ul className="op-list">
+                      {lines.map((line, i) => (
+                        <li key={i}>{line}</li>
+                      ))}
+                    </ul>
+                  )}
+                  {c.notes.length > 0 && (
+                    <div className="ai-card-notes">
+                      {c.notes.map((n, i) => (
+                        <div key={i}>· {n}</div>
+                      ))}
+                    </div>
+                  )}
+                  {c.message && <div className="ai-card-message">{c.message}</div>}
+                  <div className="ai-card-actions">
+                    {c.status === "pending" && (
+                      <>
+                        <button className="primary" onClick={() => void applySheetPlan(it.id, c)}>
+                          <Check size={12} /> 应用到表格
+                        </button>
+                        <button className="ghost" onClick={() => dismiss(it.id)}>
+                          <X size={12} /> 放弃
+                        </button>
+                      </>
+                    )}
+                    {c.status === "applying" && (
+                      <span className="ai-card-status">
+                        <Loader2 size={12} className="spin" /> 正在写入…
+                      </span>
+                    )}
+                    {c.status === "applied" && (
+                      <span className="ai-card-status ok">
+                        <Check size={12} /> 已写入表格
+                        {onOpenHistory && (
+                          <button className="link-btn" onClick={onOpenHistory}>
+                            查看修改历史
+                          </button>
+                        )}
+                      </span>
+                    )}
+                    {c.status === "failed" && (
+                      <span className="ai-card-status bad">{c.stopped ? "已暂停" : "未写入"}</span>
+                    )}
+                    {c.stopped && c.messages.length > 0 && (
+                      <button
+                        className="primary"
+                        title="接着上一次停下的地方继续跑工具回合"
+                        onClick={() => void continueSheetPlan(it.id, c, it.label)}
+                      >
+                        <Play size={12} /> 继续
+                      </button>
+                    )}
+                    {(c.status === "pending" || c.status === "failed") && (
+                      <button className="ghost" onClick={() => dismiss(it.id)}>
+                        忽略
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            }
+
             const c = it.card;
             return (
               <div key={it.id} className={`ai-card ${c.status}`}>
@@ -1368,7 +1754,8 @@ export function AIPanel({
                 </>
               )}
             </div>
-            {mode !== "chat" && (
+            {/* 快捷指令全是文档动作（改写、排版），表格模式下不给出来。 */}
+            {!sheet && mode !== "chat" && (
               <div className="ai-pop-wrap">
                 <button
                   type="button"
@@ -1438,7 +1825,7 @@ export function AIPanel({
           </div>
           {modeHintOpen && (
             <div className="ai-mode-hint">
-              {MODES.find((m) => m.id === mode)?.hint}
+              {sheet ? SHEET_MODE_HINTS[mode] : MODES.find((m) => m.id === mode)?.hint}
             </div>
           )}
           <textarea
@@ -1452,9 +1839,11 @@ export function AIPanel({
               }
             }}
             placeholder={
-              mode === "chat"
-                ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
-                : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
+              sheet
+                ? "说要对这张表做什么，⌘/Ctrl+Enter 发送。例如：按区域汇总销售额，再删掉重复的行。"
+                : mode === "chat"
+                  ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
+                  : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
             }
           />
           <div className="composer-row">
@@ -1471,7 +1860,17 @@ export function AIPanel({
                 }}
                 disabled={!input.trim()}
               >
-                {mode === "chat" ? "发送" : mode === "auto" ? "直接修改" : "让 AI 修改"}
+                {sheet
+                  ? mode === "chat"
+                    ? "提问"
+                    : mode === "auto"
+                      ? "直接改表"
+                      : "让 AI 处理"
+                  : mode === "chat"
+                    ? "发送"
+                    : mode === "auto"
+                      ? "直接修改"
+                      : "让 AI 修改"}
               </button>
             )}
           </div>

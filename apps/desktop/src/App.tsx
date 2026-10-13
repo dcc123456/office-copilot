@@ -31,7 +31,7 @@ import type {
   SectionGeometry,
   StyleEdit,
 } from "@office-copilot/docx-io";
-import { readOnlyReason, runSheetOps, type SheetCoreOp, type WorkbookPayload } from "@office-copilot/sheet-io";
+import { readOnlyReason, runSheetOps, type SheetCoreOp, type SheetOpsResult, type WorkbookPayload } from "@office-copilot/sheet-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
@@ -286,26 +286,29 @@ export function App() {
    *
    * @param ops 视图交出的一批 op，都指向当前这张表。
    * @param summary 一句话说明这次改了什么，进 `userData/modlog/<文档名>.json`。
+   * @returns 落地结果（含没落地的条目与理由），当前表已不在时返回 null；调用方据此报"部分写入"。
    */
   const commitSheetOps = useCallback(
-    (ops: SheetCoreOp[], summary: string) => {
+    (ops: SheetCoreOp[], summary: string): SheetOpsResult | null => {
       const sheet = sheetWorkbook?.sheets[sheetIndex];
-      if (!sheetWorkbook || !sheet) return;
+      if (!sheetWorkbook || !sheet) return null;
       const result = runSheetOps(sheet, ops);
       if (result.skipped.length) toast(result.skipped.map((item) => item.reason).join("\n"), "error");
-      if (!result.ops.length) return;
-      setSheetWorkbook({
-        ...sheetWorkbook,
-        sheets: sheetWorkbook.sheets.map((tab, index) => (index === sheetIndex ? result.after : tab)),
-      });
-      setDirty(true);
-      const docKey = filePath ?? "未命名文档";
-      void window.officeCopilot
-        .appendModification({ docKey, record: sheetEditRecordOf(result, summary) })
-        .then((saved) => {
-          // 历史没写进去不 rollback 用户的改动，只说一声——与文档那条 AI 改动一致。
-          if (!saved.ok) toast(`改动已落地，但历史记录保存失败：${saved.message ?? "未知错误"}`, "error");
+      if (result.ops.length) {
+        setSheetWorkbook({
+          ...sheetWorkbook,
+          sheets: sheetWorkbook.sheets.map((tab, index) => (index === sheetIndex ? result.after : tab)),
         });
+        setDirty(true);
+        const docKey = filePath ?? "未命名文档";
+        void window.officeCopilot
+          .appendModification({ docKey, record: sheetEditRecordOf(result, summary) })
+          .then((saved) => {
+            // 历史没写进去不 rollback 用户的改动，只说一声——与文档那条 AI 改动一致。
+            if (!saved.ok) toast(`改动已落地，但历史记录保存失败：${saved.message ?? "未知错误"}`, "error");
+          });
+      }
+      return result;
     },
     [filePath, sheetIndex, sheetWorkbook],
   );
@@ -1076,8 +1079,11 @@ export function App() {
 
   if (!editor) return <div className="app">启动中…</div>;
 
-  // 表格与文档是两套视图：打开 .xlsx 时隐藏的是文档专属的面板（大纲、样式、脚注、批注、AI）。
+  // 表格与文档是两套视图：打开 .xlsx 时隐藏的是文档专属的面板（大纲、样式、脚注、批注）。
   const isSheet = sheetWorkbook !== null;
+  // AI 面板两套都要：表格模式下代理只读这张表的载荷，写入仍然只有 commitSheetOps 这一个口（spec 决策 D6）。
+  const activeSheet = sheetWorkbook?.sheets[sheetIndex] ?? null;
+  const sheetBridge = activeSheet ? { payload: activeSheet, onCommitOps: commitSheetOps } : undefined;
 
   return (
     <div
@@ -1208,7 +1214,7 @@ export function App() {
             <StatusBar wordCount={wordCount} charCount={charCount} editorEl={editorEl} />
           )}
         </div>
-        {!isSheet && showAI && !aiCollapsed && (
+        {showAI && !aiCollapsed && (
           <div
             className="resizer"
             title="拖动调整宽度，双击复位"
@@ -1216,10 +1222,13 @@ export function App() {
             onDoubleClick={aiResize.onDoubleClick}
           />
         )}
-        {!isSheet && showAI && (
+        {/* key 按模式取：文档与表格各开一条会话，引导语与线程都只属于当前这种文档。 */}
+        {showAI && (
           <AIPanel
+            key={sheetBridge ? "sheet" : "doc"}
             editor={editor}
             docKey={filePath ?? "未命名文档"}
+            sheet={sheetBridge}
             collapsed={aiCollapsed}
             onToggle={() => setAiCollapsed((v) => !v)}
             onOpenHistory={() => setHistoryOpen(true)}
