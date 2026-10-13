@@ -377,12 +377,12 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 200、`desktop` 446、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 205、`desktop` 446、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
 - `docx-io`：296 个用例，覆盖 OOXML 读入 / 写出往返、单位与颜色换算
-- `sheet-io`：200 个用例（A1 地址与列号、日期序列号与显示文本、ARGB↔hex、列宽/行高几何、公式子集求值与引用解析、`sharedStrings` 富文本 run 往返、整格 `inlineStr` 富文本原样回写、结构化 op 的逆操作与批内重新锚定、分析引擎（列画像 / 聚合 / 条件定位 / 重复行 / 区域截断）、`ChartSpec` 校验、chart part 的读回结构断言、新建 `sharedStrings` 时三处一起登记）
+- `sheet-io`：205 个用例（A1 地址与列号、日期序列号与显示文本、ARGB↔hex、列宽/行高几何、公式子集求值与引用解析、`sharedStrings` 富文本 run 往返、整格 `inlineStr` 富文本原样回写、结构化 op 的逆操作与批内重新锚定、分析引擎（列画像 / 聚合 / 条件定位 / 重复行 / 区域截断）、`ChartSpec` 校验、chart part 的读回结构断言、新建 `sharedStrings` 时三处一起登记、`cellXfs` 只追加不重排与「改数字格式不许拍平字体/底色/边框/对齐」）
 - `sheet-tools`：12 个工具入参校验用例（JSON 语法错、缺字段、多字段、越界都回错误串而不是抛异常）
 - `apps/cli`：4 个用例（挑表按名字与 1 基序号、`--metric` 的 `avg`→`average`、分组键逗号切分）
 - `server`：mock `fetch`，验证 tool-calling 循环产出提案 / 纯聊天状态
