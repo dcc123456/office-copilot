@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
-import type { SheetCell, SheetColumn, SheetLike as SheetPayload } from "./model.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { parseRange } from "./address.js";
+import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetRowMeta } from "./model.js";
 
 /** 表的部件路径；op 与载荷必须对得上才落地。 */
 const PART = "xl/worksheets/sheet1.xml";
@@ -31,9 +32,11 @@ function cellOf(colIndex: number, rowIndex: number, value: number | string, styl
  *
  * @param cells 已用的格。
  * @param columns `<col>` 分段。
+ * @param mergeRefs 合并区的 A1 写法，如 `A1:B2`。
+ * @param rows 行元信息。
  * @returns `SheetPayload`；已用区域由格子的实际位置推出。
  */
-function sheetOf(cells: SheetCell[], columns: SheetColumn[] = []): SheetPayload {
+function sheetOf(cells: SheetCell[], columns: SheetColumn[] = [], mergeRefs: string[] = [], rows: SheetRowMeta[] = []): SheetPayload {
   const lastColIndex = cells.reduce((acc, cell) => Math.max(acc, cell.colIndex), -1);
   const lastRowIndex = cells.reduce((acc, cell) => Math.max(acc, cell.rowIndex), -1);
   return {
@@ -43,11 +46,24 @@ function sheetOf(cells: SheetCell[], columns: SheetColumn[] = []): SheetPayload 
     lastColIndex,
     lastRowIndex,
     cells: Object.fromEntries(cells.map((cell) => [cell.address, cell])),
-    merges: [],
+    merges: mergeRefs.map((ref) => ({ ref, range: parseRange(ref)! })),
     columns,
-    rows: [],
+    rows,
     warnings: [],
   };
+}
+
+/**
+ * 造一个带公式的格子（插删行列时要验证引用跟着走）。
+ *
+ * @param address 大写 A1 地址。
+ * @param colIndex 列号（0 基）。
+ * @param rowIndex 行号（0 基）。
+ * @param formula 公式体，不含前导 `=`。
+ * @returns 一个数字格；缓存值给 0，保存时会由 `fullCalcOnLoad` 让 Excel 重算。
+ */
+function formulaCell(address: string, colIndex: number, rowIndex: number, formula: string): SheetCell {
+  return { address, colIndex, rowIndex, kind: "number", value: 0, formula };
 }
 
 describe("改一格的值（spec 阶段 3：op 自带逆操作）", () => {
@@ -196,5 +212,123 @@ describe("改列宽（`<col min max>` 劈段与复原）", () => {
     expect(op?.beforeColumns).toEqual([]);
     const applied = runSheetOps(sheet, [op!]);
     expect(applied.after.columns).toEqual([{ minColIndex: 2, maxColIndex: 2, widthChars: 14, customWidth: true }]);
+  });
+});
+
+describe("插入与删除整行/整列（spec 阶段 3 C16）", () => {
+  it("插入一行把下方内容整体下移，公式引用与已用区域一起跟上", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(0, 1, 2), formulaCell("B3", 1, 2, "SUM(A1:A2)")]);
+    const applied = runSheetOps(sheet, [insertTracksOp(sheet, "row", 0)!]);
+    expect(applied.ok).toBe(true);
+    expect(Object.keys(applied.after.cells).sort()).toEqual(["A2", "A3", "B4"]);
+    expect(applied.after.cells["B4"]?.formula).toBe("SUM(A2:A3)");
+    expect(applied.after.lastRowIndex).toBe(3);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+    expect(reverted.after.lastRowIndex).toBe(2);
+  });
+
+  it("删掉一行后撤销，整带内容与行高原样插回原位", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(0, 1, 2), cellOf(0, 2, 3)], [], [], [
+      { rowIndex: 1, heightPt: 30, customHeight: true, attrs: { "x14ac:dyDescent": "0.25" } },
+    ]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "row", 1)!]);
+    expect(applied.ok).toBe(true);
+    expect(Object.keys(applied.after.cells).sort()).toEqual(["A1", "A2"]);
+    expect(applied.after.rows).toEqual([]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+    expect(reverted.after.rows).toEqual(sheet.rows);
+  });
+
+  it("公式引用的格子正好在被删的区间里时整条拒绝，不产 #REF!", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(0, 1, 2), cellOf(0, 2, 3), formulaCell("B1", 1, 0, "SUM(A2:A3)")]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "row", 1, 2)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("#REF!");
+    expect(applied.after).toBe(sheet);
+  });
+
+  it("撤销插入时那一带已被用户写了数据就拦住，不许连带删掉它", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(0, 1, 2)]);
+    const applied = runSheetOps(sheet, [insertTracksOp(sheet, "row", 1)!]);
+    expect(Object.keys(applied.after.cells).sort()).toEqual(["A1", "A3"]);
+
+    const withUserInput = { ...applied.after, cells: { ...applied.after.cells, A2: cellOf(0, 1, 99) } };
+    const reverted = revertSheetOps(withUserInput, applied.inverses);
+    expect(reverted.ok).toBe(false);
+    expect(reverted.skipped[0]?.reason).toContain("格子数与记录时不同");
+    expect(reverted.after.cells["A2"]?.value).toBe(99);
+  });
+
+  it("插入一列时被跨过的列宽段与合并区变宽，撤销后收回去", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 1, 2)], [{ minColIndex: 0, maxColIndex: 2, widthChars: 12, customWidth: true }], ["A1:B2"]);
+    const applied = runSheetOps(sheet, [insertTracksOp(sheet, "col", 0)!]);
+    expect(applied.ok).toBe(true);
+    expect(applied.after.columns).toEqual([{ minColIndex: 1, maxColIndex: 3, widthChars: 12, customWidth: true }]);
+    expect(applied.after.merges.map((merge) => merge.ref)).toEqual(["B1:C2"]);
+    expect(Object.keys(applied.after.cells).sort()).toEqual(["B1", "C2"]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.columns).toEqual(sheet.columns);
+    expect(reverted.after.merges).toEqual(sheet.merges);
+  });
+
+  it("盖住删除带的列宽段只增减端点，来回都是同一段", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2), cellOf(2, 0, 3)], [{ minColIndex: 1, maxColIndex: 3, widthChars: 12, customWidth: true }]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "col", 2)!]);
+    expect(applied.after.columns).toEqual([{ minColIndex: 1, maxColIndex: 2, widthChars: 12, customWidth: true }]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.columns).toEqual(sheet.columns);
+  });
+
+  it("劈开列宽段时带内那截存进前像，撤销后写出相邻同宽的两段", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2), cellOf(2, 0, 3)], [{ minColIndex: 1, maxColIndex: 2, widthChars: 12, customWidth: true }]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "col", 2)!]);
+    expect(applied.after.columns).toEqual([{ minColIndex: 1, maxColIndex: 1, widthChars: 12, customWidth: true }]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    // 宽度与属性一列都没丢，只是原来的 `<col min=2 max=3>` 写成两段相邻同宽的段
+    expect(reverted.after.columns).toEqual([
+      { minColIndex: 1, maxColIndex: 1, widthChars: 12, customWidth: true },
+      { minColIndex: 2, maxColIndex: 2, widthChars: 12, customWidth: true },
+    ]);
+  });
+
+  it("删除带把合并区劈开时整条拒绝：合不回去的改动不做", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2)], [], ["A1:B1"]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "col", 1)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("A1:B1");
+    expect(applied.after.merges).toEqual(sheet.merges);
+  });
+
+  it("整块落在删除带里的合并区随带删掉，撤销时原样回来", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2), cellOf(4, 0, 5)], [], ["B1:C1"]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "col", 1, 2)!]);
+    expect(applied.ok).toBe(true);
+    expect(applied.after.merges).toEqual([]);
+    expect(Object.keys(applied.after.cells).sort()).toEqual(["A1", "C1"]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.merges).toEqual(sheet.merges);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("列轴插删之后每行的 spans 跟着改，行轴不动它", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(2, 0, 3)], [], [], [{ rowIndex: 0, attrs: { spans: "1:3" } }]);
+    const widened = runSheetOps(sheet, [insertTracksOp(sheet, "col", 1)!]);
+    expect(widened.after.rows[0]?.attrs?.spans).toBe("1:4");
+    const taller = runSheetOps(sheet, [insertTracksOp(sheet, "row", 1)!]);
+    expect(taller.after.rows[0]?.attrs?.spans).toBe("1:3");
   });
 });

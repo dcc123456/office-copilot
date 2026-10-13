@@ -127,14 +127,46 @@ export function parseSheet(input: ParseSheetInput): SheetModel {
  *
  * @param sheet 可能已被改过格子、列宽或合并区的表。
  * @param sharedStrings 工作簿共享的字符串表（新字符串会往里追加）。
- * @returns 完整的 `sheetN.xml` 部件文本：只有 `<sheetData>`、`<dimension>` 与 `<cols>` 变了。
+ * @returns 完整的 `sheetN.xml` 部件文本：只有 `<sheetData>`、`<dimension>`、`<cols>` 与 `<mergeCells>` 变了。
  */
 export function serializeSheetXml(sheet: SheetModel, sharedStrings: SharedStringTable): string {
   const inner = buildSheetDataInner(sheet, sharedStrings);
   const replacement = inner ? `<sheetData>${inner}</sheetData>` : "<sheetData/>";
   let out = sheet.sourceXml.replace(SHEET_DATA_PATTERN, () => replacement);
-  out = out.replace(DIMENSION_PATTERN, () => `<dimension ${dimensionAttributes(sheet)}/>`)
-  return replaceOrInsertCols(out, sheet.columns);
+  out = out.replace(DIMENSION_PATTERN, () => `<dimension ${dimensionAttributes(sheet)}/>`);
+  out = replaceOrInsertCols(out, sheet.columns);
+  return replaceOrInsertMergeCells(out, sheet.merges);
+}
+
+/** `<mergeCells>` 区间；与 `<sheetData>` 一样按原文定点替换，不许整篇重序列化。 */
+const MERGE_CELLS_PATTERN = /<mergeCells(?:\s[^>]*)?\s*\/>|<mergeCells(?:\s[^>]*)?>[\s\S]*?<\/mergeCells>/;
+
+/**
+ * CT_Worksheet 里排在 `<mergeCells>` **之后**的元素（按规范顺序，缺哪个跳哪个）。
+ *
+ * 表原来一个合并区都没有时包里根本没有这一段，得凭这些邻居把它插在正确位置；顺序错了 Excel 会报文件损坏。
+ */
+const AFTER_MERGE_CELLS_PATTERN = /<(?:conditionalFormatting|dataValidations|hyperlinks|printOptions|pageMargins|pageSetup|headerFooter|rowBreaks|colBreaks|drawing|legacyDrawing|picture|oleObjects|controls|tableParts|smartTags|cellWatches|ignoredErrors|customProperties|phoneticPr)\b/;
+
+/**
+ * 把合并区写回 `<mergeCells>` 区间。
+ *
+ * 为什么必须动它：插删行列会把合并区整体挪位（实测 `H1:I2` 插一列后应是 `I1:J2`），
+ * 只写 `<sheetData>` 的话文件里的合并区还停在旧位置，读回来与内存模型不一致。
+ *
+ * @param xml 已替换过 `<sheetData>`、`<dimension>` 与 `<cols>` 的部件文本。
+ * @param merges 表当前的合并区（`sheet-edit.ts` 已按左上角排好）。
+ * @returns 带上新 `<mergeCells>` 的文本；一个合并区都没有时删掉原区间（空区间 Excel 也不写）。
+ */
+function replaceOrInsertMergeCells(xml: string, merges: SheetMerge[]): string {
+  const region = merges.length
+    ? `<mergeCells count="${merges.length}">${merges.map((merge) => `<mergeCell ref="${escapeAttr(merge.ref)}"/>`).join("")}</mergeCells>`
+    : "";
+  if (MERGE_CELLS_PATTERN.test(xml)) return xml.replace(MERGE_CELLS_PATTERN, () => region);
+  if (!region) return xml;
+  const anchor = AFTER_MERGE_CELLS_PATTERN.exec(xml);
+  if (anchor?.index !== undefined) return xml.slice(0, anchor.index) + region + xml.slice(anchor.index);
+  return xml.replace(/<\/worksheet>/, () => `${region}</worksheet>`);
 }
 
 /** `<cols>` 区间；与 `<sheetData>` 一样按原文定点替换，不许整篇重序列化。 */

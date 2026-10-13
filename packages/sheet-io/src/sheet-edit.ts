@@ -6,10 +6,11 @@
  * 形状与 Word 的 `CoreOp` 同构：`before` 与 `after` 都存在 op 里，逆操作就是两者交换，
  * 落地前先核对现场等于 `before`，对不上就整条跳过并报"部分撤销"（§2.4/§2.5）。
  */
-import { formatA1, parseA1 } from "./address.js";
+import { formatA1, formatRange, parseA1 } from "./address.js";
 import { parseUserCellText } from "./cell-text.js";
+import { shiftFormula } from "./formula-refs.js";
 import { columnWidthPxToChars } from "./geometry.js";
-import type { SheetCell, SheetColumn, SheetLike as SheetPayload } from "./model.js";
+import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
 import { colFingerprints, recalculateSheetExtent, rowFingerprints } from "./xlsx-sheet.js";
 
 /** 行/列两个轴：插删与尺寸调整的语义完全对称，所以一套类型管两轴。 */
@@ -56,8 +57,33 @@ export interface SetColumnWidthOp {
   afterColumns: SheetColumn[];
 }
 
-/** 表格的 op 全集（阶段 3 后续会加插删行列与合并）。 */
-export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp;
+/** 一条带（连续若干行或若干列）在改动前的全部内容，删除与撤销都凭它核对现场。 */
+export interface SheetTrackBand {
+  cells: SheetCell[];
+  rows: SheetRowMeta[];
+  columns: SheetColumn[];
+  merges: SheetMerge[];
+}
+
+/**
+ * 插入或删除连续的整行/整列。
+ *
+ * 与其它 op 同构：`removed` 是这一带改动前的内容前像，逆操作就是"kind 取反 + 同一个前像"。
+ * 插入时前像是空集，撤销插入 = 删除这一带，只有它**还空着**才允许动手（否则会把用户后来写的数据删掉）。
+ */
+export interface ShiftTracksOp {
+  kind: "insertTracks" | "deleteTracks";
+  partPath: string;
+  axis: SheetAxis;
+  /** 这一带起始位置的内容寻址：插入时锚在"被挤下去的那一条"上，删除时锚在"被删的第一条"上。 */
+  target: SheetTrackAddress;
+  count: number;
+  /** 被删带（或待插带）在构造时的内容。 */
+  removed: SheetTrackBand;
+}
+
+/** 表格的 op 全集（合并区的编辑还没落地，届时再加一种 op）。 */
+export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp | ShiftTracksOp;
 
 /** 一条 op 没落地时的记录，UI 据此报"部分撤销（x/y）"。 */
 export interface SheetSkippedOp {
@@ -173,6 +199,39 @@ export function setColumnWidthOp(sheet: SheetPayload, colIndex: number, widthPx:
     beforeColumns: covering.map((column) => ({ ...column })),
     afterColumns: rebuilt,
   };
+}
+
+/** 空带：插入时的前像，撤销插入凭它确认"这一带还空着"。 */
+const EMPTY_BAND: SheetTrackBand = { cells: [], rows: [], columns: [], merges: [] };
+
+/**
+ * 造一条"在第 `index` 条之前插入 `count` 条空行/空列"的 op。
+ *
+ * @param sheet 当前表的载荷。
+ * @param axis 插行还是插列。
+ * @param index 0 基插入点（这条 op 锚在它当前所在的那一条上）。
+ * @param count 插入条数，默认 1。
+ * @returns 交给 `runSheetOps` 的 op；`count < 1` 或下标非法时返回 null（没什么可插的）。
+ */
+export function insertTracksOp(sheet: SheetPayload, axis: SheetAxis, index: number, count = 1): ShiftTracksOp | null {
+  if (count < 1 || !Number.isInteger(index) || index < 0) return null;
+  return { kind: "insertTracks", partPath: sheet.partPath, axis, target: trackAddress(sheet, axis, index), count, removed: EMPTY_BAND };
+}
+
+/**
+ * 造一条"从第 `index` 条起删除 `count` 条整行/整列"的 op。
+ *
+ * 构造时就把这一带的内容拍成前像：落地前要凭它核对现场，撤销时要凭它把内容插回去。
+ *
+ * @param sheet 当前表的载荷。
+ * @param axis 删行还是删列。
+ * @param index 0 基起点。
+ * @param count 删除条数，默认 1。
+ * @returns op；`count < 1` 或下标非法时返回 null。
+ */
+export function deleteTracksOp(sheet: SheetPayload, axis: SheetAxis, index: number, count = 1): ShiftTracksOp | null {
+  if (count < 1 || !Number.isInteger(index) || index < 0) return null;
+  return { kind: "deleteTracks", partPath: sheet.partPath, axis, target: trackAddress(sheet, axis, index), count, removed: bandSnapshot(sheet, axis, index, count) };
 }
 
 /**
@@ -339,10 +398,407 @@ function columnsInBand(columns: SheetColumn[], expected: SheetColumn[], colIndex
   return columns.filter((column) => column.maxColIndex >= bandStart && column.minColIndex <= bandEnd);
 }
 
+/**
+ * 落一条插删行列 op：核对现场 → 位移格子/行元信息/列宽段/合并区 → 平移公式引用。
+ *
+ * 位移规则逐条对着 Excel 的行为实现（出处见 `formula-refs.ts` 与 `docs/excel-support-spec.md` 阶段 3）：
+ * 跨边的 `<col>` 段与合并区在插入时**变宽**、在删除时**收缩**，而不是劈开或整块消失。
+ *
+ * @param sheet 现场载荷。
+ * @param op 插删 op（逆操作形状相同，只有 `kind` 取反）。
+ * @returns 新载荷与逆操作，或跳过理由。
+ */
+function applyShiftOp(sheet: SheetPayload, op: ShiftTracksOp): ApplyOutcome {
+  const isRow = op.axis === "row";
+  const trackLabel = isRow ? "行" : "列";
+  const from = resolveTrack(sheet, op.target);
+  if (from === null) return { reason: `认不出第 ${op.target.index + 1} ${trackLabel}：内容已被改动，或它被插入/删除的${trackLabel}挪走了` };
+  const shift = from - op.target.index;
+  if (op.kind === "deleteTracks") {
+    const mismatch = bandMismatchReason(sheet, op, from, shift);
+    if (mismatch) return { reason: mismatch };
+  }
+  // 只有带内容的插删（删除、以及撤销删除）需要这道检查；纯插入的几何来回是精确的。
+  if (!isEmptyBand(op.removed)) {
+    const split = mergeSplitReason(sheet, op.axis, from, from + op.count - 1);
+    if (split) return { reason: split };
+  }
+  const moved = moveTracks(sheet, op, from, shift);
+  if ("reason" in moved) return moved;
+  const next: SheetPayload = { ...sheet, ...moved.tracks };
+  // 列号变了以后旧 `spans` 就是假提示；行轴插删不改一行之内的列分布，不用重算。
+  if (!isRow) recomputeRowSpans(next);
+  recalculateSheetExtent(next);
+  return {
+    // 逆操作的前像要搬到落地之后的坐标系：`removed` 里的位置与 `target.index` 始终是同一套坐标。
+    sheet: next,
+    inverse: {
+      ...op,
+      kind: op.kind === "insertTracks" ? "deleteTracks" : "insertTracks",
+      target: trackAddress(next, op.axis, from),
+      removed: shiftBand(op.removed, op.axis, shift),
+    },
+  };
+}
+
+/** 插删之后的四样东西（格子、行元信息、列宽段、合并区）；认不出安全落点时只给理由。 */
+type MoveOutcome = { tracks: Pick<SheetPayload, "cells" | "rows" | "columns" | "merges"> } | { reason: string };
+
+/**
+ * 算出位移之后的表内容。
+ *
+ * @param sheet 现场载荷。
+ * @param op 插删 op。
+ * @param from 解析出的 0 基带起点。
+ * @param shift `from` 与建 op 时记下的下标之差（行列被用户挪过位置时用它把前像搬到位）。
+ * @returns 新的四样东西，或拒绝理由。
+ */
+function moveTracks(sheet: SheetPayload, op: ShiftTracksOp, from: number, shift: number): MoveOutcome {
+  const isRow = op.axis === "row";
+  const inserting = op.kind === "insertTracks";
+  const to = from + op.count - 1;
+  const delta = inserting ? op.count : -op.count;
+  // 插入时带是新生的，现场没有旧内容要跳过；删除时"起点之后"从带的下一条算起。
+  const moveFrom = inserting ? from : to + 1;
+  const positionOf = (cell: SheetCell) => (isRow ? cell.rowIndex : cell.colIndex);
+
+  const cells: Record<string, SheetCell> = {};
+  for (const cell of Object.values(sheet.cells)) {
+    if (!inserting && positionOf(cell) >= from && positionOf(cell) <= to) continue;
+    const movedBy = positionOf(cell) >= moveFrom ? delta : 0;
+    const colIndex = cell.colIndex + (isRow ? 0 : movedBy);
+    const rowIndex = cell.rowIndex + (isRow ? movedBy : 0);
+    if (cell.formula) {
+      const shiftedFormula = shiftFormula(cell.formula, op.axis, from, delta, inserting ? undefined : { startIndex: from, endIndex: to });
+      if (!shiftedFormula.ok) return { reason: shiftedFormula.reason };
+      placeCell(cells, { ...cell, formula: shiftedFormula.formula }, colIndex, rowIndex);
+      continue;
+    }
+    if (movedBy !== 0 && cell.rawXml?.includes("<f")) return { reason: "有原样保留的格子带着公式，位移会把公式和它引用的格子拆散" };
+    placeCell(cells, cell, colIndex, rowIndex);
+  }
+  let rows = isRow ? shiftRowMetas(sheet.rows, moveFrom, delta, inserting ? undefined : { start: from, end: to }) : sheet.rows;
+  let columns = isRow ? sheet.columns : shiftColumnBands(sheet.columns, from, op.count, inserting, to);
+  let merges = shiftMerges(sheet.merges, isRow, from, op.count, inserting, to);
+  if (inserting && !isEmptyBand(op.removed)) {
+    for (const cell of op.removed.cells) {
+      placeCell(cells, cell, cell.colIndex + (isRow ? 0 : shift), cell.rowIndex + (isRow ? shift : 0));
+    }
+    if (isRow) rows = [...rows, ...op.removed.rows.map((row) => ({ ...row, rowIndex: row.rowIndex + shift }))];
+    else columns = [...columns, ...op.removed.columns.map((column) => shiftColumn(column, shift))];
+    merges = [...merges, ...op.removed.merges.map((merge) => moveMerge(merge, isRow, shift, shift))];
+  }
+  return { tracks: { cells, rows, columns: sortColumns(columns), merges: sortMerges(merges) } };
+}
+
+/** 把一个格子按新位置放回结果表：`address` 与 `colIndex/rowIndex` 必须同步（spec D1）。 */
+function placeCell(cells: Record<string, SheetCell>, cell: SheetCell, colIndex: number, rowIndex: number): void {
+  const address = formatA1({ colIndex, rowIndex });
+  const moved: SheetCell = { ...cell, address, colIndex, rowIndex };
+  const rawXml = cell.rawXml ? retargetRawCellXml(cell.rawXml, address) : undefined;
+  if (rawXml) moved.rawXml = rawXml;
+  else delete moved.rawXml;
+  cells[address] = moved;
+}
+
+/**
+ * 改写 `<c>` 原文里的 `r` 属性，属性顺序与其余属性不动。
+ *
+ * @param rawXml 读入时留下的整格原文。
+ * @param address 位移后的新 A1 地址。
+ * @returns 换好地址的原文；匹配不上 `r` 属性时原样返回（这类格读入时就没有地址，已被记进 warnings）。
+ */
+function retargetRawCellXml(rawXml: string, address: string): string {
+  return rawXml.replace(/(<c\b[^>]*?\br=")[^"]*(")/, `$1${address}$2`);
+}
+
+/**
+ * 位移行元信息。
+ *
+ * @param rows 现场行元信息。
+ * @param moveFrom 从哪一行起跟着挪。
+ * @param delta 位移量。
+ * @param cut 删除时的带区间；整行落在里面的行元信息随带消失。
+ * @returns 新的行元信息队列。
+ */
+function shiftRowMetas(rows: SheetRowMeta[], moveFrom: number, delta: number, cut?: { start: number; end: number }): SheetRowMeta[] {
+  const acc: SheetRowMeta[] = [];
+  for (const row of rows) {
+    if (cut && row.rowIndex >= cut.start && row.rowIndex <= cut.end) continue;
+    acc.push(row.rowIndex >= moveFrom ? { ...row, rowIndex: row.rowIndex + delta } : row);
+  }
+  return acc;
+}
+
+/**
+ * 位移 `<col>` 分段。
+ *
+ * Excel 的行为：插入落在段里时这段**变宽**，删除吃掉一段时这段**收缩**，整段被删则消失。
+ *
+ * @param columns 现场分段。
+ * @param from 0 基插入点/带起点。
+ * @param count 插入或删除的列数。
+ * @param inserting 是插入还是删除。
+ * @param to 删除时的带终点。
+ * @returns 新的分段队列（按列号排好）。
+ */
+function shiftColumnBands(columns: SheetColumn[], from: number, count: number, inserting: boolean, to: number): SheetColumn[] {
+  const acc: SheetColumn[] = [];
+  for (const column of columns) {
+    if (inserting) {
+      const [minColIndex, maxColIndex] = growRange(column.minColIndex, column.maxColIndex, from, count);
+      acc.push({ ...column, minColIndex, maxColIndex });
+      continue;
+    }
+    if (column.minColIndex >= from && column.maxColIndex <= to) continue;
+    const [minColIndex, maxColIndex] = shrinkRange(column.minColIndex, column.maxColIndex, from, to, count);
+    acc.push({ ...column, minColIndex, maxColIndex });
+  }
+  return acc;
+}
+
+/** 插入时段的两个端点各自"到了插入点之后就跟着一块右移"，于是跨边的段自动变宽。 */
+function growRange(start: number, end: number, from: number, count: number): [number, number] {
+  return [start >= from ? start + count : start, end >= from ? end + count : end];
+}
+
+/** 删除时段里剩下的那截仍然连续：吃掉重叠量，跨左边时收在带的上一条，跨右边时起点落到带上。 */
+function shrinkRange(start: number, end: number, from: number, to: number, count: number): [number, number] {
+  return [start < from ? start : start > to ? start - count : from, end < from ? end : end > to ? end - count : from - 1];
+}
+
+/**
+ * 位移合并区。
+ *
+ * @param merges 现场合并区。
+ * @param isRow 动的是行还是列。
+ * @param from 0 基插入点/带起点。
+ * @param count 条数。
+ * @param inserting 插入还是删除。
+ * @param to 删除时的带终点。
+ * @returns 新的合并区队列。
+ */
+function shiftMerges(merges: SheetMerge[], isRow: boolean, from: number, count: number, inserting: boolean, to: number): SheetMerge[] {
+  const acc: SheetMerge[] = [];
+  for (const merge of merges) {
+    const start = isRow ? merge.range.start.rowIndex : merge.range.start.colIndex;
+    const end = isRow ? merge.range.end.rowIndex : merge.range.end.colIndex;
+    if (!inserting && start >= from && end <= to) continue;
+    const [movedStart, movedEnd] = inserting ? growRange(start, end, from, count) : shrinkRange(start, end, from, to, count);
+    acc.push(moveMerge(merge, isRow, movedStart - start, movedEnd - end));
+  }
+  return acc;
+}
+
+/** 按"行方向的位移量 + 列方向的位移量"重建一个合并区（`ref` 与 `range` 必须同步）。 */
+function moveMerge(merge: SheetMerge, isRow: boolean, rowShift: number, colShift: number): SheetMerge {
+  const range = {
+    start: { colIndex: merge.range.start.colIndex + (isRow ? 0 : colShift), rowIndex: merge.range.start.rowIndex + (isRow ? rowShift : 0) },
+    end: { colIndex: merge.range.end.colIndex + (isRow ? 0 : colShift), rowIndex: merge.range.end.rowIndex + (isRow ? rowShift : 0) },
+  };
+  return { ref: formatRange(range), range };
+}
+
+/** 列宽分段按列号排好；合并区按左上角排好——Excel 自己写出的顺序就是这样。 */
+function sortColumns(columns: SheetColumn[]): SheetColumn[] {
+  return columns.slice().sort((left, right) => left.minColIndex - right.minColIndex);
+}
+
+/** 合并区的稳定顺序：先按起始列再按起始行。 */
+function sortMerges(merges: SheetMerge[]): SheetMerge[] {
+  return merges.slice().sort((left, right) => left.range.start.rowIndex - right.range.start.rowIndex || left.range.start.colIndex - right.range.start.colIndex);
+}
+
+/**
+ * 重算每行的 `spans`（"这行里有格子的列范围"，1 基）。
+ *
+ * @param sheet 就地更新的载荷。列轴插删之后列分布变了，旧 `spans` 就成了假提示；
+ *   一行里没有格子时干脆不写（Excel 也是这么写的）。
+ */
+function recomputeRowSpans(sheet: SheetPayload): void {
+  const colsByRow = new Map<number, number[]>();
+  for (const cell of Object.values(sheet.cells)) {
+    const bucket = colsByRow.get(cell.rowIndex);
+    if (bucket) bucket.push(cell.colIndex);
+    else colsByRow.set(cell.rowIndex, [cell.colIndex]);
+  }
+  sheet.rows = sheet.rows.map((row) => {
+    const rest: Record<string, string> = {};
+    for (const [key, value] of Object.entries(row.attrs ?? {})) if (key !== "spans") rest[key] = value;
+    const cols = colsByRow.get(row.rowIndex);
+    if (cols?.length) rest.spans = `${Math.min(...cols) + 1}:${Math.max(...cols) + 1}`;
+    return { ...row, attrs: rest };
+  });
+}
+
+/** 前像是不是空集（纯插入时为真，撤销插入才不需要"插回内容"）。 */
+function isEmptyBand(band: SheetTrackBand): boolean {
+  return band.cells.length === 0 && band.rows.length === 0 && band.columns.length === 0 && band.merges.length === 0;
+}
+
+/**
+ * 记下"这一带现在装的是什么"，之后凭它核对现场与插回原内容。
+ *
+ * @param sheet 建 op 时的载荷。
+ * @param axis 行还是列。
+ * @param start 0 基带起点。
+ * @param count 条数。
+ * @returns 带内的格子、行元信息、整段落在带里的 `<col>`、整块落在带里的合并区（都是副本）。
+ */
+function bandSnapshot(sheet: SheetPayload, axis: SheetAxis, start: number, count: number): SheetTrackBand {
+  const isRow = axis === "row";
+  const end = start + count - 1;
+  const inside = (position: number) => position >= start && position <= end;
+  return {
+    cells: Object.values(sheet.cells)
+      .filter((cell) => inside(isRow ? cell.rowIndex : cell.colIndex))
+      .map((cell) => ({ ...cell })),
+    rows: isRow ? sheet.rows.filter((row) => inside(row.rowIndex)).map((row) => ({ ...row })) : [],
+    ...bandShape(sheet, axis, start, end),
+  };
+}
+
+/**
+ * 把前像整体搬到另一个坐标系。
+ *
+ * op 的约定：`removed` 里的位置永远与 `target.index` 同框。落地时把逆操作的前像搬到位，
+ * 撤销时才算得出正确的插回点（行列被用户挪过位置时 `shift` 不为 0）。
+ *
+ * @param band 前像。
+ * @param axis 行还是列。
+ * @param shift 位移量。
+ * @returns 搬动后的前像（`shift` 为 0 时原样返回，避免多余副本）。
+ */
+function shiftBand(band: SheetTrackBand, axis: SheetAxis, shift: number): SheetTrackBand {
+  if (shift === 0) return band;
+  const isRow = axis === "row";
+  return {
+    cells: band.cells.map((cell) => ({ ...cell, colIndex: cell.colIndex + (isRow ? 0 : shift), rowIndex: cell.rowIndex + (isRow ? shift : 0) })),
+    rows: band.rows.map((row) => ({ ...row, rowIndex: row.rowIndex + shift })),
+    columns: band.columns.map((column) => shiftColumn(column, shift)),
+    merges: band.merges.map((merge) => moveMerge(merge, isRow, shift, shift)),
+  };
+}
+
+/**
+ * 取出"落在这一带里的那部分"前像形状：列宽段按带裁剪，合并区只收整块落在带里的。
+ *
+ * 列宽段裁剪而不是整段收：整段盖住带的（两边都探出带外）只按插删增减端点，来回本来就精确，
+ * 收进前像反而会在撤销时重出一份；只有被带劈开的那种才需要把带内那截单独存下来，
+ * 撤销后带内一截与带外一截相邻同宽，Excel 读出与原来一段等价。合并区不能这么合，见 `mergeSplitReason`。
+ *
+ * @param sheet 载荷。
+ * @param axis 行还是列。
+ * @param start 0 基带起点。
+ * @param end 0 基带终点。
+ * @returns 带内的列宽段与合并区（都是副本；行轴不动列宽，`columns` 为空）。
+ */
+function bandShape(sheet: SheetPayload, axis: SheetAxis, start: number, end: number): Pick<SheetTrackBand, "columns" | "merges"> {
+  const isRow = axis === "row";
+  const clip = (itemStart: number, itemEnd: number): [number, number] | null => {
+    if (itemStart < start && itemEnd > end) return null;
+    const clippedStart = Math.max(itemStart, start);
+    const clippedEnd = Math.min(itemEnd, end);
+    return clippedStart <= clippedEnd ? [clippedStart, clippedEnd] : null;
+  };
+  const columns = isRow ? [] : sheet.columns.flatMap((column) => {
+    const span = clip(column.minColIndex, column.maxColIndex);
+    return span ? [{ ...column, minColIndex: span[0], maxColIndex: span[1] }] : [];
+  });
+  const merges = sheet.merges
+    .filter((merge) => {
+      const startOf = isRow ? merge.range.start.rowIndex : merge.range.start.colIndex;
+      const endOf = isRow ? merge.range.end.rowIndex : merge.range.end.colIndex;
+      return startOf >= start && endOf <= end;
+    })
+    .map((merge) => ({ ref: merge.ref, range: { start: { ...merge.range.start }, end: { ...merge.range.end } } }));
+  return { columns, merges };
+}
+
+/**
+ * 这一带是否把某个合并区劈成两半。
+ *
+ * 整块落在带里的合并区由前像整块存下、撤销时原样插回；整块盖住带的只增减端点，来回也精确。
+ * 唯独"一半在带里一半在外面"没有可逆的表示法：收缩掉的那半没处存，撤销时又只能补出一截假合并区
+ * （真合并区被劈成两块就再也合不回去），所以整条拒绝（`AGENTS.md` §2.5：不能安全回滚就明说，不许猜）。
+ * 列宽段没有这个问题（相邻同宽的两段与一段等价），所以列宽段走裁剪、合并区走拒绝。
+ *
+ * @param sheet 现场载荷。
+ * @param axis 行还是列。
+ * @param from 0 基带起点。
+ * @param to 0 基带终点。
+ * @returns 有劈不开的合并区时给理由；没有返回 null。
+ */
+function mergeSplitReason(sheet: SheetPayload, axis: SheetAxis, from: number, to: number): string | null {
+  const isRow = axis === "row";
+  const split = sheet.merges.find((merge) => {
+    const startOf = isRow ? merge.range.start.rowIndex : merge.range.start.colIndex;
+    const endOf = isRow ? merge.range.end.rowIndex : merge.range.end.colIndex;
+    return endOf >= from && startOf <= to && !(startOf >= from && endOf <= to) && !(startOf < from && endOf > to);
+  });
+  if (!split) return null;
+  return `${split.ref} 这个合并区正好被这一带劈开，撤销合不回原样，不动它`;
+}
+
+/**
+ * 删除前核对现场：这一带必须还是建 op 时那份内容。
+ *
+ * @param sheet 现场载荷。
+ * @param op 删除 op。
+ * @param from 解析出的带起点。
+ * @param shift 现场与建 op 时的下标差（行列被用户挪过位置时用它搬动记录）。
+ * @returns 不一致的理由；一致返回 null。
+ */
+function bandMismatchReason(sheet: SheetPayload, op: ShiftTracksOp, from: number, shift: number): string | null {
+  const isRow = op.axis === "row";
+  const to = from + op.count - 1;
+  const inside = (position: number) => position >= from && position <= to;
+  const liveCells = Object.values(sheet.cells).filter((cell) => inside(isRow ? cell.rowIndex : cell.colIndex));
+  if (liveCells.length !== op.removed.cells.length) return `第 ${from + 1} ${isRow ? "行" : "列"}起这一带的格子数与记录时不同，不删`;
+  for (const recorded of op.removed.cells) {
+    const colIndex = recorded.colIndex + (isRow ? 0 : shift);
+    const rowIndex = recorded.rowIndex + (isRow ? shift : 0);
+    const live = liveCells.find((cell) => cell.colIndex === colIndex && cell.rowIndex === rowIndex);
+    const address = formatA1({ colIndex, rowIndex });
+    if (!live || !sameCellContent(live, recorded)) return `${address} 现在装的不是这条记录时的内容，不删`;
+  }
+  const liveRows = isRow ? sheet.rows.filter((row) => inside(row.rowIndex)) : [];
+  if (liveRows.length !== op.removed.rows.length) return `第 ${from + 1} 行的行元信息与记录时不同，不删`;
+  for (const row of op.removed.rows) {
+    const live = liveRows.find((item) => item.rowIndex === row.rowIndex + shift);
+    if (!live || !sameRowMeta(live, row)) return `第 ${row.rowIndex + 1 + shift} 行的行高/格式与记录时不同，不删`;
+  }
+  const live = bandShape(sheet, op.axis, from, to);
+  const liveColumns = live.columns;
+  const recordedColumns = op.removed.columns.map((column) => shiftColumn(column, shift));
+  if (liveColumns.length !== recordedColumns.length || !recordedColumns.every((column) => liveColumns.some((liveColumn) => sameColumn(liveColumn, column)))) {
+    return "这一带的列宽分段与记录时不同，不删";
+  }
+  const liveMergeRefs = live.merges.map((merge) => merge.ref);
+  const recordedMergeRefs = op.removed.merges.map((merge) => moveMerge(merge, isRow, shift, shift).ref);
+  if (liveMergeRefs.length !== recordedMergeRefs.length || !recordedMergeRefs.every((ref) => liveMergeRefs.includes(ref))) {
+    return "这一带的合并区与记录时不同，不删";
+  }
+  return null;
+}
+
+/** 两条行元信息是否等价（含没建模但必须原样搬的其余属性）。 */
+function sameRowMeta(left: SheetRowMeta, right: SheetRowMeta): boolean {
+  return (
+    left.heightPt === right.heightPt &&
+    left.customHeight === right.customHeight &&
+    left.hidden === right.hidden &&
+    left.styleIndex === right.styleIndex &&
+    sameAttributes(left.attrs, right.attrs)
+  );
+}
+
 /** 单条 op 的分派；指向别的表就整条跳过。 */
 function applyOne(sheet: SheetPayload, op: SheetCoreOp): ApplyOutcome {
   if (op.partPath !== sheet.partPath) return { reason: "这条 op 指向的是另一张表" };
-  return op.kind === "setCellValue" ? applyCellOp(sheet, op) : applyColumnWidthOp(sheet, op);
+  if (op.kind === "setCellValue") return applyCellOp(sheet, op);
+  if (op.kind === "setColumnWidth") return applyColumnWidthOp(sheet, op);
+  return applyShiftOp(sheet, op);
 }
 
 /** 顺序应用一批 op，失败的挑出去；`inverses` 与已落地的 `ops` 同序。 */

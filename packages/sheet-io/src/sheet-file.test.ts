@@ -4,7 +4,7 @@ import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
 import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
-import { revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
 import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
@@ -450,5 +450,74 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
     expect(payload.fileName).toBe("sample.xlsx");
     expect(payload.sheets.map((sheet) => sheet.name)).toEqual(["销售", "空表"]);
     expect(payload.unsupported.map((item) => item.reason)).toContain("externalLinks");
+  });
+});
+
+describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
+  it("插一行写进文件后维度变大，撤销再存回去与插入前逐字一致", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    // J 列的公式带外部引用，它让本表任何插删都被拒绝；先删掉 J 列，再在插入点上做来回
+    const dropped = runSheetOps(payload, [deleteTracksOp(payload, "col", 9)!]);
+    expect(dropped.ok).toBe(true);
+    const baseline = (await writeAndReopen(dropped.after)).partXml;
+
+    const applied = runSheetOps(dropped.after, [insertTracksOp(dropped.after, "row", 2)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["A5"]?.value).toBe("3月");
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain('<dimension ref="A1:I5"/>');
+    // 没建模的条件格式停在原处不跟着挪——这是插删的已知代价，spec 阶段 3 里明写着
+    expect(edited.partXml).toContain('<conditionalFormatting sqref="C2:C4">');
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect((await writeAndReopen(reverted.after)).partXml).toBe(baseline);
+  });
+
+  it("表里有认不出的引用写法时插删整条拒绝，载荷原样返回（宁可不改）", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const applied = runSheetOps(payload, [insertTracksOp(payload, "col", 3)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("不解析");
+    expect(applied.skipped[0]?.reason).toContain("'[1]Sheet1'!$A$2");
+    expect(applied.after).toBe(payload);
+  });
+
+  it("删除带把合并区劈成两半时拒绝：合不回去的改动不做", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const applied = runSheetOps(payload, [deleteTracksOp(payload, "col", 7)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("H1:I2");
+    expect(applied.skipped[0]?.reason).toContain("劈开");
+    expect(applied.after.merges).toEqual(payload.merges);
+  });
+
+  it("合并区跟着插列挪位：写进文件读回来是 I1:J2，撤销后回到 H1:I2", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    // J 列的公式带外部引用，任何让它位移的插列都会被拒；先删掉 J 列再插
+    const dropped = runSheetOps(payload, [deleteTracksOp(payload, "col", 9)!]);
+    expect(dropped.ok).toBe(true);
+
+    const applied = runSheetOps(dropped.after, [insertTracksOp(dropped.after, "col", 3)!]);
+    expect(applied.ok).toBe(true);
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain('<mergeCells count="1"><mergeCell ref="I1:J2"/></mergeCells>');
+    expect(edited.sheet.merges.map((merge) => merge.ref)).toEqual(["I1:J2"]);
+    expect(widthSegments(edited.sheet)).toEqual([
+      [0, 2, 12],
+      [4, 4, 14],
+    ]);
+    // 改写 `<mergeCells>` 不许牵连同一张表里其它没建模的结构
+    expect(edited.partXml).toContain("<dataValidation");
+    expect(edited.partXml).toContain("<pane ");
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    const back = await writeAndReopen(reverted.after);
+    expect(back.partXml).toContain('<mergeCells count="1"><mergeCell ref="H1:I2"/></mergeCells>');
+    expect(widthSegments(back.sheet)).toEqual([
+      [0, 2, 12],
+      [3, 3, 14],
+    ]);
   });
 });

@@ -63,6 +63,8 @@ export {
   type WorkbookPayload,
 } from "./sheet-dto.js";
 export {
+  deleteTracksOp,
+  insertTracksOp,
   revertSheetOps,
   runSheetOps,
   setCellTextOp,
