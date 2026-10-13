@@ -6,7 +6,7 @@
  * 形状与 Word 的 `CoreOp` 同构：`before` 与 `after` 都存在 op 里，逆操作就是两者交换，
  * 落地前先核对现场等于 `before`，对不上就整条跳过并报"部分撤销"（§2.4/§2.5）。
  */
-import { formatA1, formatRange, parseA1 } from "./address.js";
+import { formatA1, formatRange, indexToColName, parseA1 } from "./address.js";
 import { parseUserCellText } from "./cell-text.js";
 import { evaluateFormula } from "./formula-eval.js";
 import { shiftFormula } from "./formula-refs.js";
@@ -48,7 +48,13 @@ export interface SetCellValueOp {
   after: SheetCell | null;
 }
 
-/** 改一列的宽度。存的是"覆盖这一列的那几段 `<col>`"的整段前后像，逆操作把三段换回去即可。 */
+/**
+ * 改一列的宽度。
+ *
+ * 存的是"覆盖这一列的那几段 `<col>`"的整段前后像，逆操作把三段换回去即可；
+ * 分段与记录不一致时（同一批里前一条 op 劈过段）只要目标列自己的宽度没变，
+ * 就按现场重算劈法落地，不许因为表示法变了就把整条跳过。
+ */
 export interface SetColumnWidthOp {
   kind: "setColumnWidth";
   partPath: string;
@@ -222,19 +228,11 @@ export function setCellFormulaOp(sheet: SheetPayload, address: string, formula: 
  */
 export function setColumnWidthOp(sheet: SheetPayload, colIndex: number, widthPx: number): SetColumnWidthOp | null {
   const widthChars = columnWidthPxToChars(widthPx);
-  const covering = sheet.columns.filter((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex);
+  const { covering, rebuilt } = splitColumnBand(sheet.columns, colIndex, widthChars);
   const single = covering.length === 1 ? covering[0] : undefined;
   if (single && single.minColIndex === colIndex && single.maxColIndex === colIndex && single.widthChars === widthChars) {
     return null;
   }
-  const rebuilt: SheetColumn[] = [];
-  for (const column of covering) {
-    if (column.minColIndex < colIndex) rebuilt.push({ ...column, maxColIndex: colIndex - 1 });
-    if (column.maxColIndex > colIndex) rebuilt.push({ ...column, minColIndex: colIndex + 1 });
-  }
-  const inherited = covering[0];
-  rebuilt.push({ ...(inherited ?? {}), minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
-  rebuilt.sort((left, right) => left.minColIndex - right.minColIndex);
   return {
     kind: "setColumnWidth",
     partPath: sheet.partPath,
@@ -242,6 +240,28 @@ export function setColumnWidthOp(sheet: SheetPayload, colIndex: number, widthPx:
     beforeColumns: covering.map((column) => ({ ...column })),
     afterColumns: rebuilt,
   };
+}
+
+/**
+ * 把"这一列改成这么宽"落到列定义上：覆盖它的分段按左右两截保留，中间单独一段用新宽度。
+ *
+ * @param columns 列定义（现场的或建 op 时的，取决于哪一批要劈）。
+ * @param colIndex 目标列号（0 基）。
+ * @param widthChars 目标宽度（字符宽，像素换算只在 `geometry.ts` 发生，§2.1）。
+ * @returns `covering` 是被盖住的旧分段，`rebuilt` 是劈完之后替换它们的新分段（按列号排好）。
+ */
+function splitColumnBand(columns: SheetColumn[], colIndex: number, widthChars: number): { covering: SheetColumn[]; rebuilt: SheetColumn[] } {
+  const covering = columns.filter((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex);
+  const rebuilt: SheetColumn[] = [];
+  for (const column of covering) {
+    if (column.minColIndex < colIndex) rebuilt.push({ ...column, maxColIndex: colIndex - 1 });
+    if (column.maxColIndex > colIndex) rebuilt.push({ ...column, minColIndex: colIndex + 1 });
+  }
+  // 相邻列的其余属性（样式、隐藏等）原样继承，只有宽度和 customWidth 是我们改的。
+  const inherited = covering[0];
+  rebuilt.push({ ...(inherited ?? {}), minColIndex: colIndex, maxColIndex: colIndex, widthChars, customWidth: true });
+  rebuilt.sort((left, right) => left.minColIndex - right.minColIndex);
+  return { covering, rebuilt };
 }
 
 /** 空带：插入时的前像，撤销插入凭它确认"这一带还空着"。 */
@@ -393,38 +413,84 @@ function applyCellOp(sheet: SheetPayload, op: SetCellValueOp): ApplyOutcome {
 }
 
 /**
- * 落一条改列宽 op：把覆盖这一列的那几段 `<col>` 换成记录里的新段。
+ * 落一条改列宽 op。
+ *
+ * 先走**精确路径**：现场的分段与记录里逐段一致时整段换回去，撤销能把 `<cols>` 还原成原来那一段。
+ * 不一致时走**按现场重算**：只核对目标列自己的宽度没被改过，就地劈段（相邻列的宽度按现场保留）。
+ * 有了后者，同一批里前一条列宽 op 劈开的段才不会把后面几条全拦下来（阶段 4 的批内死角）。
  *
  * @param sheet 现场载荷。
  * @param op 改列宽 op。
- * @returns 新载荷与逆操作，或跳过理由。
+ * @returns 新载荷与逆操作（两者都在落地时的坐标系里），或跳过理由。
  */
 function applyColumnWidthOp(sheet: SheetPayload, op: SetColumnWidthOp): ApplyOutcome {
   const colIndex = resolveTrack(sheet, op.target);
-  if (colIndex === null) return { reason: "认不出这一列：它的宽度段已被改动" };
+  if (colIndex === null) return { reason: "认不出这一列：它已被插入/删除的列挪走，或整列内容被改过" };
+  const widthChars = pieceCovering(op.afterColumns, op.target.index)?.widthChars;
+  if (widthChars === undefined) return { reason: "这条列宽改动没记下目标宽度" };
   const shift = colIndex - op.target.index;
   const expected = op.beforeColumns.map((column) => shiftColumn(column, shift));
   const band = columnsInBand(sheet.columns, expected, colIndex);
-  const sameShape =
+  const exact = sameBandShape(band, expected);
+  if (!exact && !sameColumnWidth(pieceCovering(band, colIndex), pieceCovering(expected, colIndex))) {
+    return { reason: `${columnLabel(colIndex)} 列现在的宽度与这条改动记录时的不一致，不覆盖用户的列宽` };
+  }
+  const split = exact
+    ? { covering: band, rebuilt: op.afterColumns.map((column) => shiftColumn(column, shift)) }
+    : splitColumnBand(sheet.columns, colIndex, widthChars);
+  const others = sheet.columns.filter((column) => !split.covering.includes(column));
+  const applied: SetColumnWidthOp = {
+    ...op,
+    target: { ...op.target, index: colIndex },
+    beforeColumns: split.covering.map((column) => ({ ...column })),
+    afterColumns: split.rebuilt,
+  };
+  return {
+    // 按列号排好再放回：Excel 自己写出的 `<cols>` 是有序的，我们打散顺序会让文件与它产的对不上。
+    sheet: { ...sheet, columns: [...others, ...split.rebuilt].sort((left, right) => left.minColIndex - right.minColIndex) },
+    inverse: { ...applied, beforeColumns: applied.afterColumns, afterColumns: applied.beforeColumns },
+  };
+}
+
+/** 现场的分段是否与记录里逐段一致（一致才有把握整段换回，把 `<cols>` 还原成原来的写法）。 */
+function sameBandShape(band: SheetColumn[], expected: SheetColumn[]): boolean {
+  return (
     band.length === expected.length &&
     band.every((column, slot) => {
       const recorded = expected[slot];
       return recorded !== undefined && sameColumn(column, recorded);
-    });
-  if (!sameShape) return { reason: "这一列的宽度段与记录时的分段不一致，不重排用户的列宽" };
-  const others = sheet.columns.filter((column) => !band.includes(column));
-  const rebuilt = op.afterColumns.map((column) => shiftColumn(column, shift));
-  return {
-    // 按列号排好再放回：Excel 自己写出的 `<cols>` 是有序的，我们打散顺序会让文件与它产的对不上。
-    sheet: { ...sheet, columns: [...others, ...rebuilt].sort((left, right) => left.minColIndex - right.minColIndex) },
-    inverse: { ...op, beforeColumns: op.afterColumns, afterColumns: op.beforeColumns },
-  };
+    })
+  );
 }
 
-/** 整段列宽定义按插删的位移平移；位移为 0 时原样返回，避免造出多余副本。 */
-function shiftColumn(column: SheetColumn, shift: number): SheetColumn {
-  if (shift === 0) return column;
-  return { ...column, minColIndex: column.minColIndex + shift, maxColIndex: column.maxColIndex + shift };
+/** 取分段里盖住这一列的那一段（`<col>` 段本不该重叠，真重叠时取第一段）。 */
+function pieceCovering(columns: SheetColumn[], colIndex: number): SheetColumn | undefined {
+  return columns.find((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex);
+}
+
+/**
+ * 这一列自己的宽度有没有被改过。
+ *
+ * 不比覆盖范围：把 `{0–3}` 劈成三段、我们那列的宽度没动，属于表示法变化而不是用户改动，
+ * 拦下来会让批内的后续 op 全落不了地（`AGENTS.md` §2.5 要的是不牵连用户的数据）。
+ *
+ * @param left 现场那一段（这列没有自定义宽度时是 undefined）。
+ * @param right 建 op 时那一段。
+ * @returns 宽度与其余属性都一致时为 true；一段有一无时为 false。
+ */
+function sameColumnWidth(left: SheetColumn | undefined, right: SheetColumn | undefined): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.widthChars === right.widthChars &&
+    left.hidden === right.hidden &&
+    left.customWidth === right.customWidth &&
+    sameAttributes(left.attrs, right.attrs)
+  );
+}
+
+/** 列号 → 给人看的列名（A、B、…）；越界时退回下标，不让错误消息本身出错。 */
+function columnLabel(colIndex: number): string {
+  return indexToColName(colIndex) || `${colIndex + 1} 列`;
 }
 
 /**
@@ -439,6 +505,12 @@ function columnsInBand(columns: SheetColumn[], expected: SheetColumn[], colIndex
   const bandStart = expected.length ? Math.min(...expected.map((column) => column.minColIndex)) : colIndex;
   const bandEnd = expected.length ? Math.max(...expected.map((column) => column.maxColIndex)) : colIndex;
   return columns.filter((column) => column.maxColIndex >= bandStart && column.minColIndex <= bandEnd);
+}
+
+/** 整段列宽定义按插删的位移平移；位移为 0 时原样返回，避免造出多余副本。 */
+function shiftColumn(column: SheetColumn, shift: number): SheetColumn {
+  if (shift === 0) return column;
+  return { ...column, minColIndex: column.minColIndex + shift, maxColIndex: column.maxColIndex + shift };
 }
 
 /**

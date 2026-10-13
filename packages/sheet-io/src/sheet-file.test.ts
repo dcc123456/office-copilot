@@ -473,6 +473,26 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
     ]);
   });
 
+  it("一批里改两列列宽：两条都写进 `<cols>`，撤销后又是原来那两段（阶段 4 的批内死角）", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    // B 列拖成 14 字符、C 列拖成 15 字符：两条 op 都锚在同一段 `{1–3}`（0 基 0–2）上
+    const applied = runSheetOps(payload, [setColumnWidthOp(payload, 1, 103)!, setColumnWidthOp(payload, 2, 110)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+
+    const edited = await writeAndReopen(applied.after);
+    expect(widthSegments(edited.sheet)).toEqual([
+      [0, 0, 12],
+      [1, 1, 14],
+      [2, 2, 15],
+      [3, 3, 14],
+    ]);
+    expect(edited.partXml).toContain('<col min="3" max="3" width="15" customWidth="1"/>');
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(widthSegments((await writeAndReopen(reverted.after)).sheet)).toEqual(widthSegments(payload));
+  });
+
   it("表里本来没有 `<cols>` 时，第一次设列宽把区间插在 `<sheetData>` 之前", async () => {
     // 夹具的第二张表是空表，`<sheetFormatPr/>` 后面直接就是 `<sheetData/>`
     const blank = sheetPayloadOf((await (await openSample()).sheetAt(1)) as SheetModel);

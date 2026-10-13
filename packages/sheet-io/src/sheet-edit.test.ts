@@ -54,6 +54,19 @@ function sheetOf(cells: SheetCell[], columns: SheetColumn[] = [], mergeRefs: str
 }
 
 /**
+ * 逐列取现场生效的宽度（劈段之后"这列多宽"要看盖住它的那一段）。
+ *
+ * @param sheet 载荷。
+ * @param colIndexes 要看的列号（0 基）。
+ * @returns 每列的字符宽；这列没有自定义宽度时给 null。
+ */
+function widthsAt(sheet: SheetPayload, colIndexes: number[]): Array<number | null> {
+  return colIndexes.map(
+    (colIndex) => sheet.columns.find((column) => colIndex >= column.minColIndex && colIndex <= column.maxColIndex)?.widthChars ?? null,
+  );
+}
+
+/**
  * 造一个带公式的格子（插删行列时要验证引用跟着走）。
  *
  * @param address 大写 A1 地址。
@@ -195,7 +208,7 @@ describe("改列宽（`<col min max>` 劈段与复原）", () => {
     expect(setColumnWidthOp(sheet, 1, 103)).toBeNull();
   });
 
-  it("用户重排过分段后撤销被拦下：不重排已经不属于我们的列宽", () => {
+  it("用户改过这一列的宽度后撤销被拦下：不覆盖用户的列宽", () => {
     const sheet = sheetOf([cellOf(0, 0, 1)], wideRange);
     const applied = runSheetOps(sheet, [setColumnWidthOp(sheet, 1, 103)!]);
     const mangled = { ...applied.after, columns: [{ minColIndex: 1, maxColIndex: 1, widthChars: 20, customWidth: true }] };
@@ -203,6 +216,55 @@ describe("改列宽（`<col min max>` 劈段与复原）", () => {
     expect(reverted.ok).toBe(false);
     expect(reverted.skipped[0]?.reason).toContain("列宽");
     expect(reverted.after.columns).toEqual(mangled.columns);
+  });
+
+  it("用户只把分段劈开、宽度没动时撤销照样落回去：他劈出来的段留着", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1)], wideRange);
+    const applied = runSheetOps(sheet, [setColumnWidthOp(sheet, 1, 103)!]);
+    // 用户在撤销之前把 `{2–3}` 单独拆开看（宽度一位没动）：这属于表示法变化，不是数据改动
+    const resplit = {
+      ...applied.after,
+      columns: [
+        ...applied.after.columns.slice(0, 2),
+        { minColIndex: 2, maxColIndex: 2, widthChars: 12, customWidth: true },
+        { minColIndex: 3, maxColIndex: 3, widthChars: 12, customWidth: true },
+      ],
+    };
+    const reverted = revertSheetOps(resplit, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(widthsAt(reverted.after, [0, 1, 2, 3])).toEqual([12, 12, 12, 12]);
+    expect(reverted.after.columns).toHaveLength(4);
+  });
+
+  it("一批里改同一覆盖带的两列宽度：两条都落地（阶段 4 的批内死角）", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2), cellOf(2, 0, 3), cellOf(3, 0, 4)], wideRange);
+    // 103px → 14 字符，110px → 15 字符
+    const applied = runSheetOps(sheet, [setColumnWidthOp(sheet, 1, 103)!, setColumnWidthOp(sheet, 2, 110)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(widthsAt(applied.after, [0, 1, 2, 3])).toEqual([12, 14, 15, 12]);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    // 精确路径能把 `<cols>` 还原成原来那一段，不必留四段等价写法
+    expect(reverted.after.columns).toEqual(wideRange);
+  });
+
+  it("同一列在一批里被改两次：第二条以现场宽度对不上被拦下", () => {
+    const sheet = sheetOf([cellOf(1, 0, 2)], wideRange);
+    const applied = runSheetOps(sheet, [setColumnWidthOp(sheet, 1, 103)!, setColumnWidthOp(sheet, 1, 110)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped).toHaveLength(1);
+    expect(applied.skipped[0]?.reason).toContain("列宽");
+    expect(widthsAt(applied.after, [1])).toEqual([14]);
+  });
+
+  it("一批里跨两张覆盖带改列宽：两条都落地，撤销逐条回到各自的前像", () => {
+    const columns: SheetColumn[] = [{ minColIndex: 0, maxColIndex: 1, widthChars: 12, customWidth: true }, { minColIndex: 2, maxColIndex: 3, widthChars: 9, customWidth: true }];
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2), cellOf(2, 0, 3), cellOf(3, 0, 4)], columns);
+    const applied = runSheetOps(sheet, [setColumnWidthOp(sheet, 0, 103)!, setColumnWidthOp(sheet, 3, 110)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(widthsAt(applied.after, [0, 1, 2, 3])).toEqual([14, 12, 9, 15]);
+    expect(revertSheetOps(applied.after, applied.inverses).after.columns).toEqual(columns);
   });
 
   it("没有 `<col>` 时也能建出这一列的宽度段", () => {
