@@ -18,6 +18,7 @@
   "dependencies": {
     "@office-copilot/docx-io": "workspace:*",
     "@office-copilot/sheet-io": "workspace:*",
+    "@office-copilot/sheet-tools": "workspace:*",
     "@tiptap/core": "^2.27.2",
     "@tiptap/extension-character-count": "^2.6.6",
     "@tiptap/extension-link": "^2.6.6",

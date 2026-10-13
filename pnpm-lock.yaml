@@ -69,6 +69,9 @@ importers:
       '@office-copilot/sheet-io':
         specifier: workspace:*
         version: link:../../packages/sheet-io
+      '@office-copilot/sheet-tools':
+        specifier: workspace:*
+        version: link:../../packages/sheet-tools
       '@tiptap/core':
         specifier: ^2.27.2
         version: 2.27.2(@tiptap/pm@2.27.2)
