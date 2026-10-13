@@ -4,7 +4,7 @@ import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
 import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
 import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
@@ -560,5 +560,56 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
       [0, 2, 12],
       [3, 3, 14],
     ]);
+  });
+});
+
+describe("公式落盘（spec 阶段 4 D4：`<f>` 交给 Excel，缓存值 `<v>` 由本地算）", () => {
+  it("写一条 AVERAGE：文件里 `<f>` 与算出的 `<v>` 并存，读回来两者都在", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const created = setCellFormulaOp(payload, "F2", "=AVERAGE(C2:C4)");
+    expect(created?.recalcNeeded).toBe(false);
+    const applied = runSheetOps(payload, [created!.op]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain('<c r="F2"><f>AVERAGE(C2:C4)</f><v>120</v></c>');
+    expect(edited.sheet.cells["F2"]?.formula).toBe("AVERAGE(C2:C4)");
+    expect(edited.sheet.cells["F2"]?.value).toBe(120);
+    expect(edited.sheet.cells["F2"]?.cachedValue).toBe(120);
+    // 已有的公式格与未建模结构不许被这次写入牵连
+    expect(edited.partXml).toContain('<c r="G2"><f>SUM(C2:C4)</f><v>360</v></c>');
+    expect(edited.partXml).toContain("<conditionalFormatting");
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    const back = await writeAndReopen(reverted.after);
+    expect(back.partXml).not.toContain("AVERAGE(C2:C4)");
+    expect(back.sheet.cells["F2"]).toBeUndefined();
+  });
+
+  it("本地算不出的公式只写 `<f>`，绝不留一个过期数字（验收 A4）", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const created = setCellFormulaOp(payload, "F3", "TODAY()");
+    expect(created?.recalcNeeded).toBe(true);
+    const applied = runSheetOps(payload, [created!.op]);
+    expect(applied.ok).toBe(true);
+
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain('<c r="F3"><f>TODAY()</f></c>');
+    expect(edited.partXml).not.toContain('<c r="F3"><f>TODAY()</f><v>');
+    expect(edited.sheet.cells["F3"]?.formula).toBe("TODAY()");
+    expect(edited.sheet.cells["F3"]?.value).toBeNull();
+  });
+
+  it("把带格式的格改成公式：`@s` 原样带走，显示仍按它的数字格式（§2.3）", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const applied = runSheetOps(payload, [setCellFormulaOp(payload, "C2", "C3+C4")!.op]);
+    expect(applied.ok).toBe(true);
+    expect(applied.after.cells["C2"]).toMatchObject({ styleIndex: payload.cells["C2"]?.styleIndex, value: 240 });
+
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain(`<c r="C2" s="${payload.cells["C2"]?.styleIndex}"><f>C3+C4</f><v>240</v></c>`);
+    // 缓存值仍按这一格自己的数字格式显示（实测夹具 `@s=1` 是内建 3：千分位、不带小数）
+    expect(cellDisplayText(edited.sheet.cells["C2"]!)).toBe("240");
   });
 });

@@ -12,6 +12,7 @@ import {
   insertTracksOp,
   rangeContains,
   readOnlyReason,
+  setCellFormulaOp,
   setCellTextOp,
   setColumnWidthOp,
   type A1Address,
@@ -157,6 +158,9 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
   /**
    * 把编辑框里的文字落到当前格。
    *
+   * 以 `=` 开头按公式走（spec D4：`<f>` 交给 Excel 重算，缓存值由引擎当场算）；
+   * 引擎认不出的公式仍然写成公式，只是值为空，由编辑栏那条提示说清楚。
+   *
    * @param text 输入框内容。
    * @param move `down` 回车后到下一行，`right` Tab 后到下一列，`none` 原地不动。
    */
@@ -164,8 +168,10 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
     (text: string, move: "down" | "right" | "none") => {
       if (!sheet || !layout || isReadOnly) return;
       const address = formatA1(active);
-      const op = setCellTextOp(sheet, address, text);
-      if (op) onCommitOps([op], text.trim() ? `把 ${address} 改成 ${text.trim()}` : `清空 ${address}`);
+      const trimmed = text.trim();
+      const formula = trimmed.startsWith("=") ? setCellFormulaOp(sheet, address, text) : null;
+      const op = formula?.op ?? setCellTextOp(sheet, address, text);
+      if (op) onCommitOps([op], trimmed ? `把 ${address} 改成 ${trimmed}` : `清空 ${address}`);
       setEditing(null);
       const next = moveAddress(
         active,
@@ -367,7 +373,13 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
           value={activeCell?.formula ? `=${activeCell.formula}` : displayTextOf(activeCell)}
           aria-label="编辑栏"
         />
-        {activeCell?.formula ? <span className="sheet-recalc-hint">公式显示的是文件里的缓存值，需在 Excel / WPS 里重算</span> : null}
+        {activeCell?.formula ? (
+          <span className="sheet-recalc-hint">
+            {activeCell.cachedValue === undefined || activeCell.cachedValue === null
+              ? "这条公式本地算不出来，格子里没有值；在 Excel / WPS 里打开会重算"
+              : "公式显示的是缓存值，改了数据要在 Excel / WPS 里重算"}
+          </span>
+        ) : null}
         {isReadOnly ? (
           <span className="sheet-readonly-hint" title={readOnlyHint ?? ""}>
             只读

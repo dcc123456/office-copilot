@@ -67,6 +67,7 @@ export {
   insertTracksOp,
   revertSheetOps,
   runSheetOps,
+  setCellFormulaOp,
   setCellTextOp,
   setColumnWidthOp,
   type SheetCoreOp,

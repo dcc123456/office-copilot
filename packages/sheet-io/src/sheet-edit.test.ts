@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
 import { parseRange } from "./address.js";
 import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetRowMeta } from "./model.js";
 
@@ -330,5 +330,63 @@ describe("插入与删除整行/整列（spec 阶段 3 C16）", () => {
     expect(widened.after.rows[0]?.attrs?.spans).toBe("1:4");
     const taller = runSheetOps(sheet, [insertTracksOp(sheet, "row", 1)!]);
     expect(taller.after.rows[0]?.attrs?.spans).toBe("1:3");
+  });
+});
+
+describe("写公式（spec D4：`<f>` 交给 Excel，缓存值 `<v>` 由本地算）", () => {
+  it("白名单内的公式当场算出缓存值，撤销后新写的格整格消失", () => {
+    const sheet = sheetOf([cellOf(0, 0, 10), cellOf(0, 1, 20), cellOf(0, 2, 30)]);
+    const created = setCellFormulaOp(sheet, "D1", "=SUM(A1:A3)");
+    expect(created).not.toBeNull();
+    expect(created?.recalcNeeded).toBe(false);
+    const applied = runSheetOps(sheet, [created!.op]);
+    expect(applied.ok).toBe(true);
+    expect(applied.after.cells["D1"]).toMatchObject({ kind: "number", value: 60, formula: "SUM(A1:A3)", cachedValue: 60 });
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.cells["D1"]).toBeUndefined();
+  });
+
+  it("本地算不出的公式回报需要重算，值留空而不是顶上一个过期数字（验收 A4）", () => {
+    const sheet = sheetOf([cellOf(0, 0, 10)]);
+    const created = setCellFormulaOp(sheet, "B1", "TODAY()")!;
+    expect(created.recalcNeeded).toBe(true);
+    const applied = runSheetOps(sheet, [created.op]);
+    expect(applied.after.cells["B1"]?.formula).toBe("TODAY()");
+    expect(applied.after.cells["B1"]?.value).toBeNull();
+    expect(applied.after.cells["B1"]?.cachedValue).toBeUndefined();
+  });
+
+  it("盖掉旧值时样式与未解释属性跟着走，旧的公式与原文不许留下（§2.3）", () => {
+    const base = sheetOf([cellOf(0, 0, 10), cellOf(3, 0, "合计", 3)]);
+    const sheet: SheetPayload = {
+      ...base,
+      cells: {
+        ...base.cells,
+        A1: { ...base.cells["A1"]!, attrs: { cm: "1" } },
+        D1: { ...base.cells["D1"]!, formula: "SUM(A1:A3)", cachedValue: 40, rawXml: '<c r="D1" s="3"/>' },
+      },
+    };
+    const applied = runSheetOps(sheet, [setCellFormulaOp(sheet, "D1", "A1+1")!.op]);
+    expect(applied.after.cells["D1"]).toMatchObject({ kind: "number", value: 11, styleIndex: 3, formula: "A1+1", cachedValue: 11 });
+    expect(applied.after.cells["D1"]?.rawXml).toBeUndefined();
+    // 引用的那一格带着未解释属性，取数只看值，不许把 `attrs` 抄过来
+    expect(applied.after.cells["A1"]).toMatchObject({ value: 10, attrs: { cm: "1" } });
+  });
+
+  it("自我引用判成循环：公式写进去、值留空，凭 recalcNeeded 提示重算", () => {
+    const sheet = sheetOf([cellOf(0, 0, 10)]);
+    const created = setCellFormulaOp(sheet, "A1", "A1*2")!;
+    expect(created.recalcNeeded).toBe(true);
+    expect(created.op.after?.formula).toBe("A1*2");
+    expect(created.op.after?.value).toBeNull();
+  });
+
+  it("地址认不出或公式为空时返回 null，不产生空改动", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1)]);
+    expect(setCellFormulaOp(sheet, "A", "=1+1")).toBeNull();
+    expect(setCellFormulaOp(sheet, "A1", "   ")).toBeNull();
+    expect(setCellFormulaOp(sheet, "A1", "=")).toBeNull();
   });
 });

@@ -8,9 +8,10 @@
  */
 import { formatA1, formatRange, parseA1 } from "./address.js";
 import { parseUserCellText } from "./cell-text.js";
+import { evaluateFormula } from "./formula-eval.js";
 import { shiftFormula } from "./formula-refs.js";
 import { columnWidthPxToChars } from "./geometry.js";
-import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
+import type { CellScalarValue, SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
 import { colFingerprints, recalculateSheetExtent, rowFingerprints } from "./xlsx-sheet.js";
 
 /** 行/列两个轴：插删与尺寸调整的语义完全对称，所以一套类型管两轴。 */
@@ -163,6 +164,48 @@ export function setCellTextOp(sheet: SheetPayload, address: string, text: string
     target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
     before: previous,
     after: cleared ? null : next,
+  };
+}
+
+/**
+ * 写一条公式，并按 spec 决策 D4 同时算出缓存值。
+ *
+ * `<f>` 是让 Excel/WPS 打开后能重算的活公式，`<v>` 是让 app 当场能显示数字。本地算不出来时
+ * （白名单外的函数、volatile、循环引用）**照常写 `<f>` 但不写 `<v>`**，`recalcNeeded` 为 true，
+ * 调用方必须据此提示"该格需 Excel 重算"，不许拿过期数字顶上（验收 A4）。
+ * 与 `setCellTextOp` 同一条硬约束：保留原格的 `styleIndex`/`attrs`，只清掉与旧值绑定的东西（§2.3）。
+ *
+ * @param sheet 当前表的载荷。
+ * @param address 大写 A1 地址。
+ * @param formula 公式体；带前导 `=` 会被去掉，空串视为无效。
+ * @returns `{ op, recalcNeeded }`；地址解析不出来或公式为空时返回 null。
+ */
+export function setCellFormulaOp(sheet: SheetPayload, address: string, formula: string): { op: SetCellValueOp; recalcNeeded: boolean } | null {
+  const parsedAddress = parseA1(address);
+  const body = formula.trim().replace(/^=/, "");
+  if (!parsedAddress || body === "") return null;
+  const evaluated = evaluateFormula(body, sheet, address.toUpperCase());
+  const previous = sheet.cells[address] ?? null;
+  const value: CellScalarValue = evaluated.ok ? evaluated.value : null;
+  const next: SheetCell = {
+    address,
+    colIndex: parsedAddress.colIndex,
+    rowIndex: parsedAddress.rowIndex,
+    kind: typeof value === "string" ? "string" : typeof value === "boolean" ? "boolean" : "number",
+    value,
+    formula: body,
+    ...(evaluated.ok ? { cachedValue: value } : {}),
+    ...(previous ? { styleIndex: previous.styleIndex, attrs: previous.attrs } : {}),
+  };
+  return {
+    op: {
+      kind: "setCellValue",
+      partPath: sheet.partPath,
+      target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
+      before: previous,
+      after: next,
+    },
+    recalcNeeded: !evaluated.ok,
   };
 }
 
