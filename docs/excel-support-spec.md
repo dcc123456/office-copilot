@@ -87,6 +87,7 @@
 | P4 | 我们的 writer 产出的 `.xlsx` 能否被 WPS 正常打开并保留未建模部件 | `[!] BLOCKED`——本机 WPS 无可视验证通道（`AGENTS.md` §8、`docs/word-parity-spec.md` §8.12）。**替代证据形式**：读回解析一致 + OOXML 结构断言 + 用第三个独立库（exceljs `readXlsxFile`）读我们的产物作为交叉验证 | 阶段 1 的单测 |
 | P5 | `@rgrove/parse-xml` 处理带前缀命名空间的部件 | 三个部件全部解析通过：`sheet1.xml`（`xmlns` + `xmlns:r` + `xmlns:mc` + `mc:Ignorable="x14ac"` + `xmlns:x14ac`）、`sharedStrings.xml`、`styles.xml`。属性里的 `x14ac:dyDescent` 这类扩展属性**会原样出现在 attributes 里**，所以"重排/重建元素"就会丢它们 → 见下面 P5 派生出的硬约束 | 同上 "P5 parse OK …" 三行 |
 | P6 | ECharts 离屏 canvas → PNG 在 Electron 里的可行性 | 留到阶段 5 用最小探针验证；app 内跑不了 CDP harness（`AGENTS.md` §8），届时按 `css-verification-without-electron` 的先例用独立 Chromium 探针出证据，主流程仍标 BLOCKED | `[ ]` |
+| P7 | 手工拼原生 chart part 是否可行（D5 的前提，原计划阶段 0 做 spike） | **可行，不降级**。本机用 openpyxl 3.1.5 往同样的数据上插一张柱状图（`tmp/chart-ref.xlsx`）拆出最小集：`[Content_Types].xml` 两条 Override（`drawingml.chart+xml` / `drawing+xml`）+ `xl/charts/chart1.xml`（`c:chartSpace>chart>title/plotArea/<kind>Chart+catAx/valAx`）+ `xl/drawings/drawing1.xml`（`xdr:oneCellAnchor>from/ext>graphicFrame>…>c:chart r:id`）+ `xl/drawings/_rels/drawing1.xml.rels` + `xl/worksheets/_rels/sheet1.xml.rels`，**五件少一件即判损坏**。两条由此定死的约束：① `CT_Worksheet` 只允许一个 `<drawing>`，已有画图部件（图片/别的图表）的表**明确拒绝**而不是追加；② `@Target` 必须相对源部件目录（`../drawings/drawing1.xml`），少一层就断链。落地后由**第三方读取器交叉验证**（替代 P4 的 BLOCKED）：`tmp/chart-out-{bar,line,pie}.xlsx` 用 openpyxl 读回，`charts=1`、`val='销售'!$C$2:$C$4` 缓存 `120/150/90`、`cat` 缓存 `粗蓝/2月/3月`、锚点 `(col 4,row 1)`、含 `<&"` 的标题原样取回 | `tmp/chart-ref.xlsx`、`tmp/chart-check.py` 输出、`packages/sheet-io/src/xlsx-chart.test.ts`（`294ce88`） |
 
 **P5 派生出的硬约束（比原全局约束 6 更强，写在下面替代它）**：未建模结构不只存在于"整个部件"层面，
 **同一部件内部**也有——实测样本的 `sheet1.xml` 里就有 `<conditionalFormatting>`、`<dataValidations>`、`<pageMargins>`、`<pageSetup>`、
@@ -139,6 +140,10 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 - **写进 `.xlsx`**：生成 OOXML 原生图表部件（`xl/charts/chart1.xml` + `xl/drawings/*` + 关系），这样在 Excel 里图表是**可编辑对象**并随数据更新。
 - **风险与门槛**：chart part 是 ECMA-376 里最繁琐的部分之一。阶段 0 必须先做一个最小 spike（一张柱状图，手工拼 chart XML + 关系 + drawing，读回断言，`tmp/` 里，不进主干 —— `AGENTS.md` §6.5），
   spike 失败则图表降级为"贴图插入工作表"，并**在本文档与 README 明确记录降级**，不许静默把贴图说成图表。
+- **spike 结论（2026-10-13，`294ce88`）**：**成功，不降级**。写侧已落地成引擎能力 `resolveChartSpec` + `SheetFile.addChart`，
+  产物由 openpyxl 3.1.5 读回交叉验证（数字见 §二 P7）。两条实测出来的边界进了实现：`CT_Worksheet` 只能有一个 `<drawing>`
+  （已有图片/图表的表明确拒绝，返回 `drawing-exists`，不去重排别人的关系），关系 `@Target` 必须相对源部件目录（`opc.ts:relativeTarget`）。
+  app 内的 ECharts 查看与 `sheet_create_chart` 工具面**还没接**，这是阶段 5 剩下的部分。
 
 ### D6 — AI 侧：新增 `sheet-tools` 工具面 + 桌面 `sheetAgent`，复用面板状态机
 
@@ -162,7 +167,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 **目标**：把 §二 P1–P6 全部填成实测结论；产出可重复生成的 `.xlsx` 夹具。
 **完成判定**：`tmp/` 里有真实世界写法的样本工作簿；`packages/sheet-io/scripts/make-sample-sheet.ts`（对齐
 `packages/docx-io/scripts/make-sample.ts`）能产夹具；本文 §二 表格里 P1–P5 从 `[ ]` 变成带证据的结论；P4 明确标 BLOCKED 及替代证据形式。
-**实际结果**：P1/P2/P3/P5 已有带路径的实测结论（§二）；P4 按预期 BLOCKED 并定下替代证据形式；P6 顺延到阶段 5。
+**实际结果**：P1/P2/P3/P5 已有带路径的实测结论（§二）；P4 按预期 BLOCKED 并定下替代证据形式；P6 顺延到阶段 5；
+P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的写侧提交里补做并**通过**，不降级（§二 P7、决策 D5）。
 夹具用 `tmp/xlsx-probe/probe.mjs` 现场生成（`AGENTS.md` §6.5：探针不进主干），主干侧的 `make-sample-sheet.ts` 随阶段 1 首个提交落地。
 额外收获两条：① 未建模结构在**部件内部**（强化了 §零.6）；② `exceljs@4.4.0` 自己写 `dataBar` 条件格式会抛
 `cfvo undefined`（实测），说明它的写路径不可当作"OOXML 正确性"的裁判，只能当夹具。
@@ -374,6 +380,9 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 
 **目标**：AI 选区出图；app 内可看（ECharts），`.xlsx` 内为原生可编辑图表（D5 spike 成功）或明确记录的贴图降级。
 **完成判定**：`ChartSpec` 校验与渲染单测；写出的 chart part 读回结构断言；导出 PDF/docx 报告时图以 PNG 出现；WPS/Excel 可视验证标 BLOCKED 并给出结构级替代证据。
+**进度（2026-10-13）**：写侧已落 `294ce88`——`ChartSpec` 校验单测（解析 3 条 + 落地 4 条）、chart part 的读回结构断言、
+以及 P4 口径的**第三方交叉验证**（openpyxl 3.1.5 把 bar/line/pie 三份产物都读回，系列引用/缓存值/锚点/标题逐条对上）。
+未落：app 内 ECharts 查看、canvas→PNG 报告插图、`sheet_create_chart` 工具面。Word/WPS 可视验证仍 `[!] BLOCKED`（本机无可视通道，`AGENTS.md` §8）。
 
 ### 阶段 6 · 收口：CLI、文档、规则落地
 
@@ -411,8 +420,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | 工具 schema 与 JSON 工具定义 | **实际**：`packages/sheet-tools/src/index.ts`（四个读工具）+ 引擎侧先补三条读口 `packages/sheet-io/src/analysis/sheet-table.ts`（`readRange`/`findRows`/`describeSheet` 的 `maxColumns`），理由见阶段 4 提交 12 | `b87a88b` + `dba6fb4` + `cd65c5b`（提交 12） |
 | 4 | 写侧工具 schema 与提案：`sheet_submit_proposal`（改格/改公式/插删行列/去重/列宽） | **实际**：`packages/sheet-tools/src/index.ts` 的 `SheetEdit` 四类 + `SubmitProposalArgs`。**已定的决策**：排序、拆合列、统一数字格式**不开**——现有四类 op 各自有安全的逆操作，第五类 move op 没建（要建得先解决"撤销整表前像"与 §2.5 的内容寻址），用一批 `setCellTextOp` 凑排序更会把用户后来的手工编辑牵连进去。边界写进工具描述与系统提示词，模型只能提这四项（理由见 §七同一行） | `dba6fb4` + `1f5ec47`（提交 13） |
 | 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | **实际**：`src/ai/sheetAgent.ts`（提示词、`sheetContextOf` 截断拼装、工具环、`sheetOpsOfProposal` 提案→op）+ `electron/aiHandlers.ts` 的 `ai:tool-turn` 一轮转发 + preload/`global.d.ts` 的跨界类型（§5.2 三处一起改）为 `c52c1b7` + `e69780e`（提交 13）。**卡片渲染分支已落**：`src/ai/AIPanel.tsx` 的表格分支（提案卡 / "应用到表格" / 全自动直接落地 / 暂停后"继续"），面板按模式各挂一份会话 key | `c52c1b7` + `e69780e` + `f0f9853` |
-| 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | `packages/sheet-io/src/chart-spec.ts` `src/sheet/ChartView.tsx` | 提交 14 |
-| 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | `packages/sheet-io/src/xlsx-chart.ts` | 提交 15 |
+| 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | **已落**：`packages/sheet-io/src/chart-spec.ts`（`resolveChartSpec` 只收 A1 引用，数值/引用串/显示串一律引擎从现场表取，失败给一句理由；px→EMU 只在这一处）。**未落**：`src/sheet/ChartView.tsx`（ECharts 查看）、canvas→PNG、`sheet_create_chart` 工具面 | `294ce88`（未落部分另起提交） |
+| 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | **实际**：`packages/sheet-io/src/xlsx-chart.ts`（纯 XML 拼装）+ `sheet-file.ts` 的 `SheetFile.addChart`（五件一起登记，`addedParts` 进 `toBytes`、`restoreSnapshot` 一起回退）+ `opc.ts:relativeTarget`（`resolveTarget` 的逆）。原计划的提交 14/15 合成一个 `294ce88`：解析与写入共用同一份测试文件，按文件粒度拆不开，硬拆只会造出编译不过的中间提交 | `294ce88` |
 | 6 | CLI 子命令、README、AGENTS 更新 | `apps/cli/src/**` `README.md` `AGENTS.md` | 提交 16 |
 
 推进纪律：每阶段结束跑一次 `pnpm build > tmp/b.log 2>&1; echo EXIT=$?` 与 `pnpm test > tmp/t.log 2>&1; echo EXIT=$?`
@@ -586,7 +595,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | `e69780e` | B9、B10、B11、B14（代理侧）、§零.4 | `[x]`（代理侧，UI 分支待 13d） | `src/ai/sheetAgent.ts` 跑工具环：上送只有"结构摘要 ≤50 列 + 样本 ≤50 行"，六件工具全部转给 `sheet-io` 执行，非法入参/幻觉方法名回一句话不抛；`sheet_submit_proposal` 的四类条目翻成 op，翻不动的逐条给原因，删行会让手写公式变 `#REF!` 时由引擎的现场核对挡住（单测实测到那条理由）。暂停/继续按"停在轮与轮之间"实现：`isPaused` 收住、`transcript` 带回、继续时不重发摘要，转满 8 轮没结论就停。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **437**（新增 `sheetAgent.test.ts` 14 条）/ sheet-io 176 / sheet-tools 11 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 4 | `f0f9853` | B12、B14（面板侧）、D 组（复用现有卡片样式） | `[x]` | `src/ai/AIPanel.tsx` 多一支 `t:"sheet"` 的条目与 `SheetPanelBridge`（只交载荷 + `onCommitOps`），`App.tsx` 把同一个 `commitSheetOps` 升级成返回 `SheetOpsResult \| null`，好让卡片能如实报"部分写入（x/y）"。零新增 CSS（复用 `.ai-card*`/`.op-list`），面板按模式各挂一份 `key` 让文档与表格的会话互不串台。**真实 app 实跑**（CDP 打构建产物 + 独立 `--user-data-dir`）：半自动提案卡 →"应用到表格"→ `C6` 出现引擎算出的 `360` → Cmd+Z 回到原样；全自动那条 toast"已直接写入表格，可在修改历史里撤销这次改动"；暂停后卡片写"已暂停，工具回合停在两轮之间"，"继续"在同一张卡上收尾。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **437** / sheet-io 176 / sheet-tools 11 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 4 | —（`tmp/` 探针，§6.5 不入主干） | B13、B10 的答复侧交叉核对 | `[x]` | node 侧 `tmp/sheet-agent-probe.mjs` import **同一个** `sheetAgent.ts`，只把 `ask` 换成自己发的 HTTP，三条任务各新开一份 `.xlsx`。序列与数字见 B13。顺带钉死一条环境事实：contextBridge 的属性不可配置，页面 JS 包不了 `aiToolTurn`，工具序列只能 node 侧抓。阶段 4 到此收口，阶段 5（图表）与阶段 6（CLI/文档）另起提交 |
-| 5 | — | D5 落地 | `[ ]` | |
+| 5 | `294ce88` | D5 的写侧（阶段 0 就标了风险的 P7） | `[x]`（写侧；查看/工具面待下一个提交） | `resolveChartSpec` 只收 A1 引用，数值/引用串/显示串一律引擎从现场表取；`SheetFile.addChart` 五件一起登记（图表本体、画图部件、两层关系、content types 两条 Override），表部件只插一个 `<drawing r:id>`。**独立读取器复核**：`tmp/chart-out-{bar,line,pie}.xlsx` 用 openpyxl 3.1.5 读回，`charts=1`、`val='销售'!$C$2:$C$4` 缓存 `120/150/90`、类别缓存 `粗蓝/2月/3月`、锚点 `(col 4,row 1)`、含 `<&"` 的标题原样取回；一张表已有 `<drawing>` 时第二次请求返回 `drawing-exists`，不重排别人的关系。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **183**（新增 `xlsx-chart.test.ts` 7 条）/ sheet-tools 11 / desktop 437 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 5 | 待起 | D5 的 app 内侧（ECharts 查看、canvas→PNG、`sheet_create_chart`） | `[ ]` | 需要先答 §6.4："现有依赖能否覆盖"——仓内没有图表库，相邻先例只有 `apps/desktop/src/ai/diagramCanvas.ts:136 renderDiagram`（canvas 2D → PNG dataURL） |
 | 6 | — | D18/E24–E28 | `[ ]` | |
 
 ---
