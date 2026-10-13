@@ -50,6 +50,7 @@ import {
 } from "./agent.js";
 import { toast } from "../components/ui/Toast.js";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
+import { ChartPreview } from "../sheet/ChartPreview.js";
 import { runSheetAgent } from "./sheetAgent.js";
 import { formatA1 } from "@office-copilot/sheet-io";
 import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
@@ -1672,6 +1673,7 @@ export function AIPanel({
                       ))}
                     </ul>
                   )}
+                  {c.chart && c.status !== "streaming" && <ChartPreview chart={c.chart} />}
                   {c.notes.length > 0 && (
                     <div className="ai-card-notes">
                       {c.notes.map((n, i) => (

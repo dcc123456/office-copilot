@@ -156,3 +156,13 @@
 .ai-session-row:hover .ai-session-del {
   opacity: 1;
 }
+/* 图表预览（spec D5）：Chart.js 在 maintainAspectRatio:false 下按容器尺寸画，容器要有确定高度。 */
+.ai-chart-preview {
+  position: relative;
+  height: 200px;
+  margin: 6px 0;
+  padding: 6px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+}
