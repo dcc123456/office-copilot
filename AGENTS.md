@@ -201,8 +201,11 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
   `tell application "Numbers" to open POSIX file "…"` 之后能问 `count of tables/charts of sheet 1`、
   `value of cell "A1" of table 1`，查完 `close d saving no`。要**分两次 `osascript` 调用**（open 与查询写在一段里报 `-2741`），
   取文档用 `front document` 而不是 `document id …`（后者拿 `table 1` 会 `-1728`）。
+  **`value of cell` 必须挂在 `table` 上**（`cell "C2" of sheet 1` 直接 `-1728`），且 `open` 之后 `count of tables of sheet 1` 可能还是 0——
+  要轮询到表格出现再问（2026-10-13 的重算探针里，一段脚本内 `open` + 轮询 + 读数 + `close saving no` 是跑得通的）。
   **Numbers 宽容，能开不等于内容都在**：一份删掉画图部件关系表的文件它照样打开、`charts=0`（图静默丢了）。
   所以合规判定以审计为准，Numbers 的读数只作"第三方办公软件真的读过这份文件"的证据；图表/字体的**画面效果**仍 BLOCKED。
+  但**格子里的数值**是能问出来的——这是 A4（"公式写回后打开能重算"）目前唯一的实测通道，数字见 `docs/excel-support-spec.md` §五 第 4 条。
 - **表格模式下的保存入口与文档模式不同**：`App.tsx` 里文档工具栏是 `{!isSheet && ...}`，表格模式不渲染它，
   所以⌘S（原生菜单 accelerator）在 CDP 合成键盘事件下根本到不了渲染层；实跑验收走命令面板（⌘K 是渲染层
   `window` 上的 keydown，能合成）点「保存」。
