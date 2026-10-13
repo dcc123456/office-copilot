@@ -278,6 +278,55 @@ describe("回写保真（验收 A1：空改动不许动任何部件）", () => {
   });
 });
 
+describe("保存时让 Excel 自己重算公式（`calcPr/@fullCalcOnLoad`）", () => {
+  /** 打开夹具、用 op 改一格、保存，返回 `xl/workbook.xml` 的部件文本。 */
+  async function saveAndReadWorkbookXml(): Promise<string> {
+    const file = await openSample();
+    const model = (await file.sheetAt(0)) as SheetModel;
+    const applied = runSheetOps(sheetPayloadOf(model), [setCellTextOp(sheetPayloadOf(model), "C2", "42")!]);
+    applySheetPayload(model, applied.after);
+    file.writeSheet(model);
+    return (await partTexts(await file.toBytes()))["xl/workbook.xml"];
+  }
+
+  it("改过表之后保存才补上标记，已有 `<calcPr>` 时只加这一个属性", async () => {
+    const workbookXml = await saveAndReadWorkbookXml();
+    expect(workbookXml).toContain('<calcPr calcId="191029" fullCalcOnLoad="1"/>');
+    expect(workbookXml.match(/fullCalcOnLoad/g)).toHaveLength(1);
+  });
+
+  it("对已带标记的文件再存一遍不叠加（幂等，与 §2.6 同族的约束）", async () => {
+    const marked = await saveAndReadWorkbookXml();
+    const zip = await JSZip.loadAsync(await buildSampleWorkbookBytes());
+    zip.file("xl/workbook.xml", marked);
+    const file = await SheetFile.fromBytes(await zip.generateAsync({ type: "uint8array" }), { fileName: "sample.xlsx" });
+    const model = (await file.sheetAt(0)) as SheetModel;
+    applySheetPayload(model, runSheetOps(sheetPayloadOf(model), [setCellTextOp(sheetPayloadOf(model), "C2", "43")!]).after);
+    file.writeSheet(model);
+    const second = (await partTexts(await file.toBytes()))["xl/workbook.xml"];
+    expect(second.match(/fullCalcOnLoad/g)).toHaveLength(1);
+    expect(second).toContain('<calcPr calcId="191029" fullCalcOnLoad="1"/>');
+  });
+
+  it("原文件没有 `<calcPr>` 时，标记按 schema 顺序插在 `</workbook>` 之前", async () => {
+    const zip = await JSZip.loadAsync(await buildSampleWorkbookBytes());
+    zip.file("xl/workbook.xml", (await zip.file("xl/workbook.xml")!.async("string")).replace('<calcPr calcId="191029"/>', ""));
+    const file = await SheetFile.fromBytes(await zip.generateAsync({ type: "uint8array" }), { fileName: "book.xlsx" });
+    const model = (await file.sheetAt(0)) as SheetModel;
+    applySheetPayload(model, runSheetOps(sheetPayloadOf(model), [setCellTextOp(sheetPayloadOf(model), "C2", "42")!]).after);
+    file.writeSheet(model);
+    expect((await partTexts(await file.toBytes()))["xl/workbook.xml"]).toContain(
+      '</definedNames><calcPr fullCalcOnLoad="1"/></workbook>',
+    );
+  });
+
+  it("没改过任何表时 workbook.xml 逐字节不动（验收 A1）", async () => {
+    const file = await openSample();
+    const original = (await partTexts(await buildSampleWorkbookBytes()))["xl/workbook.xml"];
+    expect((await partTexts(await file.toBytes()))["xl/workbook.xml"]).toBe(original);
+  });
+});
+
 describe("打开失败时的错误码（验收 A6）", () => {
   it("含宏的包直接拒绝，不尝试解析", async () => {
     const zip = await JSZip.loadAsync(await buildSampleWorkbookBytes());

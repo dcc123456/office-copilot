@@ -150,6 +150,8 @@ export class SheetFile {
     if (sstText) file.originalParts.set("xl/sharedStrings.xml", sstText);
     const stylesText = await readText(pkg.zip, "xl/styles.xml");
     if (stylesText) file.originalParts.set("xl/styles.xml", stylesText);
+    // `xl/workbook.xml` 也存原文：保存时要按它现有的样子补 `calcPr/@fullCalcOnLoad`。
+    file.originalParts.set("xl/workbook.xml", workbookXml);
     return file;
   }
 
@@ -285,6 +287,11 @@ export class SheetFile {
     for (const [path, content] of this.rewrittenParts) {
       if (this.originalParts.has(path)) this.pkg.zip.file(path, content);
     }
+    // 改写过任何一张表就要让 Excel 开文件时全量重算：我们只写缓存值，不维护 `calcChain`。
+    const workbookXml = this.originalParts.get("xl/workbook.xml");
+    if (this.rewrittenParts.size > 0 && workbookXml) {
+      this.pkg.zip.file("xl/workbook.xml", withFullCalcOnLoad(workbookXml));
+    }
     if (this.sharedStrings.addedCount > 0) {
       const allLoaded = this.loadedSheets.size === this.refs.length;
       if (allLoaded) this.sharedStrings.setUsageCount(this.countStringReferences());
@@ -304,6 +311,29 @@ export class SheetFile {
     }
     return total;
   }
+}
+
+/** `<calcPr>` 之后还允许出现的元素（ECMA-376 Part 1 §18.2.7 的 CT_Workbook 序列），插入点取第一个命中的。 */
+const AFTER_CALC_PR = ["oleSize", "customWorkbookViews", "pivotCaches", "smartTagPr", "smartTagTypes", "webPublishing", "fileRecoveryPr", "webPublishObjects", "extLst"];
+
+/**
+ * 给 `xl/workbook.xml` 打上"打开即全量重算"的标记。
+ *
+ * 为什么必须打：我们改一格之后，依赖它的公式里 `<v>` 缓存值就旧了，而 `calcChain.xml` 我们既不读也不维护；
+ * 没有这个标记时 Excel 会信任旧缓存值显示出来（用户看到的是改之前的合计）。
+ * `calcPr/@fullCalcOnLoad="1"` 是让消费方打开文件时重算全部公式的开关（ECMA-376 Part 1 §18.2.7）。
+ *
+ * @param workbookXml 原 `xl/workbook.xml` 文本。
+ * @returns 带标记的文本：已有 `<calcPr>` 时只补这一个属性（其余属性原样留），没有时按 schema 顺序插在
+ *   `<calcPr>` 该在的位置；属性已经是 1 时原样返回（重复保存不许叠加）。
+ */
+function withFullCalcOnLoad(workbookXml: string): string {
+  if (/<calcPr\b[^>]*fullCalcOnLoad="1"/.test(workbookXml)) return workbookXml;
+  const existing = /<calcPr\b([^>]*)\/>/.exec(workbookXml);
+  if (existing) return workbookXml.replace(existing[0], `<calcPr${existing[1]} fullCalcOnLoad="1"/>`);
+  const anchor = AFTER_CALC_PR.map((name) => workbookXml.indexOf(`<${name}`)).find((index) => index >= 0);
+  const insertion = anchor ?? workbookXml.indexOf("</workbook>");
+  return `${workbookXml.slice(0, insertion)}<calcPr fullCalcOnLoad="1"/>${workbookXml.slice(insertion)}`;
 }
 
 /**
