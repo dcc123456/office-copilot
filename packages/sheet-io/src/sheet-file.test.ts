@@ -683,9 +683,10 @@ describe("分析读工具跑在真实 .xlsx 上（阶段 4 · 验收 B10/B11 的
  * 单独造这份夹具是为了钉住一个实测缺陷：我们把文本一律写成 `t="s"`，就必须凭空新建这张表，
  * 而**光写部件不算登记**——读方是按 `xl/workbook.xml` 的关系与内容类型找表的。
  *
+ * @param sheetDataInner `<sheetData>` 里要放的内容；默认是纯 inline 文本，传富文本那份可以钉住 run 的保留。
  * @returns `.xlsx` 字节：一张两行两列的小表，A 列文本、B 列数值。
  */
-async function buildInlineOnlyBytes(): Promise<Uint8Array> {
+async function buildInlineOnlyBytes(sheetDataInner = `<row r="1"><c r="A1" t="inlineStr"><is><t>月份</t></is></c><c r="B1" t="inlineStr"><is><t>销售额</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>1月</t></is></c><c r="B2"><v>100</v></c></row>`): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     "[Content_Types].xml",
@@ -709,7 +710,7 @@ async function buildInlineOnlyBytes(): Promise<Uint8Array> {
   );
   zip.file(
     "xl/worksheets/sheet1.xml",
-    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>月份</t></is></c><c r="B1" t="inlineStr"><is><t>销售额</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>1月</t></is></c><c r="B2"><v>100</v></c></row></sheetData></worksheet>`,
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData>${sheetDataInner}</sheetData></worksheet>`,
   );
   return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }
@@ -750,5 +751,58 @@ describe("原文件没有字符串表时把新表登记齐全（实测：openpyx
     expect(parts["xl/_rels/workbook.xml.rels"]).toBe(before["xl/_rels/workbook.xml.rels"]);
     expect(parts["[Content_Types].xml"]).toBe(before["[Content_Types].xml"]);
     expect(parts["xl/sharedStrings.xml"]).toContain("<si><t>四月</t></si>");
+  });
+});
+
+/**
+ * `<is>` 里带 `<r>` run 的 inline 富文本——openpyxl 的 `CellRichText`、部分导出器的实际产出。
+ * A1 三段：粗体的"月"、普通的"份"、红字的"表"。
+ */
+const RICH_INLINE_SHEET_DATA =
+  `<row r="1"><c r="A1" t="inlineStr"><is><r><rPr><b val="1"/></rPr><t>月</t></r><r><t>份</t></r><r><rPr><color rgb="FFFF0000"/></rPr><t>表</t></r></is></c><c r="B1" t="inlineStr"><is><t>销售额</t></is></c></row>` +
+  `<row r="2"><c r="A2" t="inlineStr"><is><t>1月</t></is></c><c r="B2"><v>100</v></c></row>`;
+
+describe("inline 富文本原样回写（实测缺陷：保存一次就把粗体红字拍平成纯文本）", () => {
+  it("一个字都没改的表，run 与整体形状原封不动回到文件里", async () => {
+    const bytes = await buildInlineOnlyBytes(RICH_INLINE_SHEET_DATA);
+    const file = await SheetFile.fromBytes(bytes, { fileName: "rich.xlsx" });
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    expect(sheet.cells["A1"]?.value).toBe("月份表");
+
+    // 桌面保存路径：载荷过一遍跨界层，再按 partPath 配对写回
+    const target = await SheetFile.fromBytes(bytes, { fileName: "rich.xlsx" });
+    const model = (await target.sheetAt(0)) as SheetModel;
+    applySheetPayload(model, sheetPayloadOf(sheet));
+    target.writeSheet(model);
+    const out = await target.toBytes();
+
+    const parts = await partTexts(out);
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain(
+      `<c r="A1" t="inlineStr"><is><r><rPr><b val="1"/></rPr><t>月</t></r><r><t>份</t></r><r><rPr><color rgb="FFFF0000"/></rPr><t>表</t></r></is></c>`,
+    );
+    // 拍平的证据就是这张凭空长出来的表：inline 文本被搬进 `xl/sharedStrings.xml` 时 run 已经没了
+    expect(parts["xl/sharedStrings.xml"]).toBe("");
+
+    const reopened = await SheetFile.fromBytes(out, { fileName: "rich.xlsx" });
+    expect((await reopened.sheetAt(0))?.cells["A1"]?.value).toBe("月份表");
+  });
+
+  it("改过的那一格照常写成共享字符串，没改的那格仍带着 run", async () => {
+    const bytes = await buildInlineOnlyBytes(RICH_INLINE_SHEET_DATA);
+    const file = await SheetFile.fromBytes(bytes, { fileName: "rich.xlsx" });
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const op = setCellTextOp(sheet, "A1", "改过了");
+    if (!op) throw new Error("这一格建不出 op");
+    const result = runSheetOps(sheet, [op]);
+    expect(result.after.cells["A1"]?.rawXml).toBeUndefined();
+    file.writeSheet(result.after as SheetModel);
+
+    const parts = await partTexts(await file.toBytes());
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain(`<c r="A1" t="s"><v>0</v></c>`);
+    expect(parts["xl/sharedStrings.xml"]).toContain("<si><t>改过了</t></si>");
+    expect(parts["xl/worksheets/sheet1.xml"]).toContain('<c r="B1" t="inlineStr"><is><t>销售额</t></is></c>');
+
+    const reopened = await SheetFile.fromBytes(await file.toBytes(), { fileName: "rich.xlsx" });
+    expect((await reopened.sheetAt(0))?.cells["A1"]?.value).toBe("改过了");
   });
 });

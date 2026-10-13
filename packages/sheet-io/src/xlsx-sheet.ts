@@ -377,6 +377,9 @@ function parseCell(
       const isEl = firstChild(cellEl, "is");
       cell.kind = "string";
       cell.value = isEl ? text(isEl) : "";
+      // `<is>` 里的 `<r>` 富文本 run（粗体、颜色）我们没有建模，转成共享字符串必然把它们拍平（§2.3）。
+      // 整格原文留着，改值时由 `setCellTextOp` 换新格自然丢掉。
+      cell.rawXml = serialize(cellEl);
       break;
     }
     case "b":
