@@ -255,11 +255,27 @@ const PLAIN_NUMBER_PATTERN = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 const PERCENT_PATTERN = /^-?\d+(?:\.\d+)?%$/;
 
 /**
+ * 选一个"显示出来跟用户敲进去的一模一样"的百分比格式。
+ *
+ * 为什么不是所有百分比都套内建 10 号：ECMA-376 里 10 是 `0.00%`、9 才是 `0%`，
+ * 一律给 10 会让键入 `12%` 显示成 `12.00%`（实测记在 spec §七）。内建表盖不住的位数
+ * 用自定义格式码表达，保存时由 `StyleTable` 追加进 `<numFmts>`。
+ *
+ * @param decimals 用户输入里小数点后的位数（`12.50%` → 2）。
+ * @returns 写进 `SheetCell.numberFormat` 的显示意图。
+ */
+function percentFormatWithDecimals(decimals: number): ResolvedNumberFormat {
+  if (decimals === 0) return { numFmtId: 9, isDateLike: false };
+  if (decimals === 2) return { numFmtId: 10, isDateLike: false };
+  return { numFmtId: 0, formatCode: `0.${"0".repeat(decimals)}%`, isDateLike: false };
+}
+
+/**
  * 把用户在手改单元格里输入的文本解析成格子内容（`AGENTS.md` §2.1：日期 ↔ 序列号只能在这里换算）。
  *
  * @param text 编辑器里的原文；前后空白会被忽略。
  * @returns `kind`/`value`，以及输入自己暗示的数字格式（`2026-01-31` → 内建日期格式、
- *   `12%` → 百分号格式）；空文本返回 `kind:"blank"` 且 `value:null`，调用方据此删格。
+ *   `12%` → 与输入小数位数一致的百分号格式）；空文本返回 `kind:"blank"` 且 `value:null`，调用方据此删格。
  */
 export function parseUserCellText(text: string): ParsedCellInput {
   const trimmed = text.trim();
@@ -268,7 +284,9 @@ export function parseUserCellText(text: string): ParsedCellInput {
   if (trimmed.toUpperCase() === "FALSE") return { kind: "boolean", value: false };
   if (PLAIN_NUMBER_PATTERN.test(trimmed)) return { kind: "number", value: Number(trimmed) };
   if (PERCENT_PATTERN.test(trimmed)) {
-    return { kind: "number", value: Number(trimmed.slice(0, -1)) / 100, numberFormat: { numFmtId: 10, isDateLike: false } };
+    const body = trimmed.slice(0, -1);
+    const decimals = body.includes(".") ? body.split(".")[1]!.length : 0;
+    return { kind: "number", value: Number(body) / 100, numberFormat: percentFormatWithDecimals(decimals) };
   }
   const dateMatch = ISO_DATE_PATTERN.exec(trimmed);
   if (dateMatch) {

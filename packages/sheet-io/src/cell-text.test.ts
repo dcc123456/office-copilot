@@ -66,9 +66,20 @@ describe("用户输入解析（§2.1：日期 ↔ 序列号只在这里发生）
   });
 
   it("百分号吃成小数并带百分比格式；TRUE/FALSE 吃成布尔；空串是空格", () => {
-    expect(parseUserCellText("12%")).toEqual({ kind: "number", value: 0.12, numberFormat: { numFmtId: 10, isDateLike: false } });
+    expect(parseUserCellText("12%")).toEqual({ kind: "number", value: 0.12, numberFormat: { numFmtId: 9, isDateLike: false } });
     expect(parseUserCellText("true")).toEqual({ kind: "boolean", value: true });
     expect(parseUserCellText("   ")).toEqual({ kind: "blank", value: null });
     expect(parseUserCellText("合计 3 项")).toEqual({ kind: "string", value: "合计 3 项" });
+  });
+
+  it("百分比显示回敲进去的原话：几位小数就显示几位（内建 9/10 盖不住的走自定义码）", () => {
+    for (const typed of ["12%", "-12%", "0%", "12.5%", "12.50%", "12.500%"]) {
+      const parsed = parseUserCellText(typed);
+      expect(cellDisplayText(cell({ kind: parsed.kind, value: parsed.value, numberFormat: parsed.numberFormat }))).toBe(typed);
+    }
+    // 两位以内不凭空造自定义格式，Excel 的样式表才不会为每个百分号长一条 numFmt
+    expect(parseUserCellText("12%")?.numberFormat).toEqual({ numFmtId: 9, isDateLike: false });
+    expect(parseUserCellText("12.50%")?.numberFormat).toEqual({ numFmtId: 10, isDateLike: false });
+    expect(parseUserCellText("12.5%")?.numberFormat).toEqual({ numFmtId: 0, formatCode: "0.0%", isDateLike: false });
   });
 });
