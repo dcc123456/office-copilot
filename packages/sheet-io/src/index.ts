@@ -77,6 +77,8 @@ export {
   aggregateSheet,
   describeSheet,
   duplicateGroups,
+  findRows,
+  readRange,
   resolveColumnRef,
   type AggregateFunction,
   type AggregateGroup,
@@ -86,6 +88,12 @@ export {
   type DescribeOptions,
   type DuplicateGroup,
   type DuplicateResult,
+  type FindHit,
+  type FindInput,
+  type FindResult,
+  type RangeRead,
+  type RangeRow,
+  type ReadRangeInput,
   type SheetProfile,
 } from "./analysis/sheet-table.js";
 export {

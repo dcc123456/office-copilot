@@ -486,10 +486,13 @@ function isNumericText(text: string): boolean {
 /**
  * 生成条件判定：支持 `>100`、`<=2`、`<>x`、`=文本`、纯文本（等于）与纯数字（相等）。
  *
+ * 除了 `COUNTIF`/`SUMIF` 求值，`analysis/sheet-table` 的按条件定位也用它，
+ * 好让"工具层筛出来的行"与"公式算出来的行"是同一套口径（验收 B10）。
+ *
  * @param raw 条件实参。
  * @returns 判定函数；写不出可比较的式子返回 null。
  */
-function toCriteria(raw: ArgumentValue): ((value: FormulaValue) => boolean) | null {
+export function toCriteria(raw: ArgumentValue): ((value: FormulaValue) => boolean) | null {
   const value = scalar(raw);
   if (typeof value === "number") return (candidate) => compare(candidate, value, "=");
   if (typeof value !== "string") return null;

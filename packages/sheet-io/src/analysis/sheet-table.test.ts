@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateSheet, describeSheet, duplicateGroups, resolveColumnRef } from "./sheet-table.js";
+import { aggregateSheet, describeSheet, duplicateGroups, findRows, readRange, resolveColumnRef } from "./sheet-table.js";
 import { indexToColName } from "../address.js";
 import type { SheetCell } from "../model.js";
 import type { SheetPayload } from "../sheet-dto.js";
@@ -93,6 +93,19 @@ describe("describeSheet：结构摘要 + 逐列统计", () => {
     expect(profile.columnCount).toBe(0);
     expect(profile.usedRange).toBeUndefined();
     expect(profile.columns).toEqual([]);
+  });
+
+  it("宽表只报前 maxColumns 列，columnCount 仍是真实列数（验收 B11 的结构摘要）", () => {
+    const columnCount = 60;
+    const wide = sheetOf([
+      Array.from({ length: columnCount }, (_, position) => `列${position + 1}`),
+      Array.from({ length: columnCount }, (_, position) => position),
+    ]);
+    const capped = describeSheet(wide, { maxColumns: 8 });
+    expect(capped.columns.map((column) => column.header)).toEqual(["列1", "列2", "列3", "列4", "列5", "列6", "列7", "列8"]);
+    expect(capped).toMatchObject({ columnCount, columnsTruncated: true });
+    expect(describeSheet(wide).columns.length).toBe(50);
+    expect(describeSheet(sampleSheet()).columnsTruncated).toBe(false);
   });
 });
 
@@ -214,5 +227,91 @@ describe("duplicateGroups：去重键的行数算得出来", () => {
     const result = duplicateGroups(sampleSheet(), { keys: ["库存"] });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("库存");
+  });
+});
+
+describe("readRange：上送给模型看的行样本（截断在这里收口，验收 B11）", () => {
+  it("默认读满整块区域，行列数与实际给出的范围一致", () => {
+    const read = readRange(sampleSheet(), { range: "A1:C3" });
+    expect(read).toMatchObject({ ok: true, ref: "A1:C3", rowCount: 3, colCount: 3, truncated: false });
+    expect(read.rows.map((row) => row.rowNumber)).toEqual([1, 2, 3]);
+    expect(read.rows[1]!.cells).toEqual(["1月", "华东", "100"]);
+  });
+
+  it("单格写法按 1×1 区域读，空格拉成空串而不是 null", () => {
+    const read = readRange(sheetOf([["月份", null], ["1月", 100]]), { range: "B1" });
+    expect(read).toMatchObject({ ok: true, ref: "B1", rowCount: 1, colCount: 1 });
+    expect(read.rows[0]!.cells).toEqual([""]);
+  });
+
+  it("maxRows 只截行，ref 报到实际读出的那一行、rowCount 仍是区域真实行数", () => {
+    const rows: Array<[string, number]> = [["月份", "销售额"]];
+    for (let month = 1; month <= 60; month += 1) rows.push([`${month}月`, month]);
+    const read = readRange(sheetOf(rows), { range: "A2:B60", maxRows: 5 });
+    expect(read).toMatchObject({ ok: true, ref: "A2:B6", rowCount: 59, colCount: 2, truncated: true });
+    expect(read.rows.map((row) => row.rowNumber)).toEqual([2, 3, 4, 5, 6]);
+    expect(read.rows[4]!.cells).toEqual(["5月", "5"]);
+  });
+
+  it("一格长文本按 120 字收过，免得一格撑爆上下文", () => {
+    const read = readRange(sheetOf([["备注"], ["长".repeat(200)]]), { range: "A1:A2" });
+    expect(read.rows[1]!.cells[0]!.length).toBe(121);
+    expect(read.rows[1]!.cells[0]!.endsWith("…")).toBe(true);
+  });
+
+  it("带公式但没有缓存值的格显示成空串，不把公式体当数字上送", () => {
+    const sheet = sheetOf([
+      ["月份", "销售额"],
+      ["1月", 100],
+      ["2月", null],
+    ]);
+    sheet.cells.B3 = { address: "B3", colIndex: 1, rowIndex: 2, kind: "number", value: null, formula: "SUM(B2:B2)" };
+    expect(readRange(sheet, { range: "A1:B3" }).rows[2]!.cells).toEqual(["2月", ""]);
+  });
+
+  it("区域写法认不出来时给理由，不抛异常（验收 B9）", () => {
+    const read = readRange(sampleSheet(), { range: "这块区域写错了" });
+    expect(read.ok).toBe(false);
+    expect(read.reason).toContain("这块区域写错了");
+    expect(read.rows).toEqual([]);
+  });
+});
+
+describe("findRows：条件判定与 COUNTIF 共用一套口径（验收 B10）", () => {
+  it("数值条件命中若干行，地址与行号都是网格上看到的 1 基", () => {
+    const result = findRows(sampleSheet(), { column: "销售额", criteria: ">150" });
+    expect(result).toMatchObject({ ok: true, matchedCount: 2, truncated: false });
+    expect(result.hits.map((hit) => `${hit.address}:${hit.display}`)).toEqual(["C3:200", "C4:300"]);
+  });
+
+  it("文本条件按相等比较，<> 取反；表头行不参与命中", () => {
+    expect(findRows(sampleSheet(), { column: "区域", criteria: "华北" }).hits.map((hit) => hit.rowNumber)).toEqual([3]);
+    expect(findRows(sampleSheet(), { column: "区域", criteria: "<>华东" }).matchedCount).toBe(1);
+    expect(findRows(sampleSheet(), { column: "销售额", criteria: ">=100" }).hits.map((hit) => hit.rowNumber)).toEqual([2, 3, 4, 5]);
+  });
+
+  it("带公式的格用缓存值参与比较，没有缓存值就当空", () => {
+    const sheet = sheetOf([
+      ["月份", "销售额"],
+      ["1月", 100],
+      ["2月", null],
+    ]);
+    sheet.cells.B3 = { address: "B3", colIndex: 1, rowIndex: 2, kind: "number", value: null, formula: "SUM(B2:B2)", cachedValue: 500 };
+    expect(findRows(sheet, { column: "销售额", criteria: ">150" }).hits.map((hit) => hit.rowNumber)).toEqual([3]);
+    sheet.cells.B3!.cachedValue = null;
+    expect(findRows(sheet, { column: "销售额", criteria: ">150" }).matchedCount).toBe(0);
+  });
+
+  it("limit 只截 hits，matchedCount 不受影响", () => {
+    const result = findRows(sampleSheet(), { column: "销售额", criteria: ">=100", limit: 1 });
+    expect(result).toMatchObject({ ok: true, matchedCount: 4, truncated: true });
+    expect(result.hits.length).toBe(1);
+  });
+
+  it("列认不出来时给可读理由而不是崩溃（验收 B9）", () => {
+    const result = findRows(sampleSheet(), { column: "库存", criteria: ">1" });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("库存");
+    expect(result.hits).toEqual([]);
   });
 });

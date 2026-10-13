@@ -1,15 +1,17 @@
 /**
- * 表级分析：结构画像、分组聚合与重复行定位（spec 阶段 4「分析数据 / 数据整理」的引擎侧）。
+ * 表级分析：结构画像、区域取数、按条件定位、分组聚合与重复行（spec 阶段 4「分析数据 / 数据整理」的引擎侧）。
  *
- * 三条约束决定了本文件的形状：
+ * 四条约束决定了本文件的形状：
  * - **数字由这里算**（`AGENTS.md` §2.8、spec §零.4，验收 B10）：模型只允许指定"按哪几列分组、对哪列做什么聚合"。
- * - **认不出来给理由而不是崩溃**（验收 B9）：列引用解析失败返回 `ok:false` + `reason`，工具层把这条错误串回给模型。
- * - **上送内容可控**（spec §零.5）：分组报告默认只回前 `GROUP_REPORT_LIMIT` 组，其余只给计数。
+ * - **认不出来给理由而不是崩溃**（验收 B9）：列引用与区域写法解析失败返回 `ok:false` + `reason`，工具层把这条错误串回给模型。
+ * - **上送内容可控**（spec §零.5，验收 B11）：列画像、行样本、分组与命中条数都在这里有上限，其余只给计数。
+ * - **条件口径与公式一致**：`findRows` 复用 `formula-eval.toCriteria`，工具筛出的行与 `COUNTIF` 数出的行同一套判定。
  * 显示串一律走 `cellDisplayText`/`formatNumberForDisplay`，本文件不自己换算单位（§2.1）。
  */
-import { colNameToIndex, formatRange, indexToColName } from "../address.js";
+import { colNameToIndex, formatA1, formatRange, indexToColName, parseA1, parseRange, type A1Range } from "../address.js";
 import { cellDisplayText, formatNumberForDisplay } from "../cell-text.js";
-import type { SheetCell } from "../model.js";
+import { toCriteria } from "../formula-eval.js";
+import type { CellScalarValue, SheetCell } from "../model.js";
 import type { SheetPayload } from "../sheet-dto.js";
 import { cellNumberValue, profileColumn, type ColumnProfile } from "./column-profile.js";
 
@@ -26,6 +28,8 @@ export interface AggregateSpec {
 export interface DescribeOptions {
   /** 首行是不是表头（默认 true）。为 true 时首行不进统计，列名取首行文本。 */
   hasHeader?: boolean;
+  /** 最多描述多少列（默认 `COLUMN_REPORT_LIMIT`）；多余的列只报计数，不进上送内容（验收 B11）。 */
+  maxColumns?: number;
 }
 
 /** `aggregateSheet` 的输入。 */
@@ -51,6 +55,8 @@ export interface SheetProfile {
   /** 表头缺失或重复时的提示，上层必须带给人看，不许静默按列号猜。 */
   headerWarnings: string[];
   columns: ColumnProfile[];
+  /** 列画像是否被 `maxColumns` 截断（截断时 `columnCount` 仍是真实列数）。 */
+  columnsTruncated: boolean;
 }
 
 /** 一个分组：键 + 组内行号 + 引擎算出的聚合值。 */
@@ -98,6 +104,76 @@ export interface DuplicateResult {
 
 /** 分组报告的默认条数上限（与 `column-profile` 同一口径：只报前若干条，其余给计数）。 */
 const GROUP_REPORT_LIMIT = 50;
+
+/** 画像默认最多描述多少列（宽表只报前若干列，验收 B11 的"结构摘要上送"）。 */
+const COLUMN_REPORT_LIMIT = 50;
+
+/** 区域取数默认最多读多少行（验收 B11：≤50 行样本）。 */
+const RANGE_ROW_LIMIT = 50;
+
+/** 单格显示文本的上限（与 Word 侧"每段 ≤120 字"同一口径，防止一格把上下文撑爆）。 */
+const CELL_TEXT_LIMIT = 120;
+
+/** `readRange` 的输入。 */
+export interface ReadRangeInput {
+  /** A1 区域写法（`A1:D20`）；写成单格（`C2`）也收，按 1×1 区域读。 */
+  range: string;
+  /** 最多读多少行（默认 `RANGE_ROW_LIMIT`），再多只报总行数、不进上送内容。 */
+  maxRows?: number;
+}
+
+/** 区域里读出的一行。 */
+export interface RangeRow {
+  /** 1 基行号，与网格里看到的行号一致。 */
+  rowNumber: number;
+  /** 每格的显示文本（单位换算只在 `sheet-io` 发生，`AGENTS.md` §2.1）；长文本按 `CELL_TEXT_LIMIT` 收过。 */
+  cells: string[];
+}
+
+/** `readRange` 的结果。 */
+export interface RangeRead {
+  ok: boolean;
+  /** 区域认不出来时的理由；成功为 undefined。工具层把它原样回给模型，不许改成崩溃。 */
+  reason?: string;
+  /** 实际读出的 A1 区域（被 `maxRows` 截断时是截断后的范围）。 */
+  ref: string;
+  /** 区域内的总行数（截断之前的真实值）。 */
+  rowCount: number;
+  colCount: number;
+  rows: RangeRow[];
+  truncated: boolean;
+}
+
+/** `findRows` 的输入。 */
+export interface FindInput {
+  /** 比较哪一列：列字母或表头原文，与 `aggregateSheet` 同一套引用写法。 */
+  column: string;
+  /** COUNTIF 风格的条件：`>100`、`<=2`、`<>北京`、`北京`（等于）、`12`（相等）。 */
+  criteria: string;
+  hasHeader?: boolean;
+  /** 最多报几条命中（默认 `GROUP_REPORT_LIMIT`）；`matchedCount` 不受它影响。 */
+  limit?: number;
+}
+
+/** 一条命中行。 */
+export interface FindHit {
+  /** 命中格的 A1 地址（改哪一格就引用它）。 */
+  address: string;
+  /** 1 基行号。 */
+  rowNumber: number;
+  /** 命中格自己的显示文本（模型引用这条命中时用它，不必再取一次区域）。 */
+  display: string;
+}
+
+/** `findRows` 的结果。 */
+export interface FindResult {
+  ok: boolean;
+  reason?: string;
+  hits: FindHit[];
+  /** 命中总行数（`hits` 可能被 `limit` 截断）。 */
+  matchedCount: number;
+  truncated: boolean;
+}
 
 /**
  * 把浮点尾差收进 15 位有效数字（Excel 的显示口径，`formatNumberForDisplay` 也这么收）。
@@ -187,11 +263,12 @@ export function resolveColumnRef(sheet: SheetPayload, ref: string, hasHeader: bo
  * 生成表画像：逐列的类型推断与统计（数字一律由 `column-profile` 算，模型不参与心算）。
  *
  * @param sheet 表载荷。
- * @param options 见 `DescribeOptions`；默认把首行当表头。
+ * @param options 见 `DescribeOptions`；默认把首行当表头、最多描述 `COLUMN_REPORT_LIMIT` 列。
  * @returns `SheetProfile`；空表返回 `rowCount: 0`、`columns: []`，不抛异常。
  */
 export function describeSheet(sheet: SheetPayload, options: DescribeOptions = {}): SheetProfile {
   const hasHeader = options.hasHeader ?? true;
+  const maxColumns = options.maxColumns ?? COLUMN_REPORT_LIMIT;
   const empty = sheet.lastColIndex < 0 || sheet.lastRowIndex < 0;
   const columns: ColumnProfile[] = [];
   const headerWarnings: string[] = [];
@@ -223,7 +300,8 @@ export function describeSheet(sheet: SheetPayload, options: DescribeOptions = {}
     columnCount: empty ? 0 : sheet.lastColIndex + 1,
     hasHeader,
     headerWarnings,
-    columns,
+    columns: columns.slice(0, maxColumns),
+    columnsTruncated: columns.length > maxColumns,
   };
 }
 
@@ -349,4 +427,112 @@ export function duplicateGroups(sheet: SheetPayload, input: { keys: string[]; ha
     groups: duplicated.slice(0, limit).map((bucket) => ({ key: bucket.groupValues.join(" / "), rowNumbers: bucket.rowNumbers, count: bucket.rowNumbers.length })),
     redundantRowCount: duplicated.reduce((sum, bucket) => sum + bucket.rowNumbers.length - 1, 0),
   };
+}
+
+/**
+ * 读一块区域的显示文本（AI 要看"这几行长什么样"时用它）。
+ *
+ * 行数与单格长度都在这里收口（验收 B11），调用方不必再自己截断；`ref` 回的是**实际读出**的范围，
+ * 模型据此知道剩下的行没上送。文本一律走 `cellDisplayText`，本文件不出现第二处单位换算（§2.1）。
+ *
+ * @param sheet 表载荷。
+ * @param input 见 `ReadRangeInput`。
+ * @returns `RangeRead`；区域写法认不出时 `ok:false` + 理由，不抛异常（验收 B9）。
+ */
+export function readRange(sheet: SheetPayload, input: ReadRangeInput): RangeRead {
+  const bounds = parseRangeOrCell(input.range);
+  if (!bounds) {
+    return { ok: false, reason: `认不出区域「${input.range}」，请写成 A1:D20 或 C2 这样的形式。`, ref: "", rowCount: 0, colCount: 0, rows: [], truncated: false };
+  }
+  const maxRows = Math.max(1, input.maxRows ?? RANGE_ROW_LIMIT);
+  const letters: string[] = [];
+  for (let colIndex = bounds.start.colIndex; colIndex <= bounds.end.colIndex; colIndex += 1) letters.push(indexToColName(colIndex));
+  const lastRow = Math.min(bounds.end.rowIndex, bounds.start.rowIndex + maxRows - 1);
+  const rows: RangeRow[] = [];
+  for (let rowIndex = bounds.start.rowIndex; rowIndex <= lastRow; rowIndex += 1) {
+    rows.push({
+      rowNumber: rowIndex + 1,
+      cells: letters.map((letter) => {
+        const cell = sheet.cells[`${letter}${rowIndex + 1}`];
+        return cell ? clipCellText(cellDisplayText(cell)) : "";
+      }),
+    });
+  }
+  return {
+    ok: true,
+    ref: formatRange({ start: bounds.start, end: { colIndex: bounds.end.colIndex, rowIndex: lastRow } }),
+    rowCount: bounds.end.rowIndex - bounds.start.rowIndex + 1,
+    colCount: letters.length,
+    rows,
+    truncated: lastRow < bounds.end.rowIndex,
+  };
+}
+
+/**
+ * 按 COUNTIF 风格的条件定位数据行（"找出销售额 >100 的行"）。
+ *
+ * 判定函数与公式求值共用 `formula-eval.toCriteria`，所以工具筛出来的行与 `COUNTIF` 数出来的行
+ * 是同一个口径（验收 B10）；日期列按序列号比较，这一条要在工具描述里对人讲明。
+ *
+ * @param sheet 表载荷。
+ * @param input 见 `FindInput`。
+ * @returns `FindResult`；列认不出或条件写不出可比形式时 `ok:false` + 理由，不抛异常。
+ */
+export function findRows(sheet: SheetPayload, input: FindInput): FindResult {
+  const hasHeader = input.hasHeader ?? true;
+  const limit = Math.max(1, input.limit ?? GROUP_REPORT_LIMIT);
+  const colIndex = resolveColumnRef(sheet, input.column, hasHeader);
+  if (colIndex === null) return { ok: false, reason: `认不出列「${input.column}」，请改用列字母或表头原文。`, hits: [], matchedCount: 0, truncated: false };
+  const criteria = toCriteria(input.criteria);
+  if (!criteria) {
+    return { ok: false, reason: `条件「${input.criteria}」没法比较，可写成 >100、<=2、<>北京，或直接写要等于的值。`, hits: [], matchedCount: 0, truncated: false };
+  }
+  const letter = indexToColName(colIndex);
+  const { from, to } = dataRowRange(sheet, hasHeader);
+  const hits: FindHit[] = [];
+  let matchedCount = 0;
+  for (let rowIndex = from; rowIndex <= to; rowIndex += 1) {
+    const cell = sheet.cells[`${letter}${rowIndex + 1}`] ?? null;
+    if (!criteria(comparableValue(cell))) continue;
+    matchedCount += 1;
+    const address = formatA1({ colIndex, rowIndex });
+    if (address && hits.length < limit) hits.push({ address, rowNumber: rowIndex + 1, display: cell ? clipCellText(cellDisplayText(cell)) : "" });
+  }
+  return { ok: true, hits, matchedCount, truncated: matchedCount > hits.length };
+}
+
+/**
+ * 把 `A1:D20` 或单格 `C2` 解析成起止坐标。
+ *
+ * @param range 区域或单格的 A1 写法。
+ * @returns 起止坐标；两种写法都认不出时返回 null（调用方给理由，不抛异常）。
+ */
+function parseRangeOrCell(range: string): A1Range | null {
+  const trimmed = range.trim();
+  const asRange = parseRange(trimmed);
+  if (asRange) return asRange;
+  const single = parseA1(trimmed);
+  return single ? { start: single, end: single } : null;
+}
+
+/**
+ * 收过单格显示文本的长度。
+ *
+ * @param text `cellDisplayText` 出来的原文。
+ * @returns 不超过 `CELL_TEXT_LIMIT` 字的文本；超长时截断并加省略号（与 Word 侧"每段 ≤120 字"同一口径）。
+ */
+function clipCellText(text: string): string {
+  return text.length <= CELL_TEXT_LIMIT ? text : `${text.slice(0, CELL_TEXT_LIMIT)}…`;
+}
+
+/**
+ * 取一格参与条件比较的值。
+ *
+ * @param cell 格子（null 表示空）。
+ * @returns 比较用的标量；带公式的格用缓存值，没有缓存值就当空（Excel 重算前它本来没有可比数字）。
+ */
+function comparableValue(cell: SheetCell | null): CellScalarValue {
+  if (!cell || cell.kind === "blank") return null;
+  if (cell.formula) return cell.cachedValue ?? null;
+  return cell.value;
 }

@@ -5,6 +5,7 @@ import { cellDisplayText, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
 import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp } from "./sheet-edit.js";
+import { describeSheet, findRows, readRange } from "./analysis/sheet-table.js";
 import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
 const SAMPLE_PART_PATHS = [
@@ -631,5 +632,45 @@ describe("公式落盘（spec 阶段 4 D4：`<f>` 交给 Excel，缓存值 `<v>`
     expect(edited.partXml).toContain(`<c r="C2" s="${payload.cells["C2"]?.styleIndex}"><f>C3+C4</f><v>240</v></c>`);
     // 缓存值仍按这一格自己的数字格式显示（实测夹具 `@s=1` 是内建 3：千分位、不带小数）
     expect(cellDisplayText(edited.sheet.cells["C2"]!)).toBe("240");
+  });
+});
+
+describe("分析读工具跑在真实 .xlsx 上（阶段 4 · 验收 B10/B11 的落盘证据）", () => {
+  /** 打开夹具第一张表并换成分析函数吃的载荷。 */
+  async function samplePayload(): Promise<SheetPayload> {
+    return sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+  }
+
+  it("表画像的行列数与逐列数字都来自文件，合计与表里那条公式的缓存值对上", async () => {
+    const payload = await samplePayload();
+    const profile = describeSheet(payload);
+    expect(profile).toMatchObject({ sheetName: "销售", usedRange: "A1:J4", rowCount: 3, columnCount: 10, columnsTruncated: false });
+    const sales = profile.columns[2]!;
+    expect(sales).toMatchObject({ header: "销量", type: "number", populated: 3 });
+    expect(sales.numeric).toMatchObject({ count: 3, sum: 360, min: 90, max: 150 });
+    // G2 存着 Excel 留下的 `SUM(C2:C4)` 缓存值：引擎自己算出的合计必须与它一致
+    expect(payload.cells.G2?.cachedValue).toBe(sales.numeric?.sum);
+    expect(profile.columns[3]!.type).toBe("date");
+    expect(profile.columns[6]!.header).toBe("G");
+  });
+
+  it("readRange 的显示串与网格一致：日期按单元格格式、百分比带百分号、富文本合成一句", async () => {
+    const read = readRange(await samplePayload(), { range: "A1:F4" });
+    expect(read).toMatchObject({ ok: true, ref: "A1:F4", rowCount: 4, colCount: 6, truncated: false });
+    expect(read.rows.map((row) => row.rowNumber)).toEqual([1, 2, 3, 4]);
+    expect(read.rows[0]!.cells).toEqual(["月份", "地区", "销量", "日期", "增长", "备注"]);
+    expect(read.rows[1]!.cells[0]).toBe("粗蓝");
+    expect(read.rows[1]!.cells[2]).toBe("120");
+    expect(read.rows[1]!.cells[4]).toBe("12.00%");
+    expect(read.rows[1]!.cells[5]).toBe("");
+  });
+
+  it("findRows 的条件口径在真实表上成立，命中给的是能直接引用的地址", async () => {
+    const payload = await samplePayload();
+    const hits = findRows(payload, { column: "销量", criteria: ">100" });
+    expect(hits).toMatchObject({ ok: true, matchedCount: 2, truncated: false });
+    expect(hits.hits.map((hit) => `${hit.address}:${hit.display}`)).toEqual(["C2:120", "C3:150"]);
+    expect(findRows(payload, { column: "地区", criteria: "<>华东" }).hits.map((hit) => hit.rowNumber)).toEqual([4]);
+    expect(findRows(payload, { column: "月份", criteria: "3月" }).hits.map((hit) => hit.address)).toEqual(["A4"]);
   });
 });
