@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AggregateArgs, DescribeArgs, DuplicatesArgs, FindArgs, ReadRangeArgs, SHEET_TOOLS, SHEET_TOOL_SCHEMAS, SubmitProposalArgs, parseToolArguments, type SheetToolName } from "./index.js";
+import { AggregateArgs, CreateChartArgs, DescribeArgs, DuplicatesArgs, FindArgs, ReadRangeArgs, SHEET_TOOLS, SHEET_TOOL_SCHEMAS, SubmitProposalArgs, parseToolArguments, type SheetToolName } from "./index.js";
 
 /**
  * 解析一段入参并只取失败理由，断言"B9：给模型的是错误串"时用。
@@ -50,6 +50,20 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(reasonOf("sheet_duplicates", '{"keys":[]}')).toContain("keys");
   });
 
+  it("图表入参只收 A1 引用：合法形状过校验，图型/条数/多余键各给理由", () => {
+    expect(CreateChartArgs.parse({ kind: "bar", categories: "A2:A4", series: [{ values: "C2:C4", name: "C1" }], anchor: "E2" })).toEqual({
+      kind: "bar",
+      categories: "A2:A4",
+      series: [{ values: "C2:C4", name: "C1" }],
+      anchor: "E2",
+    });
+    expect(reasonOf("sheet_create_chart", '{"kind":"radar","categories":"A2:A4","series":[{"values":"C2:C4"}],"anchor":"E2"}')).toContain("kind");
+    expect(reasonOf("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[],"anchor":"E2"}')).toContain("series");
+    expect(reasonOf("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[{"values":"C2:C4","data":[1,2,3]}],"anchor":"E2"}')).toContain("data");
+    expect(reasonOf("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[{"values":"C2:C4"}]}')).toContain("anchor");
+    expect(reasonOf("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[{"values":"C2:C4"}],"anchor":"E2","widthPx":60}')).toContain("widthPx");
+  });
+
   it("越界与空值给理由，不抛异常", () => {
     expect(reasonOf("sheet_read_range", '{"range":"A1:D20","maxRows":201}')).toContain("maxRows");
     expect(reasonOf("sheet_read_range", '{"range":""}')).toContain("range");
@@ -87,6 +101,7 @@ describe("读工具面的入参校验（spec 阶段 4 · 验收 B9）", () => {
     expect(requiredOf("sheet_find")).toEqual(["column", "criteria"]);
     expect(requiredOf("sheet_describe")).toEqual([]);
     expect(requiredOf("sheet_duplicates")).toEqual(["keys"]);
+    expect(requiredOf("sheet_create_chart")).toEqual(["anchor", "categories", "kind", "series"]);
     expect(requiredOf("sheet_submit_proposal")).toEqual(["edits", "summary"]);
   });
 

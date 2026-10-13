@@ -127,6 +127,37 @@ const DeleteRowsEdit = z
   })
   .strict();
 
+/** 一条数据系列：数值区域 + 可选的系列名单格引用（spec 决策 D5）。 */
+const ChartSeries = z
+  .object({
+    values: z.string().min(1).max(20).describe("数值区域，**一列或一行**，如 C2:C4；二维区域会被拒。"),
+    name: z
+      .string()
+      .min(1)
+      .max(12)
+      .optional()
+      .describe("系列名的单格地址，通常是表头那一格（如 C1）。省略时用列字母当名。"),
+  })
+  .strict();
+
+/**
+ * `sheet_create_chart` 的入参：只有 A1 引用，没有任何数值。
+ *
+ * 数值、引用串、类别显示串一律由 `sheet-io` 的 `resolveChartSpec` 从现场表取（验收 B10），
+ * 这里只约束形状；取不到数时引擎回一句理由，模型改引用再来。
+ */
+export const CreateChartArgs = z
+  .object({
+    kind: z.enum(["bar", "line", "pie"]).describe("图型：柱状 bar / 折线 line / 饼图 pie，只有这三种。"),
+    categories: z.string().min(1).max(20).describe("类别轴区域，一列或一行，如 A2:A4；条数必须与每条系列的数值个数一致。"),
+    series: z.array(ChartSeries).min(1).max(8).describe("要画的数据系列，1~8 条；数值由引擎读表得到，你不许自己填数。"),
+    anchor: z.string().min(1).max(12).describe("图表左上角落在哪个格，如 E2（单格地址，不是区域）。"),
+    title: z.string().max(60).optional().describe("图表标题；省略时用第一条系列的名字。"),
+    widthPx: z.number().int().min(120).max(2000).optional().describe("图表框宽度，单位屏幕像素（px，不是 pt），默认 480。"),
+    heightPx: z.number().int().min(90).max(2000).optional().describe("图表框高度，单位屏幕像素（px），默认 288。"),
+  })
+  .strict();
+
 /** 提案里的一条改动。刻意只留这四类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
 export const SheetEdit = z
   .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit]);
@@ -151,6 +182,7 @@ export const SHEET_TOOL_SCHEMAS = {
   sheet_aggregate: AggregateArgs,
   sheet_find: FindArgs,
   sheet_duplicates: DuplicatesArgs,
+  sheet_create_chart: CreateChartArgs,
   sheet_submit_proposal: SubmitProposalArgs,
 } as const;
 
@@ -162,6 +194,7 @@ export type ReadRangeArgsT = z.infer<typeof ReadRangeArgs>;
 export type AggregateArgsT = z.infer<typeof AggregateArgs>;
 export type FindArgsT = z.infer<typeof FindArgs>;
 export type DuplicatesArgsT = z.infer<typeof DuplicatesArgs>;
+export type CreateChartArgsT = z.infer<typeof CreateChartArgs>;
 export type SubmitProposalArgsT = z.infer<typeof SubmitProposalArgs>;
 export type SheetEditT = z.infer<typeof SheetEdit>;
 
@@ -296,6 +329,43 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
           limit: { type: "integer", minimum: 1, maximum: 200, default: 50 },
         },
         required: ["keys"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sheet_create_chart",
+      description:
+        "提议在当前工作表插入一张**原生图表**（不是贴图）。只交区域引用：数值、类别显示文字、引用串全部由表格引擎从现场表读，" +
+        "你不许自己填数也不许报数字。类别轴与每条系列的条数必须一致；系列名通常填表头那一格的地址（如 C1）。" +
+        "取不到数（二维区域、条数对不上、格里是文本）引擎会回一句理由，改引用再调。用户确认后才会随文件保存。",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["bar", "line", "pie"] },
+          categories: { type: "string", minLength: 1, maxLength: 20 },
+          series: {
+            type: "array",
+            minItems: 1,
+            maxItems: 8,
+            items: {
+              type: "object",
+              properties: {
+                values: { type: "string", minLength: 1, maxLength: 20 },
+                name: { type: "string", minLength: 1, maxLength: 12 },
+              },
+              required: ["values"],
+              additionalProperties: false,
+            },
+          },
+          anchor: { type: "string", minLength: 1, maxLength: 12 },
+          title: { type: "string", maxLength: 60 },
+          widthPx: { type: "integer", minimum: 120, maximum: 2000 },
+          heightPx: { type: "integer", minimum: 90, maximum: 2000 },
+        },
+        required: ["kind", "categories", "series", "anchor"],
         additionalProperties: false,
       },
     },
