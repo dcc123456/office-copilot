@@ -254,6 +254,40 @@ describe("回写保真（验收 A1：空改动不许动任何部件）", () => {
     expect(cellDisplayText(reopenedSheet.cells["F3"] as SheetModel["cells"][string])).toBe("2026年2月");
   });
 
+  it("给带字体的格改数字格式：只换 numFmtId，粗体/红字一条都不许丢（§2.3 不许拍平局部格式）", async () => {
+    const before = await partTexts(await buildSampleWorkbookBytes());
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    // 夹具里 s="4" 是"粗体红字 + General"那一格；这里只把它的显示改成百分比
+    sheet.cells["A3"] = {
+      address: "A3",
+      colIndex: 0,
+      rowIndex: 2,
+      kind: "number",
+      value: 0.5,
+      styleIndex: 4,
+      numberFormat: { numFmtId: 10, isDateLike: false },
+    };
+    file.writeSheet(sheet);
+    const written = await file.toBytes();
+    const parts = await partTexts(written);
+    const xfs = xfsOf(parts["xl/styles.xml"]);
+
+    // 已有 xf 逐字不变（§二 P3 的位置索引红线），新增的那条必须还带着 fontId="1"
+    expect(xfs.slice(0, 6)).toEqual(xfsOf(before["xl/styles.xml"]));
+    expect(xfs.length).toBe(7);
+    expect(xfs[6]).toContain('numFmtId="10"');
+    expect(xfs[6]).toContain('fontId="1"');
+
+    const reopened = await SheetFile.fromBytes(written, { fileName: "sample.xlsx" });
+    const cell = (await reopened.sheetAt(0)) as SheetModel;
+    const a3 = cell.cells["A3"];
+    expect(a3).toMatchObject({ kind: "number", value: 0.5 });
+    expect(a3?.numberFormat).toMatchObject({ numFmtId: 10, isDateLike: false });
+    expect(reopened.styleTable.fontFor(a3?.styleIndex)).toMatchObject({ bold: true });
+    expect(cellDisplayText(a3!)).toBe("50.00%");
+  });
+
   it("新增字符串只追加、样式表前 6 条一个字节都不许变（实测 §二 P3 的位置索引风险）", async () => {
     const file = await openSample();
     const sheet = (await file.sheetAt(0)) as SheetModel;

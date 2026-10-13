@@ -412,6 +412,7 @@ export class SheetFile {
    *
    * 渲染层只带 `numberFormat`（它在 IO 层读到的语义），不自己数样式索引；
    * 已经是目标格式的格原样带过（`s` 不动），所以在表里改一个数字格式不会牵连其它格。
+   * 换格式时该格原有的字体/底色/边框/对齐一律随格带走（§2.3 不许拍平局部格式）。
    * 读不懂的格（`rawXml` 原样回写的）不碰。
    *
    * @param sheet 待写入的表；就地补 `cell.styleIndex`。
@@ -421,11 +422,7 @@ export class SheetFile {
       if (!cell.numberFormat || cell.rawXml) continue;
       const current = this.styles.numberFormatFor(cell.styleIndex);
       if (current.numFmtId === cell.numberFormat.numFmtId && current.formatCode === cell.numberFormat.formatCode) continue;
-      cell.styleIndex = this.styles.appendCellStyle(
-        cell.numberFormat.formatCode !== undefined
-          ? { formatCode: cell.numberFormat.formatCode }
-          : { numFmtId: cell.numberFormat.numFmtId },
-      );
+      cell.styleIndex = this.styles.withNumberFormat(cell.styleIndex, cell.numberFormat);
       cell.numberFormat = this.styles.numberFormatFor(cell.styleIndex);
     }
   }

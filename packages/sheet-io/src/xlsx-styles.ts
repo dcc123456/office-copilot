@@ -209,6 +209,38 @@ export class StyleTable {
   }
 
   /**
+   * 只换数字格式、其余引用与子节点（`<alignment/>` 等）原样带走：克隆 `baseStyleIndex` 那条 xf，改掉 `numFmtId` 再追加。
+   *
+   * 为什么不走 `appendCellStyle({ numFmtId })`：那条把 `fontId/fillId/borderId` 一律按 0 重建，
+   * 于是"把一个加粗红字格改成百分比"会顺手把粗体和红字抹掉，甚至复用成另一条不相干的样式
+   * （`AGENTS.md` §2.3 不许拍平局部格式；这条是被单测钉出来的实测缺陷）。
+   *
+   * @param baseStyleIndex 原格的 `s`（`cellXfs` 位置索引）；越界或 undefined 时按第 0 条（General）算。
+   * @param format 目标数字格式：给 `formatCode` 时先落到 `<numFmts>`（已有同码复用 id），否则直接用内建 `numFmtId`。
+   * @returns 新条的位置索引。base 本来就是该格式时返回它自己；已有逐字相同的一条也直接复用，都不产生重复。
+   */
+  withNumberFormat(baseStyleIndex: number | undefined, format: { numFmtId?: number; formatCode?: string }): number {
+    const base = this.cellXfs[baseStyleIndex ?? -1] ?? this.cellXfs[0];
+    if (!base) return this.appendCellStyle(format);
+    const numFmtId = format.formatCode !== undefined ? this.appendNumberFormat(format.formatCode) : (format.numFmtId ?? 0);
+    if (Number(base.attributes["numFmtId"] ?? 0) === numFmtId) return this.cellXfs.indexOf(base);
+
+    const wanted = sheetElement(serialize(base));
+    wanted.attributes["numFmtId"] = String(numFmtId);
+    wanted.attributes["applyNumberFormat"] = "1";
+    const markup = serialize(wanted);
+    const existingIndex = this.cellXfs.findIndex((xf) => serialize(xf) === markup);
+    if (existingIndex >= 0) return existingIndex;
+    this.dirty = true;
+
+    const container = firstChild(this.root, "cellXfs") ?? this.root;
+    container.children?.push(wanted);
+    this.cellXfs.push(wanted);
+    container.attributes["count"] = String(this.cellXfs.length);
+    return this.cellXfs.length - 1;
+  }
+
+  /**
    * 序列化回 `styles.xml`。
    *
    * @returns 带 XML 声明的完整部件文本。
