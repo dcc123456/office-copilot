@@ -413,7 +413,7 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 
 - **regex 替换**：未支持，需要在客户端做字面量探测。
 - **重度 PDF 编辑**：下一阶段会走 LibreOffice headless 把 PDF 转 .docx，在 Word 里编辑后再导回；复杂排版评估商业 SDK（Aspose / PDFTron）。
-- **Excel**：读入 + 保真回写 + 手动编辑 + 结构化 op 与撤销 + AI 分析/整理/计算 + 原生图表部件已落，见「Excel 表格」与 `docs/excel-support-spec.md`。**还没做的**：把图表导出成 PNG 插进 docx/PDF 报告（app 内的预览已落，`23db5af`，用 Chart.js 只画给人看，`.xlsx` 里仍是原生图表）、CLI 写侧（撤销、modlog、原子替换都在桌面主进程那条路上，CLI 只读）、公式重算引擎（按 D4 只写公式与缓存值）、透视表 / 条件格式 / 数据验证的编辑（读入时原样保留，不建模）、Excel / WPS 打开后的**画面效果**（本机没装 Microsoft Excel，WPS 无可视通道，`AGENTS.md` §8，这条标 BLOCKED）。**"文件能不能被办公软件打开"不再靠猜**：`oc sheet check` 机检 OOXML 硬约束 + openpyxl 交叉读 + Numbers 实开，三层证据见上面「怎么确认导出的 `.xlsx` 能在办公软件里打开」。任务窗格加载项不接表格。
+- **Excel**：读入 + 保真回写 + 手动编辑 + 结构化 op 与撤销 + AI 分析/整理/计算 + 原生图表部件已落，见「Excel 表格」与 `docs/excel-support-spec.md`。**还没做的**：把图表导出成 PNG 插进 docx/PDF 报告（app 内的预览已落，`23db5af`，用 Chart.js 只画给人看，`.xlsx` 里仍是原生图表）、CLI 写侧（撤销、modlog、原子替换都在桌面主进程那条路上，CLI 只读）、公式重算引擎（按 D4 只写公式与缓存值）、透视表 / 条件格式 / 数据验证的编辑（读入时原样保留，不建模）、Excel / WPS 打开后的**画面效果**（本机没装 Microsoft Excel，WPS 无可视通道，`AGENTS.md` §8，这条标 BLOCKED）。**"文件能不能被办公软件打开"不再靠猜**：`oc sheet check` 机检 OOXML 硬约束 + openpyxl 交叉读 + Numbers 实开，三层证据见上面「怎么确认导出的 `.xlsx` 能在办公软件里打开」。**大表的实测边界**（`294fc1f`，真实 app + CDP 取数）：行/列表头与表体一样只画可见窗口，所以 60 万格那份滚动 20 步 502ms、0 个长任务、方向键 13.6 ms/次；但**只读模式不减数据量**——整表仍要经 IPC 进渲染层，那份 60 万格是 250MB 堆 / 1.4GB RSS、打开 6.2s，再大一档要分片载入才算解决；**改一格是 358ms**（10 万格可编辑那份），因为每次编辑整表载荷往返一次主进程，不是局部写。任务窗格加载项不接表格。
 - **PPT**：未开工，原计划的 `packages/ppt-client` 还没建。
 - **多人/企业部署**：目前是单机自托管；后续加 SSO、审计日志、按租户的 Key 管理。
 - **图标**：`apps/task-pane/public/assets/icon-*.png` 目前是占位 1×1 PNG，上架前替换为正式品牌图标。

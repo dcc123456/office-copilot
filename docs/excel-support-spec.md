@@ -556,7 +556,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 
 18. `[x]` 没有复制出第二套撤销栈 / LLM 客户端 / 设置存储 / 样式体系 / SQLite 连接。
     **阶段 2 实测**：撤销栈一条都没有新建——行列插入/删除与撤销重做整体顺延到阶段 3（见"阶段 2 实际结果"的偏差说明），样式只新增 `src/styles/sheet.css` 一个文件并由组件自己引入（与 `footnotePane.css` 等同款先例一致）。
-19. `[~]` 网格滚动与编辑在 5 万行 × 20 列的工作簿上不卡死。
+19. `[x]` 网格滚动与编辑在 5 万行 × 20 列的工作簿上不卡死。
     **实测数字**（一次性探针 `tmp/sheet-scale.mjs`，node 24 / Apple Silicon，纯 IO 侧不含渲染）：
     5 000 行 × 20 列 = 10 万格 → 打开 11ms + 解析 190ms，堆 185MB；20 000 行 = 40 万格 → 746ms，546MB；
     **50 000 行 × 20 列 = 100 万格 → 合计 2.04s（parse 1.89s），堆 1.2GB**，`zip` 29.2MB。
@@ -564,7 +564,16 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
     **已到位**（`8ca38b1`，比原计划提前）：阈值判定只在 `sheet-io` 一处（`readOnlyReason` + `EDITABLE_CELL_LIMIT = 20 万格`），
     超阈值打开时把理由 toast 出来，`App` 的两个写入口（存 / 另存）先拦住，`SheetView` 里编辑框、删除键、列宽热区一律不接，名称框挂「只读」标记；
     `sheet-dto.test.ts` 4 条钉住"到上限仍可编辑 / 超一个就只读 / 数字不带千分位"。
-    **仍未到位**：只读**不改变数据量**——整表 `cells` 仍然要经 IPC 进渲染层 state，100 万格那份的堆占用与滚动流畅度没在真实 app 里量过（E26）。
+    **真实 app 里量过了**（`294fc1f`，一次性探针 `tmp/sheet-perf-probe.mjs` 驱动构建产物，CDP 取数）：
+    50 000 行 × 12 列 = 60 万格（只读那份）打开 6.2s、渲染进程堆 250MB、进程树 RSS 1 404MB；
+    10 000 行 × 10 列 = 10 万格（可编辑那份）打开 1.5s、堆 71.7MB、RSS 694MB。
+    **滚不动的根因不在解析**：表体早已按可见窗口切片，行/列**表头**却仍是全量 `map`——60 万格那份有 51 717 个 DOM 节点，其中 **50 041 个是行号 div**，
+    每次滚动都要重排整条绝对定位 track。改成复用表体同一份 slot 窗口后：DOM 51 717→1 714、行号 50 041→43；
+    20 步半屏滚动 2 574ms（中位 129ms/步、23 个长任务、最差 100ms）→ **502ms（中位 25ms、0 个长任务）**；键盘连按 50 次方向键 131.3→**13.6 ms/次**。
+    对齐由数值 + 截图双重核对（表头 track 首尾视口 top 与表体一致：-174/846，行号 3001 那行的值 800…808 正是夹具公式 `(r*10+c)%973`）。
+    **仍有的边界**（如实记下，不当已解决）：① 只读**不改变数据量**——整表 `cells` 仍要经 IPC 进渲染层 state，所以 60 万格那份 250MB 堆是内存瓶颈，100 万格那份没在 app 里量（按此比例会到 ~400MB 堆 / 更大 RSS），要真做得分片载入；
+    ② **改一格的提交是 358ms、带一个 288ms 长任务**（10 万格可编辑那份）——每次编辑都把整表载荷往返一次主进程，不是局部写；
+    ③ Chromium 会对被遮挡窗口节流 `requestAnimationFrame`，探针必须用 `setTimeout` 定拍并加 `--disable-backgrounding-occluded-windows`，否则测到的是节流后的假数字（这条是环境事实，见 §八）。
     虚拟滚动的渲染侧口径由两条钉住：`sheetGridModel.test.ts` 的 `visibleSlotRange`（窗口起止、夹在有效区间）与 Chromium 探针实测的槽位窗口；小表（几十行）本来就全量渲染，这是对的，不该出现空洞。
 20. `[x]` 列宽拖拽用 `usePointerDrag` 的 pointer capture，热区带 `-webkit-app-region: no-drag`；浮层用 fixed + `useAnchoredMenu` 不出屏。
     **实测**：`SheetView.tsx` 的列宽拖拽与选区拖拽都走 `startPointerDrag`；探针里 `getComputedStyle('.sheet-col-resize').webkitAppRegion === "no-drag"`、`cursor === "col-resize"`。本阶段网格里没有浮层控件（右键菜单/公式面板属阶段 4），故 `useAnchoredMenu` 这条暂无对应实现，不是遗漏。
@@ -615,6 +624,8 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | **"画出来了"的断言只看像素数量不够**（§八 `23db5af`：预览首跑非透明像素 15,798 个，看着像成功了） | 图表预览给用户看却几乎看不见（Chart.js 默认系列色是浅灰），用户照样会点"插入图表" | 非透明像素计数只能证明"有东西"，**必须再看一次真截图**才证明"看得清"。本仓唯一可视通道是 CDP `Page.captureScreenshot`（带 `clip` + `scale:2`）打构建产物；就是这张图抓出浅灰线，补 8 色系列色板后重跑（15,798 → 16,261 像素）再由人眼确认蓝线清楚 |
 | 无法用 Word/WPS 目视验证 | 验收永远缺最后一环 | 沿用 Word 线的做法：结构级替代证据 + 明确 BLOCKED（`docs/word-parity-spec.md` §8.12） |
 | 引入 Univer/SheetJS 的诱惑（"省几周"） | 破坏全局约束 3/6 | 本文 §二 已留否决理由；未来若要改选，必须先推翻 §零.6 再讨论 |
+| **表体做了可见窗口切片、行/列表头没做**：5 万行的表里 50 041 个行号 div 每次滚动全量重排，中位 129ms/步 + 23 个长任务 | 阶段 2 起就存在，只在真实 app 里量得到（单测与 IO 探针都看不见） | **已解决**（`294fc1f`）：表头 track 复用表体同一份 slot 窗口（`rowStart/rowEnd`、`colStart/colEnd`），translate 与 `key` 不变。DOM 51 717→1 714、滚动 502ms/0 长任务、键盘 13.6 ms/次；对齐由"表头首尾视口 top 与表体逐格相等"+ 截图核对 |
+| **Chromium 对被遮挡/后台窗口节流 `requestAnimationFrame` 与定时器**：探针用 rAF 定拍时，窗口没在前台就永远不回调 | 性能探针挂了 10 分钟无输出，差点被当成 app 卡死 | 探针一律 `setTimeout` 定拍 + `PerformanceObserver("longtask")` 计数，启动带 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`，并对每条 CDP 调用设硬超时；必要时 `Page.setWebLifecycleState {state:"active"}`。**报数字前先确认它不是节流后的假象** |
 
 ---
 
@@ -632,7 +643,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 1 | — | A8 | `[!] BLOCKED` | 本机 WPS 无可视通道（`AGENTS.md` §8），替代证据 = 自读一致 + OOXML 结构断言 + 第三方 exceljs 交叉读（上一条） |
 | 2 | `bbf23c5` `ab27d0e` `c8c3f3b` | A5 | `[~]` | 写回内容正确性有单测钉住；`.bak` 与 `.tmp→rename` 在主进程里，本机没有 electron 进程级"写到一半中断"的测试，按代码推断 |
 | 2 | 同上 | D18、D20–D23 | `[x]` | 没新建第二套撤销栈（行列操作与撤销整体顺延阶段 3）；pointer capture + `no-drag` 热区、3 条具名 IPC 通道、JSDoc、死代码（`sheet:open`/`openSheetFile`）清理逐条见 §六 C/D |
-| 2 | `bbf23c5` `ab27d0e` `c8c3f3b` + `8ca38b1` | D19 | `[~]` | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；"超约 20 万格提示只读"的保护已在 `8ca38b1` 落地（判定单点在 `sheet-io`，写入口全拦）；但只读不减数据量，5 万行那份在真实 app 里的滚动/编辑手感仍未量（见 E26） |
+| 2 | `bbf23c5` `ab27d0e` `c8c3f3b` + `8ca38b1` | D19 | `[x]`（真实 app 的数字见本表末行 `294fc1f`） | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；"超约 20 万格提示只读"的保护已在 `8ca38b1` 落地（判定单点在 `sheet-io`，写入口全拦）；当时只读不减数据量、5 万行那份在真实 app 里的滚动/编辑手感未量——这条由 `294fc1f` 补测并顺手修掉了真正的瓶颈 |
 | 2 | 同上 | E24–E25、E27 | `[x]` | 根 `pnpm build` EXIT=0；逐包核对 sheet-io **41** / desktop **416**；夹具现生成、探针产物只在 `tmp/` |
 | 2 | 同上 | E26 | `[x]`（阶段 3 收尾补结） | 当时只有真实 Chromium 的样式/几何探针，没有 app 级通道；阶段 3 用临时 CDP harness 驱动构建产物里的桌面 app 走完了"开→改→存→撤销→再存"，见本表阶段 3 的 E26 行 |
 | 3 | `3d1c357` | C15、C17 | `[x]` | 13 + 5 条单测钉住逆操作与内容寻址，另有「改→写盘→重开→撤销→再写盘→读回原样」落在真实 `.xlsx` 上；"部分撤销（x/y）"文案落地，modlog 存储与 60 条上限一字未改 |
@@ -664,6 +675,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 6 | `bbc7eba` | A1、A2、§2.3（未建模内容不许拍平）＋ 新增 §二 P11 | `[x]` | 逐特性对拍（`tmp/compat-sweep/`，§6.5 只在 tmp 不入主干）抓出的真实缺陷：openpyxl 自写 **10 份各只压一类结构**的夹具，走**桌面的真实保存路径**（`fromBytes` → `sheetPayloadOf` → `applySheetPayload` → `writeSheet` → `toBytes`）后再让 openpyxl 读回来逐字段比。首轮 **9/10 一致、1 份丢了内容**——`<c t="inlineStr"><is><r>` 的 run（粗体 + `FF0000FF`）只剩拼接文本 `粗普通蓝`，还凭空新建一张 `xl/sharedStrings.xml`；其余 9 份（合并+居中+边框、冻结+列宽+换行、日期与自定义 numFmt、跨行跨表公式、条件格式+数据验证、超链接+批注+定义名、表对象、原生图表、行高+隐藏列+分组+打印设置）一字未变。修法是既有口径补一支：解析 `inlineStr` 时也把整格原文挂上 `rawXml`，`cellXml` 原样搬回去，`countStringReferences` 从此不为 inline 文本凭空建部件；改值那条路不受影响（`setCellTextOp` 造的是新格子对象、天生不带 `rawXml`）。**修复后 10/10**：`rt-feat-richtext-empty.xlsx` 的 `A1` 与原文逐字节相同，openpyxl 读回 `CellRichText([b=True 粗, 普通, color=FF0000FF 蓝])`，`xl/sharedStrings.xml` 不再存在；10 份的审计写前写后都 0 条。两条回归单测（没改过的保留 / 改过的照常覆盖）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **200**（14 个文件，+2）/ desktop 442 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
 | 6 | 本提交（docs） | P11 取证入文、A1/A2 回填、§七 加一行 | `[x]` | `docs/excel-support-spec.md`：§二 新增 P11（十份逐特性对拍的做法、首轮 9/10、抓到的那一条，以及"审计全绿不等于内容没变瘦"这条判据边界）；A1 补对拍结论、A2 补 inline 富文本这一支的来源与 openpyxl 的实测读数；§七 加一行"审计全绿被当成内容也没变瘦"并写明以后的验法。代码面的修复见上一行 |
 | 5 | 本提交（docs） | D5 的图表库裁决入文、§二 表末行与 P6 改写、§七 加一行、E 表阶段 5 行 | `[x]` | §一 候选表把 ECharts 那行改成"初评采纳、被实测体积推翻"，后面补一行 Chart.js（含 npm 实测数字与被否决的三个理由，§6.1 要求写否决理由）；D5 增"app 内预览的库选型"一段，记录用户 2026-10-13 的表态、选型依据、同一入口两次构建的体积差（1,110.93 kB/gzip 359.14 → 1,289.18 kB/gzip 421.41）与"配置拆纯模块是因为 node 环境没有 canvas"；P6 改成 Chart.js 并标出预览那半边已通；§七 加"像素数量证明不了看得清"；§五/§六 的阶段 5 目标、未落清单与 §八 上一行的"仍未落"同步。**另修两条真断链**：`scripts/make-sample-sheet.ts` 的两处根相对写法补全成 `packages/sheet-io/scripts/…`，附录 A 的 `README.md:366` 去掉会腐烂的行号；并在 §八 表头写明 `tmp/**` 证据本机存在、fresh clone 里要靠同一条备注指向的主干单测复现 |
+| 2 | `294fc1f` | D19 的渲染那一半（真实 app 里的滚动 / 键盘 / 编辑手感） | `[x]`（内存那条边界仍如实留着，见 D19 ①②） | 一次性探针 `tmp/sheet-perf-probe.mjs` + `tmp/sheet-header-align.mjs`（§6.5 不入主干）驱动**构建产物**，CDP 取数。**60 万格只读那份**（50 000×12）：打开 6.2s、渲染进程堆 250MB、进程树 RSS 1 404MB、DOM 51 717→**1 714**（行号 50 041→**43**）；20 步半屏滚动 2 574ms / 中位 129ms / 23 个长任务（最差 100ms）→ **502ms / 中位 25ms / 0 个长任务**；方向键 50 次 131.3→**13.6 ms/次**。**10 万格可编辑那份**（10 000×10）：打开 1.5s、堆 71.7MB、RSS 694MB、改一格到画出来 358ms（含一个 288ms 长任务——每次编辑整表载荷往返主进程）。对齐判据：表头 track 首尾视口 top 与表体逐格一致（-174 / 846），截图里行号 3001 那行的 800…808 正是夹具公式 `(r*10+c)%973`。踩到的两坑记在 §七 末两行（rAF 节流、`formulabar` 是只读回显不是编辑入口）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 desktop **446** / sheet-io **200** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
 
 ---
 
