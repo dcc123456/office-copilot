@@ -18,6 +18,7 @@ export {
   type ResolvedChart,
 } from "./chart-spec.js";
 export { buildChartParts, CHART_CONTENT_TYPE, DRAWING_CONTENT_TYPE, type ChartPartSet } from "./xlsx-chart.js";
+export { auditXlsxPackage, type CompatIssue } from "./compat-audit.js";
 export {
   cellAt,
   isSheetEmpty,
