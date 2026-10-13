@@ -844,21 +844,108 @@ function applyOne(sheet: SheetPayload, op: SheetCoreOp): ApplyOutcome {
   return applyShiftOp(sheet, op);
 }
 
-/** 顺序应用一批 op，失败的挑出去；`inverses` 与已落地的 `ops` 同序。 */
+/**
+ * 顺序应用一批 op，失败的挑出去；`inverses` 与已落地的 `ops` 同序。
+ *
+ * 一批 op 都是照**同一份快照**锚定的，而第一条 op 本身就会改掉它那一行的内容指纹——
+ * 不重新锚定的话，同一行的第二条 op 会以"认不出这一行"被跳过（阶段 4 的交叉读探针实测到的）。
+ * 所以这里记一张"批内改过的条：旧指纹 → 新指纹"的表，只在这批 op 内部生效；
+ * 批外的改动（用户后来的手工编辑）仍然按原样拦下来，`AGENTS.md` §2.5 的语义不受影响。
+ */
 function applyOps(sheet: SheetPayload, ops: SheetCoreOp[]): SheetOpsResult {
   let current = sheet;
   const opsApplied: SheetCoreOp[] = [];
   const inverses: SheetCoreOp[] = [];
   const skipped: SheetSkippedOp[] = [];
-  for (const op of ops) {
+  const reanchors = new Map<string, SheetTrackAddress>();
+  for (const planned of ops) {
+    const op = reanchorOp(planned, reanchors);
+    const landedOn = trackLandedOn(current, op);
     const outcome = applyOne(current, op);
     if ("reason" in outcome) {
-      skipped.push({ op, reason: outcome.reason });
+      skipped.push({ op: planned, reason: outcome.reason });
       continue;
     }
+    if (landedOn) rememberReanchor(reanchors, outcome.sheet, op, landedOn);
     current = outcome.sheet;
     opsApplied.push(op);
     inverses.push(outcome.inverse);
   }
   return { ok: skipped.length === 0, before: sheet, after: current, ops: opsApplied, inverses, skipped };
+}
+
+/** 一条"条"的身份证：轴 + 内容指纹 + 同指纹里的第几个。 */
+function trackKey(track: SheetTrackAddress): string {
+  return `${track.axis}|${track.fingerprint}|${track.nth}`;
+}
+
+/**
+ * 把 op 的锚点换成"本批已经改过之后的那把指纹"。
+ *
+ * @param op 建 op 时锚定的那条（可能与现场对不上，因为同一行已被这批里的前一条改过）。
+ * @param reanchors 批内锚点表。
+ * @returns 能认出就换成新锚点的 op，否则原样返回（同一条对象，不复制）。
+ */
+function reanchorOp(op: SheetCoreOp, reanchors: Map<string, SheetTrackAddress>): SheetCoreOp {
+  if (reanchors.size === 0) return op;
+  if (op.kind === "insertTracks" || op.kind === "deleteTracks") return op;
+  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  const reanchored = reanchorTrack(track, reanchors);
+  if (reanchored === track) return op;
+  return op.kind === "setCellValue"
+    ? { ...op, target: { ...op.target, row: reanchored } }
+    : { ...op, target: reanchored };
+}
+
+/**
+ * 沿锚点表往下走，走到现场认得出的那把指纹。
+ *
+ * @param track 起点锚点。
+ * @param reanchors 批内锚点表。
+ * @returns 最后一把锚点；没有记录时原样返回。
+ */
+function reanchorTrack(track: SheetTrackAddress, reanchors: Map<string, SheetTrackAddress>): SheetTrackAddress {
+  let resolved = track;
+  const seen = new Set<string>([trackKey(track)]);
+  for (;;) {
+    const next = reanchors.get(trackKey(resolved));
+    if (!next || seen.has(trackKey(next))) return resolved;
+    resolved = next;
+    seen.add(trackKey(next));
+  }
+}
+
+/**
+ * 这条 op 现在落在第几条（按内容寻址在**改动前**的载荷上解）。
+ *
+ * @param sheet 改动前的载荷。
+ * @param op 即将应用的 op。
+ * @returns `{axis,index}`；插删（改的是整条的位置，不是某条的内容）与空白条（伪指纹，只按位置认）
+ *   返回 null，表示这次改动不需要记批内锚点。
+ */
+function trackLandedOn(sheet: SheetPayload, op: SheetCoreOp): { axis: SheetAxis; index: number } | null {
+  if (op.kind === "insertTracks" || op.kind === "deleteTracks") return null;
+  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  if (track.fingerprint === EMPTY_TRACK) return null;
+  const index = resolveTrack(sheet, track);
+  return index === null ? null : { axis: track.axis, index };
+}
+
+/**
+ * 记下"这一条被这次改动改成了什么指纹"，让同一批里后面的 op 还认得它。
+ *
+ * @param reanchors 批内锚点表（就地写入）。
+ * @param after 改动后的载荷。
+ * @param op 已落地的 op。
+ * @param landedOn 这条 op 落在的第几条。
+ */
+function rememberReanchor(
+  reanchors: Map<string, SheetTrackAddress>,
+  after: SheetPayload,
+  op: SheetCoreOp,
+  landedOn: { axis: SheetAxis; index: number },
+): void {
+  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  const fresh = trackAddress(after, landedOn.axis, landedOn.index);
+  if (fresh.fingerprint !== track.fingerprint || fresh.nth !== track.nth) reanchors.set(trackKey(track), fresh);
 }

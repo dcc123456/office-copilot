@@ -390,3 +390,48 @@ describe("写公式（spec D4：`<f>` 交给 Excel，缓存值 `<v>` 由本地�
     expect(setCellFormulaOp(sheet, "A1", "=")).toBeNull();
   });
 });
+
+describe("一批 op 改到同一行（阶段 4：整列计算值要一次落地）", () => {
+  it("同一行的两格在一批里都落地，撤销后两格一起回到原样", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2)]);
+    const applied = runSheetOps(sheet, [setCellFormulaOp(sheet, "C1", "A1*2")!.op, setCellFormulaOp(sheet, "D1", "B1+1")!.op]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["C1"]?.value).toBe(2);
+    expect(applied.after.cells["D1"]?.value).toBe(3);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("给整列加计算值：五行各一条 op，一批里全落地", () => {
+    const values = [10, 20, 30, 40, 50];
+    const sheet = sheetOf(values.map((value, index) => cellOf(0, index, value)));
+    const ops = values.map((_, index) => setCellFormulaOp(sheet, `B${index + 1}`, `A${index + 1}^2`)!.op);
+    const applied = runSheetOps(sheet, ops);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["B1"]?.value).toBe(100);
+    expect(applied.after.cells["B5"]?.value).toBe(2500);
+    expect(revertSheetOps(applied.after, applied.inverses).after.cells["B5"]).toBeUndefined();
+  });
+
+  it("同一格在一批里被改两次时第二条仍然拦下，不静默覆盖", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1)]);
+    const applied = runSheetOps(sheet, [setCellTextOp(sheet, "A1", "2")!, setCellTextOp(sheet, "A1", "3")!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("现在装的不是");
+    expect(applied.after.cells["A1"]?.value).toBe(2);
+  });
+
+  it("批内锚点不越过现场核对：落地后用户又改了那一行，撤销仍然认不出", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(1, 0, 2)]);
+    const applied = runSheetOps(sheet, [setCellTextOp(sheet, "C1", "9")!, setCellTextOp(sheet, "D1", "8")!]);
+    expect(applied.ok).toBe(true);
+    // 用户把刚写进去的 C1 又改了：这一行的内容指纹不再是撤销所依据的那把
+    const userEdited = { ...applied.after, cells: { ...applied.after.cells, C1: { ...applied.after.cells["C1"]!, value: 99 } } };
+    const reverted = revertSheetOps(userEdited, applied.inverses);
+    expect(reverted.ok).toBe(false);
+    expect(reverted.skipped.length).toBeGreaterThan(0);
+    expect(reverted.after.cells["C1"]?.value).toBe(99);
+  });
+});
