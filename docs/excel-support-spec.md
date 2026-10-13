@@ -262,10 +262,31 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 1. 计划的落点是 `apps/desktop/src/ai/sheetEdit.ts`，实际落在 `packages/sheet-io`：§5.1 的依赖方向（apps → packages）
    决定了阶段 4 的 `packages/sheet-tools` 要产出**同一批** op，落在渲染层就必然被复制第二套（§3.3/§3.4）。
 2. 行列插入/删除的 op 不在本提交：C16 的字面要求是"插删之后撤销早期改动不牵连手工编辑"，本阶段先把 op 层与内容寻址做对、
-   并用手工构造的位移表把这条语义测住；插删作为**同类 op** 在下一条提交补（补完 C16 才升 `[x]`）。
+   并用手工构造的位移表把这条语义测住；插删作为**同类 op** 已在 `ec4bda4`（op 层）+ `e662914`（视图入口）补齐，C16 升 `[x]`。
 3. 撤销入口只有键盘，没有工具栏按钮，也没进「修改历史」面板：那个面板目前仍归文档那条（表签视图里不渲染），
    所以**表格改动在面板里看不到**，只在按 Cmd/Ctrl+Z 时被读出来。等阶段 4 的 AI 提案也记进同一份历史时一起做，
    否则会变成两条 UI 各挑一次记录。
+
+**阶段 3 收尾（`ec4bda4` + `e662914` + `c099727`，C16 与 E26 一起结）**：
+
+- **入口**：`SheetView.tsx` 在行/列表头上挂 `onContextMenu`，菜单四项插入（上/下、左/右）+ 分隔线 + 删除本行/本列；
+  定位沿用正文那套 `editor/contextMenu.menuRect`（§5.5），样式沿用 `.ctx-menu`/`.ctx-item`（§5.4 没新增 CSS 入口）。
+  菜单项拦 `mousedown`：否则编辑框的 `onBlur` 会抢在同一次落地里多提交一条改动。表格一滚动就关菜单——它按视口坐标贴着那条表头。
+  只做单行/单列：选区→"带"的语义要引入第二套位移规则，超出本阶段（§3.6）。
+- **真实 app 的整链实跑**（临时 CDP harness，探针不入库，`tmp/track-app-probe.mjs`）：开 `sample.xlsx` →
+  右键 H 列表头删列 → toast 拒绝并给出理由（`H1:I2 这个合并区正好被这一带劈开…`），文件未动；
+  右键第 3 行表头在上方插入 → 网格 `A3` 空、`2月→A4`、`3月→A5` → 命令面板"保存"落盘（`<dimension>` 到 `A1:I5`、
+  写出 `.bak`）→ Cmd+Z → 网格回到 `A1:I4` → 再保存，**`sheet1.xml` 与 `sharedStrings.xml` 与插入前逐字节一致**。
+  这条把 E26（"起真实 app 走一遍开→改→存"）从 `[ ]` 结掉，也第一次在真实进程里跑到了拒绝路径。
+- **实跑顺带钉出一个 §2.3 缺陷**（`c099727`，不是插删引入的，是保存路径一直就有的）：桌面保存会逐张表 `writeSheet`，
+  富文本格过去一律重新 `intern`——写出的 `<si>` 只剩能重新序列化出来的那部分格式，**`<color rgb="FF0000FF"/>` 被拍平成黑字**，
+  还追加一条重复条目（`uniqueCount` 11→12）。修法是"按内容复用"：`intern` 给带 run 的条目按 run 逐字段指纹复用，
+  新增 `reuseOrAppend(值, run, 读入时的索引)` 让值与格式都没动的格沿用原条目，`writeEntry` 补回 run 颜色。
+  三条单测钉住（全部表写一遍仍指原条目 / 走桌面载荷那条路同样复用 / 真改过时重序列化必须带回颜色）。
+- **探针环境事实（这次踩到的）**：`--user-data-dir` 只是 Chromium 开关，`main.ts:73` 的
+  `app.requestSingleInstanceLock()` 仍按默认 `userData` 算——**上一个探针实例没退干净，后一个就会静默拿不到窗口**
+  （`/json` 返回空数组），而连上去的调试端口又可能是旧实例的，于是"改了代码、跑的还是旧进程"。
+  与 §8 的"探针跑的是 dist"同一条族：跑 app 级验收前先 `pgrep -f "apps/desktop"` 数一遍，清零再起。
 
 ### 阶段 4 · AI 工具层：分析 + 整理 + 计算
 
@@ -305,7 +326,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 2 | 列宽拖拽走 pointer capture；浮层用 fixed + `useAnchoredMenu` | 复用 `hooks/usePointerDrag.ts`；本阶段网格无浮层，`useAnchoredMenu` 无对应实现（阶段 4 有菜单时再落），见 D20 | `c8c3f3b`（计划"提交 8"） |
 | 3 | `SheetCoreOp` 类型、`planEdit/runOps/revert` 的表格实现、行内容指纹 | **实际**：`packages/sheet-io/src/sheet-edit.ts`（+ 新增 `colFingerprints` 于 `xlsx-sheet.ts`）；计划的 `apps/desktop/src/ai/sheetEdit.ts` 未建，见阶段 3 偏差 1 | `3d1c357`（提交 9） |
 | 3 | 撤销与修改历史接入（复用 modlog，不新建存储） | **实际**：`apps/desktop/src/sheet/sheetHistory.ts`（认形状、挑最近一条、倒回逆操作）+ `App.tsx` 的 `commitSheetOps`/`undoLastSheetEdit`；`electron/modlog.ts` 与 preload 通道一字未改 | `3d1c357`（提交 9） |
-| 3 | 行列插入/删除的 op（C16 的字面要求） | `packages/sheet-io/src/sheet-edit.ts` 补两种 op + 视图入口 | 待做 |
+| 3 | 行列插入/删除的 op（C16 的字面要求） | `packages/sheet-io/src/sheet-edit.ts`（`insertTracksOp`/`deleteTracksOp` + `applyShiftOp` 位移与逆操作）；视图入口 `src/sheet/SheetView.tsx`（表头右键菜单，复用 `menuRect` 与 `.ctx-menu`） | `ec4bda4` + `e662914` |
+| 3 | 保存路径不拍平富文本（§2.3 红线，实跑时才发现的既有缺陷） | `packages/sheet-io/src/xlsx-strings.ts`（run 指纹复用 + `reuseOrAppend` + `writeEntry` 回写颜色）、`xlsx-sheet.ts` 调用点 | `c099727` |
 | 4 | 分析引擎（列类型推断、缺失统计、分组聚合、去重键、异常值） | `packages/sheet-io/src/analysis/**` | 提交 10 |
 | 4 | 公式子集求值（D4 的函数白名单）+ 缓存值写入 | `packages/sheet-io/src/formula/**` | 提交 11 |
 | 4 | 工具 schema 与 JSON 工具定义 | `packages/sheet-tools/src/index.ts` | 提交 12 |
@@ -431,11 +453,12 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 2 | 同上 | D18、D20–D23 | `[x]` | 没新建第二套撤销栈（行列操作与撤销整体顺延阶段 3）；pointer capture + `no-drag` 热区、3 条具名 IPC 通道、JSDoc、死代码（`sheet:open`/`openSheetFile`）清理逐条见 §六 C/D |
 | 2 | `bbf23c5` `ab27d0e` `c8c3f3b` + `8ca38b1` | D19 | `[~]` | 10 万 → 100 万格的解析耗时/堆占用实测（190ms/185MB → 2.04s/1.2GB）；"超约 20 万格提示只读"的保护已在 `8ca38b1` 落地（判定单点在 `sheet-io`，写入口全拦）；但只读不减数据量，5 万行那份在真实 app 里的滚动/编辑手感仍未量（见 E26） |
 | 2 | 同上 | E24–E25、E27 | `[x]` | 根 `pnpm build` EXIT=0；逐包核对 sheet-io **41** / desktop **416**；夹具现生成、探针产物只在 `tmp/` |
-| 2 | 同上 | E26 | `[ ]` | 本机无 electron 的 CDP harness，"起真实 app 手工走一遍开→改→存"还没做到；真实 Chromium 探针只覆盖了计算样式与几何，不冒充可视验收 |
+| 2 | 同上 | E26 | `[x]`（阶段 3 收尾补结） | 当时只有真实 Chromium 的样式/几何探针，没有 app 级通道；阶段 3 用临时 CDP harness 驱动构建产物里的桌面 app 走完了"开→改→存→撤销→再存"，见本表阶段 3 的 E26 行 |
 | 3 | `3d1c357` | C15、C17 | `[x]` | 13 + 5 条单测钉住逆操作与内容寻址，另有「改→写盘→重开→撤销→再写盘→读回原样」落在真实 `.xlsx` 上；"部分撤销（x/y）"文案落地，modlog 存储与 60 条上限一字未改 |
-| 3 | `3d1c357` | C16 | `[~]` | 位移后撤销、不牵连手工编辑两层各钉一条（模拟位移）；**插入/删除行列的 op 还没写**，补完才升 `[x]` |
-| 3 | `3d1c357` | E24–E25 | `[x]` | `pnpm build` EXIT=0、`pnpm test` EXIT=0；逐包核对 sheet-io **59** / desktop **416**（37 个文件）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
-| 3 | `3d1c357` | E26 | `[ ]` | 同上——表格的撤销只有键盘入口，Cmd/Ctrl+Z 在真实 app 里的观感未验证；菜单那条 `role: "undo"` 与网格自己的 handler 谁先吃到这次按键也没测 |
+| 3 | `ec4bda4` `e662914` | C16 | `[x]` | op 层：整行/整列插删各自带逆操作，`removed` 前像按 `target.index` 同框再平移；单测钉住"位移后撤销早期改动不牵连用户后来的手工编辑"。入口：表头右键菜单，真实 app 里插一行→保存（`A1:I5` + `.bak`）→Cmd+Z→再保存，**两个部件逐字节回到原样** |
+| 3 | `c099727` | §2.3（写回不拍平局部格式） | `[x]` | 真实 app 保存时富文本格被重新 intern，颜色丢 + 追加重复 `<si>`；改成按 run 逐字段指纹复用，三条单测钉住（含"走桌面载荷那条路"）。实跑结论：`uniqueCount` 保持 11、`A2` 仍指原条目 |
+| 3 | `ec4bda4` `e662914` `c099727` | E24–E25 | `[x]` | `pnpm build` EXIT=0、`pnpm test` EXIT=0；逐包核对 sheet-io **96** / desktop **416**（37 个文件）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 3 | 同上 | E26 | `[x]` | 临时 CDP harness 驱动**构建产物**里的真实 app：开→拒绝（合并区被劈开，文件未动）→插入→保存→撤销→再保存回到逐字节一致；`sharedStringIndex`/`runs` 经 contextBridge 双向无损这一点也实测过（`PROBE_RECV` 那次）。踩到的坑（旧实例没退净 → 调试端口连上旧进程）写进阶段 3 收尾 |
 | 4 | — | B9–B14 | `[ ]` | |
 | 5 | — | D5 落地 | `[ ]` | |
 | 6 | — | D18/E24–E28 | `[ ]` | |

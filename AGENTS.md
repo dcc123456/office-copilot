@@ -181,6 +181,10 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
   `electron/main.ts` 走 `loadFile(dist/index.html)`，所以改完 src **必须先 `pnpm build`**（或
   `pnpm --filter @office-copilot/desktop exec vite build`）再跑探针，否则"数字一模一样"是旧包造成的假象。
   `curl http://127.0.0.1:5174/src/...` 只能证明 dev server 是新的，证明不了 app 跑的是它（§7.2 的实跑验收常踩这条）。
+- **探针起的 app 实例会互相顶掉**：`--user-data-dir=tmp/xxx` 只是 Chromium 开关，`app.requestSingleInstanceLock()`
+  仍按默认 `userData` 算，所以前一个探针实例没退净时，新实例静默没有窗口（`/json` 返回空数组），而调试端口
+  可能被旧实例占着——连上去操作的是旧进程，"改了没生效"是这么来的。跑 app 级验收前先
+  `pgrep -f "apps/desktop" | wc -l` 数一遍并清零；只杀带 `tmp/` 的实例，别碰用户自己在跑的那个。
 - **门禁命令必须重定向后再读退出码**：`pnpm test > tmp/t.log 2>&1; echo "EXIT=$?"`。把 `pnpm test` 管道接
   `tail` 时退出码属于 `tail`，会出现套件红过仍拿到 0 的假绿。
 - **`pnpm test` 根命令是 `passWithNoTests: true` + `pnpm -r`**：某个包没测试也会"全绿"。**必须逐包核对通过数**
