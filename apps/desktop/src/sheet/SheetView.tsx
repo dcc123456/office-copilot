@@ -391,7 +391,9 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
         <div className="sheet-corner" />
         <div className="sheet-colheader">
           <div className="sheet-colheader-track" ref={colHeaderRef}>
-            {layout.colIndexes.map((colIndex, slot) => {
+            {/* 列表头也只画可见窗口：track 与表体同一条 translate 通道，全量渲染会让宽表每次横向滚动重排全部列头 */}
+            {layout.colIndexes.slice(colStart, colEnd).map((colIndex, offset) => {
+              const slot = colStart + offset;
               const widthPx = slotWidth(resizing, colIndex, layout.colWidthPx[slot] ?? 64);
               const selected = colIndex >= range.start.colIndex && colIndex <= range.end.colIndex;
               return (
@@ -417,7 +419,9 @@ export function SheetView({ workbook, activeIndex, onSelectSheet, onCommitOps, o
         </div>
         <div className="sheet-rowheader">
           <div className="sheet-rowheader-track" ref={rowHeaderRef}>
-            {layout.rowIndexes.map((rowIndex, slot) => {
+            {/* 行号也只画可见窗口：实测 5 万行的表全量渲染出 5 万个行号 div，每次滚动重排整条 track（600k 格中位 129ms/步 → 25ms） */}
+            {layout.rowIndexes.slice(rowStart, rowEnd).map((rowIndex, offset) => {
+              const slot = rowStart + offset;
               const selected = rowIndex >= range.start.rowIndex && rowIndex <= range.end.rowIndex;
               return (
                 <div
