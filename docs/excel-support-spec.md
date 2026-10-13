@@ -207,7 +207,9 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 
 **其它约束**：行元信息（行高/`customHeight`/`hidden`/整行样式）随记录搬，不留在原位——用户藏起来的那一行本该跟着它的数据走；
 带内格子总数上限 50 000（前像+后像两份都在 op 里，还要进 `modlog` 的 JSON，§七"大表"那条边界就是这里拦的）；
-`target` 是整条行地址，所以 `reanchorOp`/`trackLandedOn`/`rememberReanchor` 三处的批内重锚定按"非插删 op"的既有分支天然覆盖。
+`target` 是整条行地址，批内重锚定（`reanchorOp`/`trackLandedOn`/`rememberReanchor`）里**排序与插删一样不播种锚点**——
+实测过的原因：排序是"把记录整体挪走"而不是"把某一条改成新内容"，给它记锚点会把同批里后面的 op 领到错的行上，
+而按内容寻址本来就能在新区位认出那条记录（下面第 8 条用例钉着这一点）。
 
 **取证（§6.1）**：Microsoft 的排序帮助页在只读取内容时拿不到逐条次序（`sort-data-on-a-worksheet` 已 404、
 `sort-data-in-a-workbook-in-the-browser` 抓取失败、无障碍版页面只讲操作不讲次序，均实测于 2026-10-13），
@@ -215,9 +217,12 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 唯一用到的官方口径是"搬动带公式的格会调整引用"这件事（[Move or copy cells, rows, and columns](https://support.microsoft.com/article/Move-or-copy-cells-rows-or-columns-1da1d795-8ac1-4a43-893b-b39f2256575a)），
 它只用于支撑"公式一律拒绝"这条边界；Excel 在排序里到底怎么调整区内引用本机无通道实测，标 `[!] BLOCKED`。
 
-**验收**：置换/稳定/空格最后/混合秩/样式随行/行元信息随行/单行合并区随行/三条拒绝/撤销逐格还原/
-排序后用户手改一格再撤销→报"部分撤销"/超上限拒绝，全部单测钉住；再走一次真落盘：
-`SheetFile` 排序后保存 → `auditXlsxPackage` 0 条 → openpyxl 独立读回逐字段比对行序与格式（项目记忆里"新增写盘改动必过第三方读取器"那条）。
+**验收**（`e0a6b0d` + `76dfc12` 实测，逐条过）：置换/稳定/空格最后/混合秩/样式随行/行元信息随行/单行合并区随行/
+三条拒绝/撤销逐格还原/排序后用户手改一格再撤销→报"部分撤销"/超上限拒绝，共 17 条单测钉住
+（`sheet-sort.test.ts` 7 + `sheet-edit.test.ts` 10）；真落盘走过一次——夹具 `A3:E4` 按 C 列排完写回后
+`auditXlsxPackage` 返回 `[]`，**openpyxl 独立读回**确认整行换位且格式跟着记录走
+（`A4` 的 `bold=True`/`FFFF0000`、`D` 列的 `mm-dd-yy`、只带格式的空白格 `E` 列 `0.00%` 整格搬位），
+撤销再存一次的部件文本与基线逐字相同。装配面（`sort_rows` 进提案 schema、代理翻 op、卡片文案）另见 §八 同一行。
 
 ---
 
@@ -729,6 +734,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 2 | `294fc1f` | D19 的渲染那一半（真实 app 里的滚动 / 键盘 / 编辑手感） | `[x]`（内存那条边界仍如实留着，见 D19 ①②） | 一次性探针 `tmp/sheet-perf-probe.mjs` + `tmp/sheet-header-align.mjs`（§6.5 不入主干）驱动**构建产物**，CDP 取数。**60 万格只读那份**（50 000×12）：打开 6.2s、渲染进程堆 250MB、进程树 RSS 1 404MB、DOM 51 717→**1 714**（行号 50 041→**43**）；20 步半屏滚动 2 574ms / 中位 129ms / 23 个长任务（最差 100ms）→ **502ms / 中位 25ms / 0 个长任务**；方向键 50 次 131.3→**13.6 ms/次**。**10 万格可编辑那份**（10 000×10）：打开 1.5s、堆 71.7MB、RSS 694MB、改一格到画出来 358ms（含一个 288ms 长任务——每次编辑整表载荷往返主进程）。对齐判据：表头 track 首尾视口 top 与表体逐格一致（-174 / 846），截图里行号 3001 那行的 800…808 正是夹具公式 `(r*10+c)%973`。踩到的两坑记在 §七 末两行（rAF 节流、`formulabar` 是只读回显不是编辑入口）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 desktop **446** / sheet-io **200** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
 | 1 | `6f801c0` | A2/A3 与 §2.3 的第三条路（改数字格式不许牵连其它格式）＋ 新增 §二 P12 | `[x]` | 单测第一次跑就是红的（`expected 6 to be 7`）：`s="4"` 粗体红字格改成百分比时，旧实现按"四个 id"复用撞上了已有的普通 `0.00%` 样式，**样式表一条没加、粗体和红字直接没了**。改成 `StyleTable.withNumberFormat` 克隆原格那条 xf 只换 `numFmtId`（`<alignment/>` 子节点跟着走），仍只追加不重排。判据：`xlsx-styles.test.ts` 4 条（克隆带子节点 / 二次改不加条目 / 自定义格式码落 `<numFmts>` / 越界 `s` 按 General）+ `sheet-file.test.ts` 1 条走真实保存路径；**openpyxl 独立读回**：`General→0.00%` 而 `bold=True`、`color=FFFF0000`、`align=center` 三项原样，产物前两条 xf 逐字未变。顺带量到 `50%→50.00%` 那条不对称，按 §1.4 没夹带修，记在 §七。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **205**（新增 `xlsx-styles.test.ts`，该模块此前没有自己的测试文件）/ desktop **446** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
 | 1 | `e75bc68` | A3/A4 的输入侧（键入的文字与网格显示必须同一句）＋ §七 末行结掉 | `[x]` | 上一条取证顺手量到的不对称：所有百分比一律给内建 10 号，而 10 号是 `0.00%`（`0%` 是 9 号），于是键入 `12%` 显示成 `12.00%`。改成按小数位数选格式（0→9、2→10、其余走自定义码 `0.0%`/`0.000%`，保存时仍只追加 `<numFmts>`）。判据：`cell-text.test.ts` 一条覆盖 `12% / -12% / 0% / 12.5% / 12.50% / 12.500%` 六种输入的"显示回敲进去的原话"，并钉住"两位以内不凭空造自定义格式"；**openpyxl 独立读回产物**：`12%→0%`、`12.5%→0.0%`（numFmt 164）、`12.500%→0.000%`（165），同一份文件里 A2 的 `0.00%` 仍带着 `bold=True`/`FFFF0000`/`center`（上一条修复没被牵连）。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **206** / desktop **446** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 |
+| 3 | `e0a6b0d` + `76dfc12` | D7 的验收清单（op 落地与撤销、比较器四条规则、三条拒绝、批内不播种锚点、落盘往返、审计 0 条、提案面与装配） | `[x]`（Excel 的排序行为仍 `[!] BLOCKED`：本机没有 Excel，见 D7 取证段） | 引擎侧 `sheet-sort.ts`（比较器纯函数，7 条）+ `sheet-edit.ts` 的第五类 op（`sheet-edit.test.ts` 10 条：升/降、稳定、空格恒在带尾、`styleIndex` 与行元信息与单行合并区随记录走、三条拒绝各一条、区域/键列写错逐条给理由、50 000 格上限、排完手改一格→撤销报部分撤销并带地址、排序与改值同批时改值落到那条记录的**新**行）。落盘：`sheet-file.test.ts` 2 条（夹具 `A3:E4` 按 C 列排完写回读回整行换位 + 日期样式/粗体红字跟着走，撤销后部件文本与基线**逐字相同**；真实夹具里探出区域的 `G2` 与带公式的 `G2/J2` 各拒一次）；`compat-audit.test.ts` 的"重排过整行的写回"审计 `[]`。**openpyxl 独立读回**（`tmp/sort-probe.mjs` + `tmp/sort-read.py`，§6.5 不入主干）：`saved` 里 `A3='3月' C3=90`、`A4='2月' bold=True color=FFFF0000`、`D3` 带着 `mm-dd-yy`、只有格式的空白格 `E4 fmt='0.00%'` 整格搬走（`E3` 变回 `General`），`undone` 与原始夹具逐格一致。装配面：`sheet-tools` 的 zod 与 JSON schema 同步加 `sort_rows`（`.strict()`，模型自己报次序数组进不来）、提示词把排序从"做不了"改成"用 sort_rows"并讲明硬约束、`sheetOpsOfProposal` 多一条 case 且把引擎理由原样进 `notes`、卡片行与输入框提示同步成五类。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **226**（+20）/ desktop **448**（+2）/ docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2（合计 **1 002**） |
 
 ---
 

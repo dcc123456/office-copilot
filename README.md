@@ -347,7 +347,7 @@ pnpm --filter @office-copilot/desktop build    # renderer + main + preload
   这条是逐特性对拍抓出来的：让 openpyxl 自写 10 份"每份只压一类结构"的 `.xlsx`，走桌面那条真实保存路径存一遍，再让 openpyxl 读回来逐字段比（spec §二 P11）。
 - 撤销：每次改动是**自带逆操作**的结构化 op，撤销按内容寻址而不是按位置，所以不会牵连你后来的手工编辑；存储与文档侧共用同一份 `userData/modlog/<文档名>.json`。
 - AI（⌥⌘L 面板在表格模式下走 `src/ai/sheetAgent.ts`）：五个只读工具 `sheet_describe`（列画像）、`sheet_read_range`（区域显示文本）、`sheet_aggregate`（分组聚合）、`sheet_find`（COUNTIF 风格条件）、`sheet_duplicates`（重复行），加上 `sheet_create_chart` 与 `sheet_submit_proposal`。**所有数值由引擎从现场表算，模型只引用不许心算**——这条写在工具描述里。
-- 提案能落地四类：改格（`set_cell`，文本以 `=` 开头当公式）、列宽、插行、删行。排序 / 拆合列 / 统一数字格式刻意不开（理由见 spec §七）。
+- 提案能落地五类：改格（`set_cell`，文本以 `=` 开头当公式）、列宽、插行、删行、按一列重排整行（`sort_rows`，只交区域与键列，行序由引擎算；带内有公式或这些行在区域外还有内容时整条拒绝）。拆合列 / 统一数字格式刻意不开（理由见 spec §七）。
 - 图表是**原生 chart part**而不是贴图（D5）：`xl/charts/chartN.xml` + 画图部件 + 两级关系 + `[Content_Types].xml` 两条 Override，五件一起登记；保存时逐张落地，插不进就整批取消。Excel / WPS 里能当图表点开改。
 - 三种模式沿用文档侧：半自动先出卡片（把引擎读到的引用与数值排成中文行，并在卡片上**用 Chart.js 画出预览图**，点「插入图表」之前就能看见结果）；全自动排进待写清单；聊天模式只念数字不落地。预览只是给人看的，`.xlsx` 里存的一直是原生 chart part。
 - 怎么确认导出的 `.xlsx` 能在办公软件里打开（本机没装 Microsoft Excel / LibreOffice，所以是三层证据，spec §二 P9/P10）：
@@ -377,16 +377,16 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 206、`desktop` 446、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 226、`desktop` 448、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
 - `docx-io`：296 个用例，覆盖 OOXML 读入 / 写出往返、单位与颜色换算
-- `sheet-io`：206 个用例（A1 地址与列号、日期序列号与显示文本、ARGB↔hex、列宽/行高几何、公式子集求值与引用解析、`sharedStrings` 富文本 run 往返、整格 `inlineStr` 富文本原样回写、结构化 op 的逆操作与批内重新锚定、分析引擎（列画像 / 聚合 / 条件定位 / 重复行 / 区域截断）、`ChartSpec` 校验、chart part 的读回结构断言、新建 `sharedStrings` 时三处一起登记、`cellXfs` 只追加不重排与「改数字格式不许拍平字体/底色/边框/对齐」、键入的百分比显示回原话）
+- `sheet-io`：226 个用例（A1 地址与列号、日期序列号与显示文本、ARGB↔hex、列宽/行高几何、公式子集求值与引用解析、`sharedStrings` 富文本 run 往返、整格 `inlineStr` 富文本原样回写、结构化 op 的逆操作与批内重新锚定、**第五类 op：按一列重排整块行**（比较器四条规则、样式/行高/单行合并区随记录走、带公式与探出区域一律拒绝、撤销就是把两份镜像对调）、分析引擎（列画像 / 聚合 / 条件定位 / 重复行 / 区域截断）、`ChartSpec` 校验、chart part 的读回结构断言、新建 `sharedStrings` 时三处一起登记、`cellXfs` 只追加不重排与「改数字格式不许拍平字体/底色/边框/对齐」、键入的百分比显示回原话）
 - `sheet-tools`：12 个工具入参校验用例（JSON 语法错、缺字段、多字段、越界都回错误串而不是抛异常）
 - `apps/cli`：4 个用例（挑表按名字与 1 基序号、`--metric` 的 `avg`→`average`、分组键逗号切分）
 - `server`：mock `fetch`，验证 tool-calling 循环产出提案 / 纯聊天状态
-- `desktop`：446 个用例。文档侧原有：`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入（局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档）、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里）。表格侧新增：`sheet/sheetGridModel` 几何/可见窗口/键盘步进/点→地址/改列宽、`sheet/sheetHistory` 认形状并倒回逆操作、`ai/sheetAgent` 的工具环与提案→op（含图表回合）、`sheet/chartPreviewModel` 的引用→数据→图型映射与图例/标题显隐规则
+- `desktop`：448 个用例。文档侧原有：`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入（局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档）、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里）。表格侧新增：`sheet/sheetGridModel` 几何/可见窗口/键盘步进/点→地址/改列宽、`sheet/sheetHistory` 认形状并倒回逆操作、`ai/sheetAgent` 的工具环与提案→op（含图表回合、按一列重排整行、引擎拒绝时理由原样进 `notes` 而不是静默丢掉半份提案）、`sheet/chartPreviewModel` 的引用→数据→图型映射与图例/标题显隐规则
 
 > 注意：根 `pnpm test` 是 `pnpm -r` + `passWithNoTests: true`，**某个包一个用例都没有也是全绿**
 > （`packages/shared` 目前没有测试文件）。验收时按上面的逐包通过数核对，别只看总退出码；
