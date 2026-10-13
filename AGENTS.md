@@ -65,7 +65,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | --- | --- | --- |
 | 2.1 | **单位换算只允许发生在 `packages/docx-io` 的进出口**。编辑器内字号一律 CSS px（`"14px"`），`.docx` 里是半磅；行距/段前后距/缩进在编辑器是 pt 与倍数，导出换算成 twips（`TWIP_TO_PX = 96/1440`，A4 = 11906×16838 twips @96DPI）。渲染层、CLI、AI 工具层**禁止**出现第二处换算。表格侧同理：日期序列号 ↔ 显示文本、ARGB ↔ `#rrggbb`、px → EMU 只在 `packages/sheet-io`（`datetime.ts` / `color.ts` / `chart-spec.ts`）里换算，`SheetView`、`oc sheet`、`sheet-tools` 一律用引擎给好的显示串。 | `[纪律]` + `[验收]` |
 | 2.2 | **颜色一律 `#rrggbb`**。标记里存 hex；读不懂的颜色值宁可不写，也不要原样塞进 `w:color`。 | `[验收]` |
-| 2.3 | **不许把局部格式拍平**。整段改字符样式时只补每段自己缺的属性；一段内加粗/字号只有部分文字带时，必须拒绝并提示用户，禁止静默覆盖红色字、荧光笔、加粗。表格里同一格内的富文本 run（`<r>` 与其颜色）在保存时按 run 指纹复用，不许压成纯文本。 | `[机检]` `apps/desktop/src/editor/docBlocks.live.test.ts`、`packages/sheet-io/src/sheet-file.test.ts` |
+| 2.3 | **不许把局部格式拍平**。整段改字符样式时只补每段自己缺的属性；一段内加粗/字号只有部分文字带时，必须拒绝并提示用户，禁止静默覆盖红色字、荧光笔、加粗。表格里同一格内的富文本 run（`<r>` 与其颜色）在保存时按 run 指纹复用，不许压成纯文本；写在格子里的整段 inline 富文本（`<c t="inlineStr"><is><r>`）我们没有建模，只能整格原文原样回写，改过值才重写。 | `[机检]` `apps/desktop/src/editor/docBlocks.live.test.ts`、`packages/sheet-io/src/sheet-file.test.ts` |
 | 2.4 | **写入必须原子**：先按大纲模拟出预期结果，实际事务落地不一致就整批放弃；文件写入走 `写 path + ".tmp" → fs.rename`（`apps/desktop/electron/fileHandlers.ts`）。禁止直接 `writeFile` 覆盖用户正在打开的文件。 | `[机检]` 桌面引擎单测 + `[纪律]` |
 | 2.5 | **每次改动可撤销**：以"改动块"为粒度记入 `userData/modlog/<文档名>.json`（保留最近 60 条），每个 CoreOp 必须发出自己的逆操作；撤销按**内容寻址**而不是按位置，禁止牵连用户后来的手工编辑。无法安全回滚时明确报"部分撤销"，不许猜。 | `[机检]` `apps/desktop/src/ai/docEdit.test.ts`、`packages/sheet-io/src/sheet-edit.test.ts`、`apps/desktop/src/sheet/sheetHistory.test.ts` |
 | 2.6 | **离线排版必须幂等且只改格式**：`editor/formatDocument` 跑两遍结果一致，且不得改动任何文字内容。 | `[机检]` `formatDocument` / `templates` 单测 |

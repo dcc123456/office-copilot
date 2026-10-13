@@ -343,6 +343,8 @@ pnpm --filter @office-copilot/desktop build    # renderer + main + preload
 - 网格：`src/sheet/SheetView.tsx` + `sheetGridModel.ts`（几何、可见窗口、键盘步进、点→地址都是纯函数）。双击格内编辑，表头右键插/删行列，列宽拖拽走指针捕获。
 - 公式：以 `=` 开头当公式，`sheet-io` 里单文件递归下降求值。按 D4 只写公式与缓存值、**不实现重算引擎**，白名单外的公式留给 Excel 重算（列画像会显示"待 Excel 重算 N 格"）。
 - 保真：只建模认得的部分，未建模部件原样回写；富文本 run 的颜色在保存时按 run 指纹复用，不会把局部格式拍平（`AGENTS.md` §2.3 同款红线）。
+  整段 inline 写法的富文本（`<c t="inlineStr"><is><r>`，openpyxl 与不少导出器就这么写）我们没有建模，**整格原文原样搬**，改过值才重写。
+  这条是逐特性对拍抓出来的：让 openpyxl 自写 10 份"每份只压一类结构"的 `.xlsx`，走桌面那条真实保存路径存一遍，再让 openpyxl 读回来逐字段比（spec §二 P11）。
 - 撤销：每次改动是**自带逆操作**的结构化 op，撤销按内容寻址而不是按位置，所以不会牵连你后来的手工编辑；存储与文档侧共用同一份 `userData/modlog/<文档名>.json`。
 - AI（⌥⌘L 面板在表格模式下走 `src/ai/sheetAgent.ts`）：五个只读工具 `sheet_describe`（列画像）、`sheet_read_range`（区域显示文本）、`sheet_aggregate`（分组聚合）、`sheet_find`（COUNTIF 风格条件）、`sheet_duplicates`（重复行），加上 `sheet_create_chart` 与 `sheet_submit_proposal`。**所有数值由引擎从现场表算，模型只引用不许心算**——这条写在工具描述里。
 - 提案能落地四类：改格（`set_cell`，文本以 `=` 开头当公式）、列宽、插行、删行。排序 / 拆合列 / 统一数字格式刻意不开（理由见 spec §七）。
@@ -375,7 +377,7 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 198、`desktop` 442、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 200、`desktop` 442、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
