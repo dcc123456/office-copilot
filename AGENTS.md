@@ -152,7 +152,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | 7.1 | 每个涉及写入路径（op、格式、模板、导入导出）的改动，必须补/改对应单测：桌面引擎（`src/ai`、`src/editor`）、`docx-io`、`word-tools`、`word-client`、`server`。测试用本地 fixture，禁止访问真实 LLM 端点（mock `fetch`）。 | `[机检]` `pnpm test` |
 | 7.2 | UI 类改动必须 `pnpm dev:desktop` 起真实 app 走一遍主流程（选中→改→撤销→导出 docx→用 Word/WPS 打开），并在收尾时报告看到了什么；跑不起来就如实说明卡在哪，不许用单测冒充可视验收。 | `[纪律]` + `[验收]` |
 | 7.3 | **测试产生的文件一律不入库**：临时 `.docx`、截图、探针输出只能写到 `tmp/`（自己负责清理）。**`tmp/` 没有 `.gitignore` 条目**，它每次都以未跟踪目录出现在 `git status` 里，所以禁止 `git add -A` / `git add .`；`tmp/` 里还常有从 `userData/config.json` 复制过去的探针配置，**含真实 Key**，暂存前必须看清。仓库里图片只允许两种路径：`apps/task-pane/public/assets/**`（应用素材）与文档明确要求的品牌/说明图。 | `[纪律]`（本仓尚无 pre-commit，见 §9） |
-| 7.4 | **收尾自检清单**（每次改完逐条回答，任一不过不得提交、不得声称完成）：<br>① `pnpm build` + `pnpm test` 全绿，贴实际命令与输出（注意 ⑧ 的假绿）<br>② §2 领域不变量逐条自查：单位、颜色、局部格式、原子写、可撤销、幂等<br>③ 复用检查：新逻辑搜过同能力实现吗？出现第二处复制了吗？（§3）<br>④ 死代码检查：有没有未被调用的导出、被替换的旧实现、注释掉的代码块（§3.5）<br>⑤ 新增编辑器能力：`EDITOR_EXTENSIONS` 注册了吗？docx 往返测了吗？（§5.3）<br>⑥ `.docx` 真的用 Word / WPS 打开验证过吗？结论写清楚是"实测"还是"推断"<br>⑦ 提交与推送是否完成（§1.6），commit message 是否符合 §1<br>⑧ 暂存区里有没有测试临时产物、证书、`.env`（§8） | `[验收]` |
+| 7.4 | **收尾自检清单**（每次改完逐条回答，任一不过不得提交、不得声称完成）：<br>① `pnpm build` + `pnpm test` 全绿，贴实际命令与输出（注意 ⑧ 的假绿）<br>② §2 领域不变量逐条自查：单位、颜色、局部格式、原子写、可撤销、幂等<br>③ 复用检查：新逻辑搜过同能力实现吗？出现第二处复制了吗？（§3）<br>④ 死代码检查：有没有未被调用的导出、被替换的旧实现、注释掉的代码块（§3.5）<br>⑤ 新增编辑器能力：`EDITOR_EXTENSIONS` 注册了吗？docx 往返测了吗？（§5.3）<br>⑥ `.docx` 真的用 Word / WPS 打开验证过吗？结论写清楚是"实测"还是"推断"。**`.xlsx` 那一半不是 BLOCKED**：对产物跑 `oc sheet check <file>`（结构审计，有问题退出码 1），要读值再用 openpyxl / Numbers 交叉读，判据见 `docs/excel-support-spec.md` §二 P9<br>⑦ 提交与推送是否完成（§1.6），commit message 是否符合 §1<br>⑧ 暂存区里有没有测试临时产物、证书、`.env`（§8） | `[验收]` |
 
 `[!]` 是合法状态——环境不具备（例如本机没装 Word、无法验证 Windows 行为）时**如实标 BLOCKED**，
 禁止用推测写成"已验证"。诚实的空项比虚假的全绿有用。
@@ -236,7 +236,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | §2.4/2.5 op 逆操作与内容寻址撤销 | 单测 | **已落地** | `apps/desktop/src/ai/docEdit.test.ts`、`diff.test.ts`；表格侧 `packages/sheet-io/src/sheet-edit.test.ts`、`apps/desktop/src/sheet/sheetHistory.test.ts` |
 | §2.6 离线排版幂等、只改格式 | 单测 | **已落地** | `apps/desktop/src/editor/formatDocument.test.ts`、`templates.test.ts` |
 | §2.8 工具入参校验 | zod | **已落地** | `packages/word-tools`、`packages/sheet-tools`（12 条入参解析用例：坏 JSON / 缺字段 / 多字段 / 越界都回错误串，不抛异常） |
-| §2.10 新建 OPC 部件三处一起登记 | 单测（构造"原文件没有这个部件"的夹具） | **已落地** | `packages/sheet-io/src/sheet-file.test.ts`（inlineStr 来源新建 `sharedStrings`、原有表逐字节不动）、`xlsx-chart.test.ts`（图表五件登记） |
+| §2.10 新建 OPC 部件三处一起登记 | 单测（构造"原文件没有这个部件"的夹具）+ 结构审计 | **已落地** | `packages/sheet-io/src/sheet-file.test.ts`（inlineStr 来源新建 `sharedStrings`、原有表逐字节不动）、`xlsx-chart.test.ts`（图表五件登记）、`compat-audit.test.ts`（三种产物审计 0 条）、`apps/desktop/electron/sheetHandlers.test.ts`（保存前只拦新引入的问题） |
 | §2.11 数值由引擎算，模型只交引用 | 单测 | **已落地** | `packages/sheet-io/src/xlsx-chart.test.ts`（`resolveChartSpec` 拒自填数字/二维引用）、`analysis/sheet-table.test.ts`、`apps/desktop/src/ai/sheetAgent.test.ts` |
 | §5.2 渲染层不碰 Node | contextBridge 白名单 + TS 类型 | **已落地** | `apps/desktop/electron/preload.ts` |
 | §5.5/5.6 弹层贴边、指针捕获 | 单测 | **已落地** | `hooks/useAnchoredMenu.test.ts`、`hooks/usePointerDrag.test.ts` |

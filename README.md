@@ -354,6 +354,8 @@ pnpm --filter @office-copilot/desktop build    # renderer + main + preload
   加图表写回）都是 0 条；② **openpyxl 交叉读**（`PYTHONPATH=tmp/pylibs python3`）——独立读取器对系列引用 / 缓存值 / 锚点 / 图表类型；
   ③ **Numbers 实开**（本机唯一能驱动的办公软件）：`osascript -e 'tell application "Numbers" to open POSIX file "/abs/path.xlsx"'`，
   再问 `count of charts of sheet 1`、`value of cell "A1" of table 1`。
+  桌面 app 的保存本身已经带这道闸：`saveSheetDoc` 在 `写 .tmp → rename` **之前**审一遍，只拦"这次改动新引入的"问题
+  （底包原本就不合规的第三方文件照样能存），拦下就整批不写、弹一句中文，磁盘上的文件一个字都不动。
   这三层能证明"文件合规、且第三方办公软件真把它读成了表格和图"，**证明不了配色与字体的画面效果**——那一条照旧 `[!] BLOCKED`，
   要装了 Excel / WPS 的机器补一次目视。注意 Numbers 很宽容：一份引用断链的文件它照样打开、只是 `charts=0`（图静默丢了），
   所以"Numbers 打得开"不等于合规，合规判定以 ① 为准。
@@ -373,7 +375,7 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 198、`desktop` 439、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 198、`desktop` 442、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
