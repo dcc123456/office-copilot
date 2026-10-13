@@ -2,8 +2,8 @@
 
 三种形态，同一套 LLM 工具定义：
 
-1. **桌面 app（功能最全）** —— Electron + Tiptap 编辑器，AI 直接改当前文档并留可撤销的修改历史，见「桌面应用」。
-2. **CLI（最省事，Word 和 WPS 都适用）** —— `oc` 命令直接修改 `.docx` 文件，无需 Office 宿主，输出文件用 Word / WPS / Pages / LibreOffice 都能打开。
+1. **桌面 app（功能最全）** —— Electron + Tiptap 编辑器，AI 直接改当前文档并留可撤销的修改历史，见「桌面应用」；它同时是一台 `.xlsx` 表格 app（网格编辑 + AI 分析/整理/计算 + 写原生图表），见「Excel 表格」。
+2. **CLI（最省事，Word 和 WPS 都适用）** —— `oc` 命令直接修改 `.docx` 文件，无需 Office 宿主，输出文件用 Word / WPS / Pages / LibreOffice 都能打开；`oc sheet` 只读分析 `.xlsx`。
 3. **Word 任务窗格加载项** —— 在 Word 桌面版/网页版里用自然语言改当前文档（需要 Microsoft Word）。
 
 > 给 AI 代理看的改代码规范（提交格式、领域不变量、收尾自检）在仓库根目录的 **`AGENTS.md`**。
@@ -11,12 +11,14 @@
 ```
 office-copilot/
 ├─ apps/
-│  ├─ desktop/       # Electron 桌面 app：Tiptap 编辑器 + AI 直接改 .docx（功能最全）
+│  ├─ desktop/       # Electron 桌面 app：Tiptap 编辑器 + AI 直接改 .docx，另带 .xlsx 网格（功能最全）
 │  ├─ cli/           # 命令行工具（Node，跨 Office/WPS）
 │  ├─ task-pane/     # Office 加载项前端（React + Vite + Fluent UI）
 │  └─ server/        # Node/Express：加载项用的 LLM 网关 + 版本历史
 ├─ packages/
 │  ├─ docx-io/       # 直接读写 .docx（JSZip + OOXML），CLI 与桌面端共用
+│  ├─ sheet-io/      # 直接读写 .xlsx：OPC 解析、保真回写、结构化 op、分析引擎、原生图表部件
+│  ├─ sheet-tools/   # 表格侧暴露给 LLM 的工具定义 + zod 校验（共享）
 │  ├─ word-client/   # Office.js Word API 原子操作封装，加载项用
 │  ├─ word-tools/    # 暴露给 LLM 的工具定义 + zod 校验（共享）
 │  └─ shared/        # 跨端类型与协议
@@ -26,7 +28,8 @@ office-copilot/
 ```
 
 依赖方向是单向的：`apps/*` 依赖 `packages/*`，`packages` 之间不互相依赖业务逻辑；
-单位换算（px / 半磅 / twips）与颜色归一化只在 `packages/docx-io` 的进出口发生。
+单位换算（px / 半磅 / twips）与颜色归一化只在 `packages/docx-io` 的进出口发生，
+表格侧同理只在 `packages/sheet-io`（日期序列号 ↔ 显示文本、ARGB ↔ `#rrggbb`、px → EMU）。
 
 ---
 
@@ -72,6 +75,15 @@ cd apps/cli && pnpm link --global && cd -
 | `oc insert-table <file.docx> -d '[["A","B"],["1","2"]]'` | 插入二维表格，默认首行加粗；`--no-header` 关闭 |
 | `oc insert-image <file.docx> ./logo.png -w 200` | 在文末插入 PNG/JPEG 图片 |
 | `oc ai <file.docx> "把所有'甲方'改成'客户'，并在末尾加签字栏"` | 调用 LLM 生成提案，确认后写入 |
+| `oc sheet info <file.xlsx>` | 工作簿概览：每张表的已用区域、已用格数、警告与未建模结构 |
+| `oc sheet stats <file.xlsx> [-s 销售]` | 列画像：类型推断、缺失数、众数、Σ/均值/中位/极值、离群值、"待 Excel 重算"的格数 |
+| `oc sheet read <file.xlsx> -r A1:D20` | 按 A1 区域取数，输出的是显示文本（日期/百分比已换算） |
+| `oc sheet find <file.xlsx> -c 销量 --criteria ">100"` | 按 COUNTIF 风格条件筛行（`>100`、`<=2`、`<>北京`、`北京`） |
+| `oc sheet aggregate <file.xlsx> --by 地区 -m sum:销量 -m avg:销量` | 分组聚合，数值由引擎从现场表读（`avg` = `average`） |
+| `oc sheet dedupe <file.xlsx> --keys 月份,地区` | 重复行预览：按这些键能安全删几行（删行请回桌面 app，才有撤销与 `.bak`） |
+
+`oc sheet` 全部是**只读**的：与桌面 app、AI 工具层跑同一份 `packages/sheet-io` 引擎，所以三端对同一个文件的
+数字一致；每条都支持 `--json` 供脚本用。写侧刻意不在 CLI 落地（撤销、modlog、原子替换都在主进程那条路上）。
 
 所有写命令默认：
 - 原地写回时会先生成 `.bak` 备份（`--no-backup` 关闭）
@@ -116,6 +128,13 @@ oc insert-table contract.revised.docx -d '[["条款","责任方"],["交付","乙
 
 # 4. 撤销：把 .bak 改回来即可
 mv contract.docx.bak contract.docx
+
+# 5. 表格只读分析（数字来自 sheet-io 引擎，与桌面 app、AI 工具层同一口径）
+oc sheet stats sales.xlsx
+oc sheet aggregate sales.xlsx --by 地区 -m sum:销量 -m avg:销量
+  华东  2 行  sum(销量)=270  average(销量)=135
+  华北  1 行  sum(销量)=90  average(销量)=90
+共 2 组
 ```
 
 ### 跨软件兼容性
@@ -315,6 +334,21 @@ pnpm --filter @office-copilot/desktop test     # 引擎单测（op 寻址/逆操
 pnpm --filter @office-copilot/desktop build    # renderer + main + preload
 ```
 
+### Excel 表格（同一 app 里的第二种文档：`.xlsx` 网格 + AI 分析/整理/计算 + 原生图表）
+
+完整规格（选型研究、架构决策 D1–D6、阶段 0–6、验收清单 A–E、逐提交实测数字）在 **`docs/excel-support-spec.md`**，这里只说"能做什么、怎么做到的"。
+
+- 打开：文件 → 打开（⌘O）选 `.xlsx`；主进程按扩展名分派到 `sheet:*` 一组具名 IPC（`electron/sheetHandlers.ts`），渲染层仍只经 preload 白名单访问 Node。
+- 网格：`src/sheet/SheetView.tsx` + `sheetGridModel.ts`（几何、可见窗口、键盘步进、点→地址都是纯函数）。双击格内编辑，表头右键插/删行列，列宽拖拽走指针捕获。
+- 公式：以 `=` 开头当公式，`sheet-io` 里单文件递归下降求值。按 D4 只写公式与缓存值、**不实现重算引擎**，白名单外的公式留给 Excel 重算（列画像会显示"待 Excel 重算 N 格"）。
+- 保真：只建模认得的部分，未建模部件原样回写；富文本 run 的颜色在保存时按 run 指纹复用，不会把局部格式拍平（`AGENTS.md` §2.3 同款红线）。
+- 撤销：每次改动是**自带逆操作**的结构化 op，撤销按内容寻址而不是按位置，所以不会牵连你后来的手工编辑；存储与文档侧共用同一份 `userData/modlog/<文档名>.json`。
+- AI（⌥⌘L 面板在表格模式下走 `src/ai/sheetAgent.ts`）：五个只读工具 `sheet_describe`（列画像）、`sheet_read_range`（区域显示文本）、`sheet_aggregate`（分组聚合）、`sheet_find`（COUNTIF 风格条件）、`sheet_duplicates`（重复行），加上 `sheet_create_chart` 与 `sheet_submit_proposal`。**所有数值由引擎从现场表算，模型只引用不许心算**——这条写在工具描述里。
+- 提案能落地四类：改格（`set_cell`，文本以 `=` 开头当公式）、列宽、插行、删行。排序 / 拆合列 / 统一数字格式刻意不开（理由见 spec §七）。
+- 图表是**原生 chart part**而不是贴图（D5）：`xl/charts/chartN.xml` + 画图部件 + 两级关系 + `[Content_Types].xml` 两条 Override，五件一起登记；保存时逐张落地，插不进就整批取消。Excel / WPS 里能当图表点开改。
+- 三种模式沿用文档侧：半自动先出卡片（把引擎读到的引用与数值排成中文行）再点「插入图表」；全自动排进待写清单；聊天模式只念数字不落地。
+- 验收口径：本机没有 Word/WPS 可视通道，视觉验证一律标 BLOCKED，替代证据是**独立读取器复核**（openpyxl 把我们自己写的 `.xlsx` 读回，逐条对系列引用 / 缓存值 / 锚点 / 图表类型）+ 结构断言单测。
+
 ## 项目结构要点
 
 - **不在前端持有 LLM Key**：前端只通过后端 SSE 调用模型；CORS 只允许任务窗格来源。
@@ -330,16 +364,19 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-10 实测）：`docx-io` 84、`desktop` 94、`word-client` 8、`word-tools` 6、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 185、`desktop` 439、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 3、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
-- `docx-io`：84 个用例，覆盖 OOXML 读入 / 写出往返、单位与颜色换算
+- `docx-io`：296 个用例，覆盖 OOXML 读入 / 写出往返、单位与颜色换算
+- `sheet-io`：185 个用例（A1 地址与列号、日期序列号与显示文本、ARGB↔hex、列宽/行高几何、公式子集求值与引用解析、`sharedStrings` 富文本 run 往返、结构化 op 的逆操作与批内重新锚定、分析引擎（列画像 / 聚合 / 条件定位 / 重复行 / 区域截断）、`ChartSpec` 校验、chart part 的读回结构断言、新建 `sharedStrings` 时三处一起登记）
+- `sheet-tools`：12 个工具入参校验用例（JSON 语法错、缺字段、多字段、越界都回错误串而不是抛异常）
+- `apps/cli`：3 个用例（挑表按名字与 1 基序号、`--metric` 的 `avg`→`average`、分组键逗号切分）
 - `server`：mock `fetch`，验证 tool-calling 循环产出提案 / 纯聊天状态
-- `desktop`：94 个用例（`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入：局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里））
+- `desktop`：439 个用例。文档侧原有：`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入（局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档）、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里）。表格侧新增：`sheet/sheetGridModel` 几何/可见窗口/键盘步进/点→地址/改列宽、`sheet/sheetHistory` 认形状并倒回逆操作、`ai/sheetAgent` 的工具环与提案→op（含图表回合）
 
 > 注意：根 `pnpm test` 是 `pnpm -r` + `passWithNoTests: true`，**某个包一个用例都没有也是全绿**
-> （`apps/cli`、`packages/shared` 目前没有测试文件）。验收时按上面的逐包通过数核对，别只看总退出码；
+> （`packages/shared` 目前没有测试文件）。验收时按上面的逐包通过数核对，别只看总退出码；
 > 也不要把 `pnpm test` 用管道接 `tail`（退出码会变成 `tail` 的）。
 
 ## 联调建议（首次验收脚本）
@@ -363,7 +400,8 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 
 - **regex 替换**：未支持，需要在客户端做字面量探测。
 - **重度 PDF 编辑**：下一阶段会走 LibreOffice headless 把 PDF 转 .docx，在 Word 里编辑后再导回；复杂排版评估商业 SDK（Aspose / PDFTron）。
-- **Excel / PPT**：新增 `packages/excel-client`、`packages/ppt-client`，复用 server 的 tool-calling 循环。
+- **Excel**：读入 + 保真回写 + 手动编辑 + 结构化 op 与撤销 + AI 分析/整理/计算 + 原生图表部件已落，见「Excel 表格」与 `docs/excel-support-spec.md`。**还没做的**：app 内的图表预览视图（`.xlsx` 里已是原生图表，只是本 app 不画它，卡在"要不要引图表库"这条表态上）、CLI 写侧（撤销、modlog、原子替换都在桌面主进程那条路上，CLI 只读）、公式重算引擎（按 D4 只写公式与缓存值）、透视表 / 条件格式 / 数据验证的编辑（读入时原样保留，不建模）、Word/WPS 的可视验证（本机无可视通道，`AGENTS.md` §8，一律标 BLOCKED）。任务窗格加载项不接表格。
+- **PPT**：未开工，原计划的 `packages/ppt-client` 还没建。
 - **多人/企业部署**：目前是单机自托管；后续加 SSO、审计日志、按租户的 Key 管理。
 - **图标**：`apps/task-pane/public/assets/icon-*.png` 目前是占位 1×1 PNG，上架前替换为正式品牌图标。
 
@@ -381,9 +419,12 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 - 远端：`git@github.com:dcc123456/office-copilot.git`（`main`）。改动完成即提交并推送，不在本地堆积。
 - **不入库的东西**：`node_modules`、`dist`、`apps/desktop/release/`（`.dmg` / `.app` 构建产物，单个可达
   数百 MB）、`certs/**`（除 `.gitkeep`）、`.env`、`apps/server/data/*.sqlite`。
+  `tmp/`（测试与探针产物、夹具、验证用的 `.xlsx`）**没有 `.gitignore` 条目**，所以它每次都以未跟踪目录出现在
+  `git status` 里——按 `AGENTS.md` §7.3 靠人工不暂存，谁也不要 `git add -A`。
 - 提交信息：描述部分用中文，格式 `<type>(<scope>): <做了什么 + 为什么>`；一个提交只做一件事。
 - AI 代理与人类同样受 **`AGENTS.md`** 约束，尤其是第 2 节「领域不变量」（单位/颜色换算只在
-  `packages/docx-io`、局部格式不许被拍平、写入原子且可撤销）。收尾自检要求逐包核对测试结果，
+  `packages/docx-io` 与 `packages/sheet-io` 各自的进出口、局部格式不许被拍平、新建 OPC 部件要三处一起登记、
+  写入原子且可撤销）。收尾自检要求逐包核对测试结果，
   并注意根 `pnpm test` 对"某包没有测试用例"也是全绿。
 
 ## 五、与 Microsoft Word 的功能差距（联网核对 + 本机实测）

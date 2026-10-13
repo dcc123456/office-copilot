@@ -395,6 +395,16 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 **目标**：`apps/cli` 增加 `ocs`（或 `oc sheet`）子命令复用 `sheet-io`+分析引擎；`README.md` 增补 Excel 小节；把 §一~§三 新增的不变量补进 `AGENTS.md`；
 可选：`sheet:*` 的 docx 报告嵌入（把表格区域作为 Word 表写入，复用 `DocxFile.insertTable`）。
 **完成判定**：三端（desktop/cli/docs）对同一份 `.xlsx` 行为一致；`AGENTS.md` §9 表格里新增项标清"已落地/待落地"。
+**进度（2026-10-13）**：CLI 读侧已落 `a72196e`——`apps/cli/src/sheet.ts` 的 `oc sheet info|stats|read|find|aggregate|dedupe`，
+**只做装配**：解析、单位换算、列画像、区域显示文本、聚合、条件筛选、重复行预览一律走 `sheet-io` 的公开入口
+（`SheetFile.toWorkbook` + `analysis/**`），所以"三端对同一份 `.xlsx` 行为一致"是结构性的，不靠对拍；
+每条都支持 `-s/--sheet`（表名或 `info` 里显示的 1 基序号）、`--no-header`、`--json`。
+写侧**刻意不在 CLI 落地**：撤销、modlog、原子 `.tmp→rename` 都在桌面主进程那条路上，CLI 再写一份保存等于开第二个写入口，
+`dedupe` 因此只预览并在末尾提示"删行请回桌面 app"。`apps/cli` 第一次有测试文件（3 条）。
+同一批的还有文档与规则：`README.md` 的 Excel 小节、`oc sheet` 命令表、逐包通过数与 `已知边界`；
+`AGENTS.md` 新加 §2.10（新建 OPC 部件三处一起登记）与 §2.11（数值一律由引擎算，模型只交引用），
+§2.1/2.3/2.5/2.8/2.9 补上表格侧的单点与机检位置，§9 表格里把表格相关项标"已落地"并写出测试文件。
+未落：可选的 docx 报告嵌入（把表格区域作为 Word 表写进 `.docx`）——它要的是写侧，与本阶段的"CLI 只读"不同，留给后续。
 
 ---
 
@@ -430,7 +440,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | **实际**：`packages/sheet-io/src/xlsx-chart.ts`（纯 XML 拼装）+ `sheet-file.ts` 的 `SheetFile.addChart`（五件一起登记，`addedParts` 进 `toBytes`、`restoreSnapshot` 一起回退）+ `opc.ts:relativeTarget`（`resolveTarget` 的逆）。原计划的提交 14/15 合成一个 `294ce88`：解析与写入共用同一份测试文件，按文件粒度拆不开，硬拆只会造出编译不过的中间提交 | `294ce88` |
 | 5 | `sheet_create_chart` 工具面 + app 内侧的图表卡片与保存落地 | **实际**：`src/ai/sheetAgent.ts`（工具 case、`{kind:"chart"}` 回合出口、系统提示词那段"只给区域，数值由引擎读"）+ `src/ai/AIPanel.tsx`（三种模式各一条路：卡片行/计数/按钮/已应用文案，引擎只给码与结构化引用，中文在渲染层拼，§5.7）+ `src/App.tsx` 的 `pendingCharts`（按 `partPath` 暂存、同表换掉前一张、换文档与新建都清空）+ `electron/sheetHandlers.ts` 的 `saveSheetDoc(..., charts)` 与 `global.d.ts` 的 `SheetSaveRequest.charts`（§5.2 三处一起改，未开新通道） | `e19aece` |
 | 5 | 独立读取器复核保存路径时抓出的包结构缺陷（§二 P8） | `packages/sheet-io/src/sheet-file.ts`（`writeSharedStringsPart` 只在"原文件没有这张表"时补关系与 Override；追加关系那段收敛成 `relsWith`/`nextRelIdFor`，图表那条路复用同一处，§3.2）+ `xlsx-strings.ts` 三个常量 + `sheet-file.test.ts` 两条回归（inlineStr 来源、原有表逐字节不动） | `fa693d2` |
-| 6 | CLI 子命令、README、AGENTS 更新 | `apps/cli/src/**` `README.md` `AGENTS.md` | 提交 16 |
+| 6 | CLI 子命令、README、AGENTS 更新 | **实际**：`apps/cli/src/sheet.ts`（六条只读子命令 + `registerSheetCommands`，纯装配）、`apps/cli/src/sheet.test.ts`（该包第一条测试）、`apps/cli/src/index.ts`（注册 + 描述里写明"只读分析 `.xlsx`"）、`apps/cli/package.json` 加 `@office-copilot/sheet-io`（唯一新增依赖，`AGENTS.md` §6.4：引擎已在仓内，不引第三方表格库）、`README.md`（`oc sheet` 命令表 + 示例、§三 下的 Excel 小节、逐包通过数、已知边界改写成"已落/未落"）、`AGENTS.md`（§0 范围、§2.10/§2.11 两条新不变量、§2.1/2.3/2.5/2.8/2.9 补表格侧、§3 禁止第二套 xlsx 实现、§5.1 依赖方向、§7.3 `tmp/` 没有 gitignore 条目、§8 两条环境事实、§9 机检状态） | `a72196e`（代码）+ 本提交（文档与规则） |
 
 推进纪律：每阶段结束跑一次 `pnpm build > tmp/b.log 2>&1; echo EXIT=$?` 与 `pnpm test > tmp/t.log 2>&1; echo EXIT=$?`
 （**重定向后再读退出码**，`AGENTS.md` §8 的假绿），并逐包核对通过数（`apps/cli`、`packages/shared` 本就无测试）。
@@ -552,11 +562,15 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 24. `[x]` `pnpm build` 全绿（类型检查藏在 build 里，`pnpm test` 不能替代）。
    **实测**：`pnpm build > tmp/xlsx-probe/root-build.log 2>&1` → `BUILD_EXIT=0`，日志含 `packages/sheet-io build: Done`。
 25. `[x]` `pnpm test` 全绿，且**逐包核对通过数**（新包 `sheet-io`/`sheet-tools` 必须有测试文件，不许靠 `passWithNoTests` 蒙过）。
-   **实测**：`TEST_EXIT=0`；逐包核对 —— sheet-io **25**、docx-io 296、desktop 398、word-tools 6、word-client 8、server 2；`packages/shared`/`apps/cli` 仍 “No test files found”（本仓既有状态，不是本次引入的假绿）。
-26. `[ ]` `pnpm dev:desktop` 起真实 app 手工走通主流程，收尾报告看到什么；跑不起来就如实说明卡点，不许用单测冒充可视验收。
+   **实测**：`TEST_EXIT=0`；逐包核对 —— sheet-io **25**、docx-io 296、desktop 398、word-tools 6、word-client 8、server 2；`packages/shared`/`apps/cli` 仍 "No test files found"（本仓既有状态，不是本次引入的假绿）。
+   **阶段 6 复测**：sheet-io **185** / desktop **439** / docx-io 296 / sheet-tools **12** / word-client 8 / word-tools 6 / **apps/cli 3**（该包第一条测试，上一条里的"cli 没有测试文件"从此不再成立）/ server 2；仍无测试的只剩 `packages/shared`。
+26. `[x]` `pnpm dev:desktop` 起真实 app 手工走通主流程，收尾报告看到什么；跑不起来就如实说明卡点，不许用单测冒充可视验收。
+   **实测**：阶段 3/4/5 用临时 CDP harness 驱动**构建产物**里的真实 app（等价于 dev 版，且避开了用户自己在跑的实例），走完"开表→改格→保存→撤销→再保存→插图表→再保存"，看到的卡片文案、按钮、状态与落盘五件部件都记在 §八 对应行；表格模式下没有文档工具栏（`App.tsx` 的 `!isSheet`），保存走命令面板这条已写进 `AGENTS.md` §8 环境事实。
 27. `[x]` 测试产物只落 `tmp/` 且清理；不新增任何二进制夹具入库（`AGENTS.md` §7.3）。
-   **实测**：夹具由 `scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
-28. `[ ]` 提交信息中文、`<type>(<scope>)`、一事一提交，功能与格式化不夹带；已推送并复核远端。
+    **实测**：夹具由 `scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
+    **待清**：`tmp/` 里还留着阶段 5 的 app 探针目录，其中 `tmp/chart-ui-profile/config.json` 是从用户 `userData/config.json` **复制来的、含真实 Key**——它从未被暂存也从未入库（`git status` 里 `tmp/` 一直是未跟踪目录），但 `tmp/` **没有 `.gitignore` 条目**，所以任何 `git add -A` 都会把它带进去。这条已写进 `AGENTS.md` §7.3，清理 `tmp/` 是收尾动作之一。
+28. `[x]` 提交信息中文、`<type>(<scope>)`、一事一提交，功能与格式化不夹带；已推送并复核远端。
+    **实测**：阶段 6 拆成 `a72196e`（feat(cli)：只读子命令 + 该包第一条测试）与本提交（docs：README/AGENTS/spec 回填）两件事，各自推送后 `git status -sb` + `git ls-remote origin main` 双重复核；用户自己的未提交 WIP（`HistoryPanel.tsx`、`styles.css`）没有被夹带进任何一个提交。
 
 ---
 
@@ -609,7 +623,8 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 5 | `e19aece` | D5 的工具面与 app 内侧（`sheet_create_chart` → 卡片 → 随保存落地） | `[x]`（工具面与保存侧；ECharts 查看与 canvas→PNG 见下一行） | 引擎侧 `sheetAgent.ts` 多一条 `sheet_create_chart` 与 `{kind:"chart"}` 回合出口；面板三种模式各一条路（半自动挂"插入图表"卡片、聊天只念引用与数值、全自动直接排进待写清单）；`App.tsx` 用 `pendingCharts` 按 `partPath` 暂存（图表是包部件不是格子，不进工作簿载荷；同表再来一张换掉前一张，因为 `CT_Worksheet` 只允许一个 `<drawing>`）；`saveSheetDoc(..., charts)` 逐张 `addChart`，插不进就整批取消并回一句中文（§2.4/§5.7）。**真端点实跑**（`tmp/chart-agent-probe.mjs`，node 侧 import 同一个 `sheetAgent.ts`）：说"画成折线图"时模型 1 轮直接调 `sheet_create_chart`，引擎从现场表读成 `cat='销售'!$A$2:$A$4`、值 `[100,120,150,150]`，写盘 7902 字节；同一份表上说"画成柱状图"，模型这次改走 `sheet_aggregate`+`sheet_submit_proposal`（往 G1:H4 写辅助区）——工具可达但不被确定性选中，这条如实记进 §七。**真实 app 实跑**（§7.2，CDP 打构建产物 + 独立 `--user-data-dir` + 本地 config，`tmp/chart-ui-probe2.mjs`）：`tmp/chart-app.xlsx` 打开 → 切半自动 → "按月份把销售额画成折线图" → 卡片标题「AI 表格提案 / 插入一张折线图」、计数「1 张图表」、按钮 `插入图表/放弃/忽略` → 点后状态变「已排进待写清单」并如实提示"撤销栈管不到图表，要回退请用同名 .bak" → 表格模式没有文档工具栏（`App.tsx:1210` 的 `!isSheet`），保存走命令面板（⌘K→"保存"）→ 落盘产物五件齐全（`xl/charts/chart1.xml`、`xl/drawings/drawing1.xml` + 它的 rels、`xl/worksheets/_rels/sheet1.xml.rels`、两条 Override）+ `.bak` 在。**独立读取器复核 app 产物**：openpyxl 3.1.5 读回 `charts=1`、`LineChart`、`val='销售'!$C$2:$C$5` 缓存 `100/120/150/150`、`cat='销售'!$A$2:$A$5`、锚点 `(col 6,row 1)`、`A1=月份 C2=100 C5=150`、`5×5` 未变形。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **185** / sheet-tools 12 / desktop **439**（新增 chart 那条与"区域取不到数"那条）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 5 | `fa693d2` | §二 P8：只有 inlineStr 的来源表存盘后读方找不到字符串表（独立读取器抓出的 §2 红线） | `[x]` | 驱动 app 那条路时让 openpyxl 审计我们自己的产物，`tmp/chart-agent-out-折线图.xlsx` 直接 `IndexError: list index out of range`。比对 zip 清单定死原因：来源表全程 `<c t="inlineStr">`（openpyxl 就这么写）时包里没有 `xl/sharedStrings.xml`，我们新建部件却没登记 workbook 关系与 `[Content_Types]` Override。`writeSharedStringsPart` 只在"原文件没有这张表"时补这两处；原有表的结构逐字节不动（单测第二条钉住）。顺带把追加关系那段逻辑收敛成 `relsWith`/`nextRelIdFor` 给图表复用（§3.2）。重跑探针：`tmp/chart-app-saved.xlsx` 与二次保存的 `chart-app-saved2.xlsx`（幂等）都被 openpyxl 读回 `BarChart`、`cat='销售'!$A$2:$A$4`、缓存 `100/120/150`、`D2=已核对`；app 那次实跑的产物里 `xl/_rels/workbook.xml.rels` 也带上了这条关系 |
 | 5 | 待起 | D5 剩下的一半：ECharts 查看（`src/sheet/ChartView.tsx`）与 canvas→PNG 报告插图（P6） | `[ ]` | 需要先答 §6.4："现有依赖能否覆盖"——仓内没有图表库，相邻先例只有 `apps/desktop/src/ai/diagramCanvas.ts:136 renderDiagram`（canvas 2D → PNG dataURL）。本次刻意不预先造第二套画图代码：卡片把引擎解析好的引用/数值/落点排成中文给人看，真正的图在 `.xlsx` 里是原生对象 |
-| 6 | — | D18/E24–E28 | `[ ]` | |
+| 6 | `a72196e` | 阶段 6 完成判定（三端一致）、D18、E24–E25、E27 | `[x]` | `apps/cli/src/sheet.ts` 六条只读子命令**只做装配**，import 的是桌面在用的同一份 `sheet-io`（不是各写一套再对拍），所以"三端对同一份 `.xlsx` 行为一致"结构性成立。同一份夹具上的实测数字：`oc sheet stats` → `C 销量 number 非空 3 互异 3  Σ 360 均值 120 中位 120 90~150`、`E 增长 … Σ 12.00% 缺失 2`、`F 备注 empty 缺失 3`；`oc sheet aggregate --by 地区 -m sum:销量 -m avg:销量` → `华东 2 行 sum(销量)=270 average(销量)=135` / `华北 1 行 sum=90 average=90` / `共 2 组`——与桌面网格显示的显示串、与 openpyxl 读回的缓存值同一口径（`3月` 那份 `sum=300` 也这样核过）。CLI 唯一新增依赖是仓内的 `@office-copilot/sheet-io`（§6.4：引擎已有，不引第三方表格库）。本次门禁：`pnpm build` EXIT=0（顺带抓出测试夹具里 `freeze: null` 的类型错——那个字段是"可选"不是"可空"）、`pnpm test` EXIT=0，逐包核对 **apps/cli 3**（该包第一条测试）/ sheet-io **185** / sheet-tools **12** / desktop **439** / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 6 | 本提交（docs） | 阶段 6 完成判定（§9 标清已落地/待落地）、E28 | `[x]` | `README.md`：`oc sheet` 命令表与只读说明、§三 下的 Excel 小节（网格/公式/op 撤销/五个读工具/原生图表/验收口径）、示例脚本第 5 条用真实输出、逐包通过数改成 2026-10-13 的实测、`已知边界` 里 Excel 一行改写成"已落 / 未落"、四节里写明 `tmp/` **没有 `.gitignore` 条目**。`AGENTS.md`：§0 范围加表格、§2 新增 **2.10 新建 OPC 部件三处一起登记**与 **2.11 数值一律由引擎算、模型只交引用**，§2.1/2.3/2.5/2.8/2.9 补上表格侧的单点与机检位置，§3 禁止第二套 xlsx 实现，§5.1 依赖方向写清表格侧，§7.3/§8 补两条环境事实（独立读取器代替可视通道、表格模式的保存入口），§9 表格里表格相关项逐条标"已落地"并写出测试文件。**仍未落**（照实标 `[ ]`）：app 内图表预览与 canvas→PNG（上一条那一行）、CLI 写侧、`sheet:*` 的 docx 报告嵌入；A4/A8 的 Word/Excel 真重算与可视验证本机没有通道，保持 `[!] BLOCKED` |
 
 ---
 
