@@ -19,6 +19,17 @@ import {
   text,
 } from "./xml.js";
 
+/** 字符串表的部件路径。新建它时必须连关系与内容类型一起登记，见 `SheetFile` 的 `writeSharedStringsPart`。 */
+export const SHARED_STRINGS_PART = "xl/sharedStrings.xml";
+
+/** `[Content_Types].xml` 里字符串表的类型；写成别的 Excel 直接判文件损坏。 */
+export const SHARED_STRINGS_CONTENT_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml";
+
+/** `xl/workbook.xml` 指向字符串表的关系类型——读方（openpyxl / Excel）全靠这条关系去找那张表。 */
+export const SHARED_STRINGS_REL_TYPE =
+  "http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings";
+
 /** 字符串表。`entries` 的下标就是 `<c/@t="s">` 里 `<v>` 的取值。 */
 export class SharedStringTable {
   private readonly entries: SharedStringEntry[] = [];

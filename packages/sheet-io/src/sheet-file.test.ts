@@ -676,3 +676,79 @@ describe("分析读工具跑在真实 .xlsx 上（阶段 4 · 验收 B10/B11 的
     expect(findRows(payload, { column: "月份", criteria: "3月" }).hits.map((hit) => hit.address)).toEqual(["A4"]);
   });
 });
+
+/**
+ * 只有 `t="inlineStr"`、连 `xl/sharedStrings.xml` 都没有的一份包（openpyxl 这类导出器的实际形状）。
+ *
+ * 单独造这份夹具是为了钉住一个实测缺陷：我们把文本一律写成 `t="s"`，就必须凭空新建这张表，
+ * 而**光写部件不算登记**——读方是按 `xl/workbook.xml` 的关系与内容类型找表的。
+ *
+ * @returns `.xlsx` 字节：一张两行两列的小表，A 列文本、B 列数值。
+ */
+async function buildInlineOnlyBytes(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file(
+    "[Content_Types].xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`,
+  );
+  zip.file(
+    "_rels/.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+  );
+  zip.file(
+    "xl/workbook.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="销售" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+  );
+  zip.file(
+    "xl/_rels/workbook.xml.rels",
+    `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`,
+  );
+  zip.file(
+    "xl/styles.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs></styleSheet>`,
+  );
+  zip.file(
+    "xl/worksheets/sheet1.xml",
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="A1:B2"/><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>月份</t></is></c><c r="B1" t="inlineStr"><is><t>销售额</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>1月</t></is></c><c r="B2"><v>100</v></c></row></sheetData></worksheet>`,
+  );
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+}
+
+describe("原文件没有字符串表时把新表登记齐全（实测：openpyxl 找不到表就报错）", () => {
+  it("写一个 inlineStr 格要连部件、workbook 关系、内容类型一起补上", async () => {
+    const file = await SheetFile.fromBytes(await buildInlineOnlyBytes(), { fileName: "inline.xlsx" });
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    expect(sheet.cells["A1"]?.value).toBe("月份");
+    const op = setCellTextOp(sheet, "C1", "备注");
+    if (!op) throw new Error("这一格建不出 op");
+    const result = runSheetOps(sheet, [op]);
+    expect(result.ops).toHaveLength(1);
+    file.writeSheet(result.after as SheetModel);
+
+    const parts = await partTexts(await file.toBytes());
+    expect(parts["xl/sharedStrings.xml"]).toContain("<si><t>备注</t></si>");
+    expect(parts["xl/_rels/workbook.xml.rels"]).toContain('Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"');
+    expect(parts["[Content_Types].xml"]).toContain('PartName="/xl/sharedStrings.xml"');
+
+    const reopened = await SheetFile.fromBytes(await file.toBytes(), { fileName: "inline.xlsx" });
+    const back = (await reopened.sheetAt(0)) as SheetModel;
+    expect(back.cells["C1"]?.value).toBe("备注");
+    // inline 文本被改成共享字符串之后，原来那两句还得读得回来（表是新建的，条目按出现顺序排）
+    expect(back.cells["A1"]?.value).toBe("月份");
+    expect(back.cells["B2"]?.value).toBe(100);
+  });
+
+  it("原文件已经有字符串表时，关系与内容类型一个字都不许多写", async () => {
+    const before = await partTexts(await buildSampleWorkbookBytes());
+    const file = await openSample();
+    const sheet = (await file.sheetAt(0)) as SheetModel;
+    const op = setCellTextOp(sheet, "C5", "四月");
+    if (!op) throw new Error("这一格建不出 op");
+    file.writeSheet(runSheetOps(sheet, [op]).after as SheetModel);
+
+    const parts = await partTexts(await file.toBytes());
+    expect(parts["xl/_rels/workbook.xml.rels"]).toBe(before["xl/_rels/workbook.xml.rels"]);
+    expect(parts["[Content_Types].xml"]).toBe(before["[Content_Types].xml"]);
+    expect(parts["xl/sharedStrings.xml"]).toContain("<si><t>四月</t></si>");
+  });
+});

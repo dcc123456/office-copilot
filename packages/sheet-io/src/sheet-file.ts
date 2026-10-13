@@ -11,7 +11,7 @@ import { children, isElement, parseDocument, type Element } from "./xml.js";
 import type { SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
 import type { ResolvedChart } from "./chart-spec.js";
 import { buildChartParts, CHART_CONTENT_TYPE, DRAWING_CONTENT_TYPE, DRAWING_REL_TYPE } from "./xlsx-chart.js";
-import { SharedStringTable } from "./xlsx-strings.js";
+import { SHARED_STRINGS_CONTENT_TYPE, SHARED_STRINGS_PART, SHARED_STRINGS_REL_TYPE, SharedStringTable } from "./xlsx-strings.js";
 import { StyleTable } from "./xlsx-styles.js";
 import { parseSheet, recalculateSheetExtent, serializeSheetXml } from "./xlsx-sheet.js";
 
@@ -49,6 +49,9 @@ export type ChartAddResult =
 
 /** 关系属性的命名空间，`<drawing r:id>` 要用它前缀。 */
 const DRAWING_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/** 工作簿本体的部件路径：新建的关系（字符串表）都挂在它下面。 */
+const WORKBOOK_PART = "xl/workbook.xml";
 
 /** 排在 `<drawing>` **之后**的 `CT_Worksheet` 元素（ECMA-376 Part 1 §18.3.1.100 的序列），插入点取第一个命中的。 */
 const AFTER_DRAWING_PATTERN =
@@ -136,7 +139,7 @@ export class SheetFile {
       throw new SheetOpenError("not-a-zip", `${options.fileName} 不是有效的 OOXML 包。`);
     }
 
-    const workbookXml = await readText(pkg.zip, "xl/workbook.xml");
+    const workbookXml = await readText(pkg.zip, WORKBOOK_PART);
     if (!workbookXml) throw new SheetOpenError("no-workbook", `${options.fileName} 缺少 xl/workbook.xml。`);
 
     const warnings: string[] = [];
@@ -158,7 +161,7 @@ export class SheetFile {
       if (contentType.includes("pivotCaches") || contentType.includes("slicerCaches")) unsupported.push({ partPath: part, reason: "pivotCache" });
     }
 
-    const relationships = pkg.relsBySourcePart.get("xl/workbook.xml") ?? [];
+    const relationships = pkg.relsBySourcePart.get(WORKBOOK_PART) ?? [];
     const relById = new Map(relationships.map((rel) => [rel.id, rel]));
     const refs: SheetRef[] = [];
     // `<sheet>` 在 `<sheets>` 容器里，不是 `<workbook>` 的直接子元素。
@@ -173,12 +176,12 @@ export class SheetFile {
       refs.push({
         name: String(el.attributes["name"] ?? ""),
         sheetId: Number(el.attributes["sheetId"] ?? 0),
-        partPath: resolveTarget("xl/workbook.xml", rel.target),
+        partPath: resolveTarget(WORKBOOK_PART, rel.target),
         hidden: String(el.attributes["state"] ?? "visible") === "hidden",
       });
     }
 
-    const sharedStrings = SharedStringTable.parse(await readText(pkg.zip, "xl/sharedStrings.xml"));
+    const sharedStrings = SharedStringTable.parse(await readText(pkg.zip, SHARED_STRINGS_PART));
     const styles = StyleTable.parse(await readText(pkg.zip, "xl/styles.xml"));
 
     const file = new SheetFile(pkg, refs, sharedStrings, styles, options.fileName, warnings, unsupported);
@@ -190,12 +193,12 @@ export class SheetFile {
       }
       file.originalParts.set(ref.partPath, original);
     }
-    const sstText = await readText(pkg.zip, "xl/sharedStrings.xml");
-    if (sstText) file.originalParts.set("xl/sharedStrings.xml", sstText);
+    const sstText = await readText(pkg.zip, SHARED_STRINGS_PART);
+    if (sstText) file.originalParts.set(SHARED_STRINGS_PART, sstText);
     const stylesText = await readText(pkg.zip, "xl/styles.xml");
     if (stylesText) file.originalParts.set("xl/styles.xml", stylesText);
     // `xl/workbook.xml` 也存原文：保存时要按它现有的样子补 `calcPr/@fullCalcOnLoad`。
-    file.originalParts.set("xl/workbook.xml", workbookXml);
+    file.originalParts.set(WORKBOOK_PART, workbookXml);
     return file;
   }
 
@@ -290,7 +293,7 @@ export class SheetFile {
     if (index < 0) return { ok: false, code: "sheet-missing" };
     const sheet = await this.sheetAt(index);
     if (!sheet) return { ok: false, code: "sheet-missing" };
-    const relId = this.nextDrawingRelId(sheetPartPath);
+    const relId = this.nextRelIdFor(sheetPartPath);
     if (/<drawing\b/.test(sheet.sourceXml)) return { ok: false, code: "drawing-exists" };
     const withDrawing = insertDrawingElement(sheet.sourceXml, relId);
     if (!withDrawing) return { ok: false, code: "no-worksheet-root" };
@@ -306,7 +309,7 @@ export class SheetFile {
     this.stagePart(parts.drawingRelsPath, parts.drawingRelsXml);
     this.stagePart(
       this.relsPathFor(sheetPartPath),
-      await this.sheetRelsWithDrawing(sheetPartPath, parts.drawingPartPath, relId),
+      await this.relsWith(sheetPartPath, relId, DRAWING_REL_TYPE, parts.drawingPartPath),
     );
     this.stagePart(
       "[Content_Types].xml",
@@ -330,29 +333,29 @@ export class SheetFile {
   }
 
   /**
-   * 这张表下一个可用的关系编号。
+   * 源部件下一个可用的关系编号。
    *
-   * @param sheetPartPath 表部件路径。
-   * @returns `rIdN` 形式的 id；已有的超链接关系原样让位，不许撞号。
+   * @param sourcePartPath 关系所属的源部件，如 `xl/worksheets/sheet1.xml`、`xl/workbook.xml`。
+   * @returns `rIdN` 形式的 id；已有的超链接/图表关系原样让位，不许撞号。
    */
-  private nextDrawingRelId(sheetPartPath: string): string {
-    const existing = this.pkg.relsBySourcePart.get(sheetPartPath) ?? [];
+  private nextRelIdFor(sourcePartPath: string): string {
+    const existing = this.pkg.relsBySourcePart.get(sourcePartPath) ?? [];
     const highest = existing.reduce((max, rel) => Math.max(max, Number(/^rId(\d+)$/.exec(rel.id)?.[1] ?? 0)), 0);
     return `rId${highest + 1}`;
   }
 
   /**
-   * 表的关系文件：保留原文，追加一条指向画图部件的关系。
+   * 源部件的关系文件：保留原文，追加一条指向新部件的关系。
    *
-   * @param sheetPartPath 表部件路径。
-   * @param drawingPartPath 本次新建的画图部件路径。
-   * @param relId 表部件里 `<drawing r:id>` 用的编号。
-   * @returns 可直接写回的 `.rels` 文本；原文件没有这个部件时整篇新建。
+   * @param sourcePartPath 关系所属的源部件。
+   * @param relId 新关系编号（来自 `nextRelIdFor`）。
+   * @param relType 关系类型 URI。
+   * @param targetPartPath 目标部件路径；写成**相对源部件目录**的形式（实测绝对写法 Excel 拒开）。
+   * @returns 可直接写回的 `.rels` 文本；原文件没有这个关系文件时整篇新建。
    */
-  private async sheetRelsWithDrawing(sheetPartPath: string, drawingPartPath: string, relId: string): Promise<string> {
-    const target = relativeTarget(sheetPartPath, drawingPartPath);
-    const relationship = `<Relationship Id="${relId}" Type="${DRAWING_REL_TYPE}" Target="${target}"/>`;
-    const original = await readText(this.pkg.zip, this.relsPathFor(sheetPartPath));
+  private async relsWith(sourcePartPath: string, relId: string, relType: string, targetPartPath: string): Promise<string> {
+    const relationship = `<Relationship Id="${relId}" Type="${relType}" Target="${relativeTarget(sourcePartPath, targetPartPath)}"/>`;
+    const original = await readText(this.pkg.zip, this.relsPathFor(sourcePartPath));
     return original
       ? original.replace("</Relationships>", `${relationship}</Relationships>`)
       : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
@@ -465,18 +468,43 @@ export class SheetFile {
     // 本次新建的部件（图表、画图部件、它们的关系、补过的 content types）原文件里没有，要凭空造出来。
     for (const [path, content] of this.addedParts) this.pkg.zip.file(path, content);
     // 改写过任何一张表就要让 Excel 开文件时全量重算：我们只写缓存值，不维护 `calcChain`。
-    const workbookXml = this.originalParts.get("xl/workbook.xml");
+    const workbookXml = this.originalParts.get(WORKBOOK_PART);
     if (this.rewrittenParts.size > 0 && workbookXml) {
-      this.pkg.zip.file("xl/workbook.xml", withFullCalcOnLoad(workbookXml));
+      this.pkg.zip.file(WORKBOOK_PART, withFullCalcOnLoad(workbookXml));
     }
     if (this.sharedStrings.addedCount > 0) {
       const allLoaded = this.loadedSheets.size === this.refs.length;
       if (allLoaded) this.sharedStrings.setUsageCount(this.countStringReferences());
       const sstXml = this.sharedStrings.toXml();
-      if (sstXml) this.pkg.zip.file("xl/sharedStrings.xml", sstXml);
+      if (sstXml) await this.writeSharedStringsPart(sstXml);
     }
     if (this.styles.isDirty) this.pkg.zip.file("xl/styles.xml", this.styles.toXml());
     return this.pkg.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+  }
+
+  /**
+   * 写字符串表部件；**原文件里没有这张表时**把关系与内容类型一起补上。
+   *
+   * 少补任一条，产出的文件就没人读得回：openpyxl 实测 `IndexError: list index out of range`
+   * （它按 `xl/workbook.xml` 的关系找表），Excel 判文件损坏——只写部件是不够的（ECMA-376 Part 1 §18.2.23、OPC §3）。
+   * 触发场景实测过：只有 `<c t="inlineStr">` 的文件（openpyxl / 部分导出器产出）本来就没有 `xl/sharedStrings.xml`，
+   * 而我们一律把文本写成 `t="s"`，就必须凭空新建这张表并登记它。
+   *
+   * @param sstXml 序列化好的 `<sst>` 文本。
+   */
+  private async writeSharedStringsPart(sstXml: string): Promise<void> {
+    this.pkg.zip.file(SHARED_STRINGS_PART, sstXml);
+    // 表原本就有：关系与内容类型都在原文里，追加条目不改变包结构。
+    if (this.originalParts.has(SHARED_STRINGS_PART)) return;
+    const relId = this.nextRelIdFor(WORKBOOK_PART);
+    this.pkg.zip.file(
+      this.relsPathFor(WORKBOOK_PART),
+      await this.relsWith(WORKBOOK_PART, relId, SHARED_STRINGS_REL_TYPE, SHARED_STRINGS_PART),
+    );
+    this.pkg.zip.file(
+      "[Content_Types].xml",
+      await this.contentTypesWith([[`/${SHARED_STRINGS_PART}`, SHARED_STRINGS_CONTENT_TYPE]]),
+    );
   }
 
   private countStringReferences(): number {
