@@ -31,7 +31,7 @@ import type {
   SectionGeometry,
   StyleEdit,
 } from "@office-copilot/docx-io";
-import { readOnlyReason, runSheetOps, type SheetCoreOp, type SheetOpsResult, type WorkbookPayload } from "@office-copilot/sheet-io";
+import { readOnlyReason, runSheetOps, type ResolvedChart, type SheetCoreOp, type SheetOpsResult, type WorkbookPayload } from "@office-copilot/sheet-io";
 import { docStyleSheet } from "./editor/docStyleSheet.js";
 import { StylePane } from "./components/StylePane.js";
 import { FootnotePane } from "./components/FootnotePane.js";
@@ -119,6 +119,13 @@ export function App() {
    */
   const [sheetWorkbook, setSheetWorkbook] = useState<WorkbookPayload | null>(null);
   const [sheetIndex, setSheetIndex] = useState(0);
+  /**
+   * 已确认、等下一次保存写进文件的图表（spec 决策 D5）。
+   *
+   * 它不进工作簿载荷：`.xlsx` 的图表是独立部件，不在这张表的格子里，主进程保存时才 `addChart`。
+   * 换一份工作簿或关文档都要清空，否则会把上一份的图插进当前文件。
+   */
+  const [pendingCharts, setPendingCharts] = useState<{ partPath: string; chart: ResolvedChart }[]>([]);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -250,6 +257,7 @@ export function App() {
     setDirty(false);
     setStarted(true);
     setSheetWorkbook(null);
+    setPendingCharts([]);
   }, [editor, stopTracking]);
 
   /**
@@ -262,6 +270,7 @@ export function App() {
     (workbook: WorkbookPayload, p: string) => {
       stopTracking();
       setSheetWorkbook(workbook);
+      setPendingCharts([]);
       setSheetIndex(0);
       setFilePath(p);
       setDirty(false);
@@ -378,6 +387,7 @@ export function App() {
       }
       stopTracking();
       setSheetWorkbook(null);
+      setPendingCharts([]);
       editor.commands.setContent(r.doc as never);
       setHeaderDoc((r.header as never) ?? null);
       setFooterDoc((r.footer as never) ?? null);
@@ -485,16 +495,39 @@ export function App() {
     return false;
   }, []);
 
+  /**
+   * 图表确认落地的唯一口（spec 决策 D5）：排进待写清单并置脏，部件本身由主进程在保存时写进包。
+   *
+   * 一张工作表在 OOXML 里只允许一个 drawing 元素（实测的硬约束），所以同一张表上再来一张时
+   * 换掉前面那张，而不是攒两张让保存整个失败。
+   *
+   * @param chart 引擎解析过的图表，引用与数值都已核对。
+   * @returns 排队成功 true；当前没有打开的表、或大表只读闸门挡住时 false（卡片据此如实报）。
+   */
+  const commitSheetChart = useCallback(
+    (chart: ResolvedChart): boolean => {
+      const sheet = sheetWorkbook?.sheets[sheetIndex];
+      if (!sheetWorkbook || !sheet) return false;
+      if (!canWriteSheet(sheetWorkbook)) return false;
+      setPendingCharts((prev) => [...prev.filter((item) => item.partPath !== sheet.partPath), { partPath: sheet.partPath, chart }]);
+      setDirty(true);
+      return true;
+    },
+    [canWriteSheet, sheetIndex, sheetWorkbook],
+  );
+
   const handleSave = useCallback(async () => {
     if (sheetWorkbook) {
       if (!canWriteSheet(sheetWorkbook)) return;
       const saved = await window.officeCopilot.saveSheet({
         path: filePathRef.current,
         sheets: sheetWorkbook.sheets,
+        charts: pendingCharts,
       });
       if (saved.ok && saved.path) {
         setFilePath(saved.path);
         setDirty(false);
+        setPendingCharts([]);
         window.officeCopilot.addRecent(saved.path);
       } else if (!saved.canceled && saved.message) {
         toast(saved.message, "error");
@@ -521,7 +554,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
+  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
 
   const handleSaveAs = useCallback(async () => {
     if (sheetWorkbook) {
@@ -529,6 +562,7 @@ export function App() {
       const saved = await window.officeCopilot.saveSheetAs({
         path: filePathRef.current,
         sheets: sheetWorkbook.sheets,
+        charts: pendingCharts,
         defaultName: filePathRef.current
           ? filePathRef.current.split(/[\\/]/).pop()
           : "工作簿.xlsx",
@@ -536,6 +570,7 @@ export function App() {
       if (saved.ok && saved.path) {
         setFilePath(saved.path);
         setDirty(false);
+        setPendingCharts([]);
         window.officeCopilot.addRecent(saved.path);
       } else if (!saved.canceled && saved.message) {
         toast(saved.message, "error");
@@ -565,7 +600,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, sheetWorkbook]);
+  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
 
   /**
    * 给当前选区新建一条批注，并把侧栏开到那条上。
@@ -1083,7 +1118,9 @@ export function App() {
   const isSheet = sheetWorkbook !== null;
   // AI 面板两套都要：表格模式下代理只读这张表的载荷，写入仍然只有 commitSheetOps 这一个口（spec 决策 D6）。
   const activeSheet = sheetWorkbook?.sheets[sheetIndex] ?? null;
-  const sheetBridge = activeSheet ? { payload: activeSheet, onCommitOps: commitSheetOps } : undefined;
+  const sheetBridge = activeSheet
+    ? { payload: activeSheet, onCommitOps: commitSheetOps, onCommitChart: commitSheetChart }
+    : undefined;
 
   return (
     <div

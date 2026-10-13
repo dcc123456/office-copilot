@@ -51,7 +51,8 @@ import {
 import { toast } from "../components/ui/Toast.js";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
 import { runSheetAgent } from "./sheetAgent.js";
-import type { SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
+import { formatA1 } from "@office-copilot/sheet-io";
+import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
 import type { SheetEditT } from "@office-copilot/sheet-tools";
 import type {
   AppSettings,
@@ -124,6 +125,12 @@ interface SheetPlanCard {
   ops: SheetCoreOp[];
   /** 没能变成 op 的条目原因，逐条给人看。 */
   notes: string[];
+  /**
+   * `sheet_create_chart` 解析过的图表；给了它这张卡就是图表卡（`ops` 必为空）。
+   *
+   * 图表不是 op：它随保存写进 `.xlsx`，撤销栈管不到，卡片要如实说这句（§2.5 的边界）。
+   */
+  chart?: ResolvedChart;
   status: CardStatus;
   message?: string;
   stopped?: boolean;
@@ -170,6 +177,23 @@ function sheetEditLines(edits: readonly SheetEditT[]): string[] {
         return `删掉第 ${[...edit.rows].sort((left, right) => left - right).join("、")} 行`;
     }
   });
+}
+
+/** 图表类型 → 卡片上那句中文。引擎只给 `bar/line/pie` 三个码（`AGENTS.md` §5.7）。 */
+const CHART_KIND_LABEL: Record<ChartKind, string> = { bar: "柱状图", line: "折线图", pie: "饼图" };
+
+/** 引擎解析过的图表 → 卡片上的一串中文行。
+ *
+ * @param chart `resolveChartSpec` 的产物：引用与数值都已从现场表读好。
+ * @returns 首行说类型与类别轴，中间每条系列一行，末行给落点与尺寸（px，非 pt，§2.1）。
+ */
+function sheetChartLines(chart: ResolvedChart): string[] {
+  return [
+    `${CHART_KIND_LABEL[chart.kind]}：类别 ${chart.categoryRef}（${chart.categories.length} 项）`,
+    ...chart.series.map((item) => `系列「${item.name}」← ${item.valueRef}（${item.values.length} 个数值）`),
+    `落点 ${formatA1(chart.anchor)}，${Math.round(chart.widthPx)}×${Math.round(chart.heightPx)}px`,
+    `标题：${chart.title || "（无）"}`,
+  ];
 }
 
 const uid = () => crypto.randomUUID();
@@ -345,6 +369,13 @@ export interface SheetPanelBridge {
    * @returns 落地结果，用于在卡上如实报"部分写入"；当前表已不在时返回 null。
    */
   onCommitOps: (ops: SheetCoreOp[], summary: string) => SheetOpsResult | null;
+  /**
+   * 图表落地的回调（`App.tsx` 的 `commitSheetChart`）：排进待写清单并置脏，真正的部件在保存时写入。
+   *
+   * @param chart 引擎解析过的图表，引用与数值都已核对。
+   * @returns 当前这张表还在并成功排队时 true；表已经关了返回 false，卡片据此报"没排进去"。
+   */
+  onCommitChart: (chart: ResolvedChart) => boolean;
 }
 
 export function AIPanel({
@@ -714,12 +745,28 @@ export function AIPanel({
   /**
    * 确认落地一张表格提案：op 交给 app 的唯一写入口，它自己核对现场并记修改历史。
    *
+   * 图表卡走另一条：它没有 op，只能排进待写清单、随下一次保存写进 `.xlsx`，
+   * 所以这里如实告诉用户"撤销栈管不到它"（§2.5 的边界）。
+   *
    * @param id 卡片条目 id。
    * @param card 待落地的提案。
    */
   const applySheetPlan = useCallback(
     async (id: string, card: SheetPlanCard) => {
       patchSheetCard(id, (c) => ({ ...c, status: "applying" }));
+      if (card.chart) {
+        if (!sheet?.onCommitChart(card.chart)) {
+          patchSheetCard(id, (c) => ({ ...c, status: "failed", message: "这张表已经关了，图表没有排进去。" }));
+          return;
+        }
+        patchSheetCard(id, (c) => ({
+          ...c,
+          status: "applied",
+          message: "已排进待写清单，保存后写进文件。撤销栈管不到图表，要回退请用同名 .bak。",
+        }));
+        onChanged();
+        return;
+      }
       const result = sheet?.onCommitOps(card.ops, card.summary);
       if (!result || !result.ops.length) {
         patchSheetCard(id, (c) => ({
@@ -811,6 +858,32 @@ export function AIPanel({
         if (outcome.kind === "answer") {
           dismiss(id);
           note(outcome.text);
+          return;
+        }
+        // 出图那条：引用与数值都已由引擎从现场表读好，这里只挂一张要用户确认的图表卡。
+        if (outcome.kind === "chart") {
+          const chartLines = sheetChartLines(outcome.chart);
+          if (modeRef.current === "chat") {
+            // 聊天模式不动表：把要画的图念出来，不挂一张点了会排进待写清单的卡（§2.8）。
+            dismiss(id);
+            note(`按你说的，这张表可以画这么一张图（聊天模式没有动它）：\n· ${chartLines.join("\n· ")}\n要落地请切到「半自动」或「全自动」。`);
+            return;
+          }
+          const chartCard: SheetPlanCard = {
+            summary: `插入一张${CHART_KIND_LABEL[outcome.chart.kind]}`,
+            edits: [],
+            ops: [],
+            notes: [],
+            chart: outcome.chart,
+            status: "pending",
+            instruction: opts.instruction,
+            messages: outcome.messages,
+          };
+          patchSheetCard(id, () => chartCard);
+          if (modeRef.current === "auto") {
+            toast("全自动：图表已排进待写清单，保存后写进文件。", "success");
+            await applySheetPlan(id, chartCard);
+          }
           return;
         }
         if (!outcome.ops.length) {
@@ -1574,7 +1647,8 @@ export function AIPanel({
 
             if (it.t === "sheet") {
               const c = it.card;
-              const lines = sheetEditLines(c.edits);
+              // 图表卡列的是引用与落点，提案卡列的是改动条目；两样都在渲染层组装（§5.7）。
+              const lines = c.chart ? sheetChartLines(c.chart) : sheetEditLines(c.edits);
               // 卡片沿用文档方案卡的那套类名（`.ai-card*` / `.op-list`），只换标题图标与文案。
               return (
                 <div key={it.id} className={`ai-card ${c.status}`}>
@@ -1587,7 +1661,7 @@ export function AIPanel({
                         正在核对表格…
                       </span>
                     ) : (
-                      <span className="ai-card-count">{c.ops.length} 处改动</span>
+                      <span className="ai-card-count">{c.chart ? "1 张图表" : `${c.ops.length} 处改动`}</span>
                     )}
                   </div>
                   {c.summary && <div className="ai-card-summary">{c.summary}</div>}
@@ -1610,7 +1684,7 @@ export function AIPanel({
                     {c.status === "pending" && (
                       <>
                         <button className="primary" onClick={() => void applySheetPlan(it.id, c)}>
-                          <Check size={12} /> 应用到表格
+                          <Check size={12} /> {c.chart ? "插入图表" : "应用到表格"}
                         </button>
                         <button className="ghost" onClick={() => dismiss(it.id)}>
                           <X size={12} /> 放弃
@@ -1624,7 +1698,7 @@ export function AIPanel({
                     )}
                     {c.status === "applied" && (
                       <span className="ai-card-status ok">
-                        <Check size={12} /> 已写入表格
+                        <Check size={12} /> {c.chart ? "已排进待写清单" : "已写入表格"}
                         {onOpenHistory && (
                           <button className="link-btn" onClick={onOpenHistory}>
                             查看修改历史

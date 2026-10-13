@@ -179,6 +179,32 @@ describe("runSheetAgent：工具回合", () => {
     expect(outcome.messages[2]?.tool_calls?.[0]?.function.name).toBe("sheet_find");
   });
 
+  it("出图那条：模型只给区域，数值由引擎从现场表读，回合停在图表提案上", async () => {
+    const script: ToolTurnResult[] = [
+      turnWithTool("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[{"values":"C2:C4","name":"C1"}],"anchor":"E2"}'),
+    ];
+    const outcome = await runSheetAgent({ sheet: sampleSheet(), instruction: "把每月销售额画成柱状图", ask: async () => script.shift()! });
+    if (outcome.kind !== "chart") throw new Error(`期望 chart，实际 ${outcome.kind}`);
+    expect(outcome.chart.series[0]!.values).toEqual([100, 120, 150]);
+    expect(outcome.chart.series[0]!.name).toBe("销售额");
+    expect(outcome.chart.categoryRef).toBe("'销售'!$A$2:$A$4");
+    expect(outcome.chart.anchor).toEqual({ colIndex: 4, rowIndex: 1 });
+    // 回给模型的那句话里带着引擎读到的引用，模型不必也不许自己报数
+    const toolMessage = outcome.messages.at(-1)!;
+    expect(JSON.stringify(toolMessage)).toContain("'销售'!$C$2:$C$4");
+  });
+
+  it("区域取不到数时把理由回给模型、回路继续，不许当成图表交出去", async () => {
+    const script: ToolTurnResult[] = [
+      turnWithTool("sheet_create_chart", '{"kind":"bar","categories":"A2:A4","series":[{"values":"B2:B4"}],"anchor":"E2"}'),
+      { ok: true, content: "区域里 B 列是文本，画不出数值，改成 C 列就可以了。", toolCalls: [] },
+    ];
+    const outcome = await runSheetAgent({ sheet: sampleSheet(), instruction: "按区域画个图", ask: async () => script.shift()! });
+    if (outcome.kind !== "answer") throw new Error(`期望 answer，实际 ${outcome.kind}`);
+    const toolMessage = outcome.messages[3];
+    expect(JSON.stringify(toolMessage)).toContain("不是数值");
+  });
+
   it("非法入参与不存在的方法名都变成回给模型的一句话，回路继续走", async () => {
     const script: ToolTurnResult[] = [
       {

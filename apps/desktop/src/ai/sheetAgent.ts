@@ -1,6 +1,6 @@
 /**
- * 表格的 AI 代理（spec 决策 D6）：把"分析 / 整理 / 计算"的诉求跑成一串工具回合，落地只认
- * `sheet_submit_proposal` 交出的那批改动，并且**只交提案，不写表**（`AGENTS.md` §2.8）。
+ * 表格的 AI 代理（spec 决策 D6）：把"分析 / 整理 / 计算 / 出图"的诉求跑成一串工具回合，落地只认
+ * `sheet_submit_proposal` 交出的那批改动与 `sheet_create_chart` 交出的那一张图表，并且**只交提案，不写表**（`AGENTS.md` §2.8）。
  *
  * 三条约束决定了这里的形状：
  * ① 取值、统计、算公式一律在 `@office-copilot/sheet-io` 里做，这里只搬运结构化结果（验收 B10）；
@@ -15,12 +15,15 @@ import {
   describeSheet,
   duplicateGroups,
   findRows,
+  formatA1,
   insertTracksOp,
   readRange,
+  resolveChartSpec,
   resolveColumnRef,
   setCellFormulaOp,
   setCellTextOp,
   setColumnWidthOp,
+  type ResolvedChart,
   type SheetCoreOp,
   type SheetPayload,
 } from "@office-copilot/sheet-io";
@@ -40,6 +43,8 @@ const SHEET_SYSTEM = `你是 Excel 表格代理，看得见的是当前工作表
 - 要数字就先调工具：sheet_describe / sheet_read_range / sheet_aggregate / sheet_find / sheet_duplicates。不许凭样本心算整表结论。
 - 要改表只能调 sheet_submit_proposal，条目只有 set_cell、set_column_width、insert_rows、delete_rows 四种；
   行号与列引用必须来自前面工具的回包，不许自己数行号。提案经用户确认才会落地。
+- 要出图调 sheet_create_chart，只报区域（类别轴 + 每条系列的数值区域 + 落点那一格），数字一律由引擎读表得到；
+  一张表只能挂一个图表，区域取不到数时引擎会回一句理由，改区域再调。经用户确认后才会随文件保存。
 - 排序、拆合列、统一数字格式这些这里做不了，遇到就直说做不了，别绕着改坏用户的表。
 - 纯分析的问题直接回答，不要为了回答去提提案。回答用中文，带上你实际查到的数字。`;
 
@@ -73,6 +78,12 @@ export type SheetAgentOutcome =
       notes: string[];
       messages: ToolTurnMessage[];
     }
+  | {
+      /** 一张图表提案（spec 决策 D5）：数据已由引擎从现场表取好，落地只等用户确认。 */
+      kind: "chart";
+      chart: ResolvedChart;
+      messages: ToolTurnMessage[];
+    }
   | { kind: "answer"; text: string; messages: ToolTurnMessage[] }
   | { kind: "paused"; messages: ToolTurnMessage[] }
   | { kind: "failed"; message: string; needsSetup?: boolean; messages: ToolTurnMessage[] };
@@ -103,9 +114,12 @@ export function sheetContextOf(sheet: SheetPayload, hasHeader: boolean): string 
  *
  * @param sheet 当前表的载荷（只读）。
  * @param call 模型点名的工具与入参原文。
- * @returns 回给模型的文本；`proposal` 非空表示模型交了提案，回路到此为止。
+ * @returns 回给模型的文本；`proposal` 非空表示模型交了改动提案，`chart` 非空表示它出了图表，两者都让回路收尾。
  */
-function executeToolCall(sheet: SheetPayload, call: ToolCall): { content: string; proposal?: SubmitProposalArgsT } {
+function executeToolCall(
+  sheet: SheetPayload,
+  call: ToolCall,
+): { content: string; proposal?: SubmitProposalArgsT; chart?: ResolvedChart } {
   switch (call.name as SheetToolName) {
     case "sheet_describe": {
       const parsed = parseToolArguments("sheet_describe", call.arguments);
@@ -127,6 +141,19 @@ function executeToolCall(sheet: SheetPayload, call: ToolCall): { content: string
       const parsed = parseToolArguments("sheet_duplicates", call.arguments);
       return { content: parsed.ok ? JSON.stringify(duplicateGroups(sheet, parsed.args)) : parsed.reason };
     }
+    case "sheet_create_chart": {
+      const parsed = parseToolArguments("sheet_create_chart", call.arguments);
+      if (!parsed.ok) return { content: parsed.reason };
+      // 数值与引用串一律由引擎从现场表取；取不到就把理由回给模型，让它改引用再调（验收 B10）。
+      const resolved = resolveChartSpec(sheet, parsed.args);
+      if (!resolved.ok) return { content: `${resolved.reason}请改区域引用后再调一次 sheet_create_chart。` };
+      const { chart } = resolved;
+      const seriesLines = chart.series.map((item) => `${item.name}=${item.valueRef}`).join("，");
+      return {
+        content: `图表已解析：${chart.kind}｜类别 ${chart.categoryRef}（${chart.categories.length} 项）｜系列 ${seriesLines}｜落点 ${formatA1(chart.anchor)}。等用户确认后才会随文件保存。`,
+        chart,
+      };
+    }
     case "sheet_submit_proposal": {
       const parsed = parseToolArguments("sheet_submit_proposal", call.arguments);
       if (!parsed.ok) return { content: parsed.reason };
@@ -136,7 +163,7 @@ function executeToolCall(sheet: SheetPayload, call: ToolCall): { content: string
       };
     }
     default:
-      return { content: `不认识的工具：${call.name}。可用面只有 sheet_describe / sheet_read_range / sheet_aggregate / sheet_find / sheet_duplicates / sheet_submit_proposal。` };
+      return { content: `不认识的工具：${call.name}。可用面只有 sheet_describe / sheet_read_range / sheet_aggregate / sheet_find / sheet_duplicates / sheet_create_chart / sheet_submit_proposal。` };
   }
 }
 
@@ -201,7 +228,7 @@ export function sheetOpsOfProposal(
 }
 
 /**
- * 跑一次表格任务：转工具回合，直到模型交提案、直接作答、被暂停或出错。
+ * 跑一次表格任务：转工具回合，直到模型交提案或图表、直接作答、被暂停或出错。
  *
  * @param input 见 `SheetAgentInput`；`sheet` 全程只读。
  * @returns `SheetAgentOutcome`。没配服务商、HTTP 失败、超过 8 轮都走 `failed`，不抛异常。
@@ -235,6 +262,7 @@ export async function runSheetAgent(input: SheetAgentInput): Promise<SheetAgentO
     for (const call of result.toolCalls) {
       const executed = executeToolCall(input.sheet, call);
       messages.push({ role: "tool", tool_call_id: call.id, content: executed.content });
+      if (executed.chart) return { kind: "chart", chart: executed.chart, messages };
       if (!executed.proposal) continue;
       const { ops, notes } = sheetOpsOfProposal(input.sheet, executed.proposal.edits, hasHeader);
       return { kind: "proposal", summary: executed.proposal.summary, edits: executed.proposal.edits, ops, notes, messages };

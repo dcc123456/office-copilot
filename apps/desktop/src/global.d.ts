@@ -1,4 +1,4 @@
-import type { SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
+import type { ResolvedChart, SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
 
 /** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
 export interface SheetOpenResult {
@@ -13,6 +13,8 @@ export interface SheetOpenResult {
 export interface SheetSaveRequest {
   path: string | null;
   sheets: SheetPayload[];
+  /** 本次要新插入的原生图表（AI 出图，spec 决策 D5）；已随文件保存过的那些不用再送。 */
+  charts?: { partPath: string; chart: ResolvedChart }[];
   defaultName?: string;
 }
 

@@ -12,6 +12,7 @@ import {
   SheetFile,
   applySheetPayload,
   workbookPayload,
+  type ResolvedChart,
   type SheetPayload,
   type WorkbookPayload,
 } from "@office-copilot/sheet-io";
@@ -30,12 +31,27 @@ export type SheetSaveResult =
   | { ok: false; canceled: true }
   | { ok: false; message: string };
 
+/** 一张待插入的图表：落在哪张表（按 `partPath` 配对）+ 引擎已解析好的图表数据。 */
+export interface SheetChartRequest {
+  partPath: string;
+  chart: ResolvedChart;
+}
+
+/** `addChart` 的错误码 → 给人看的那半句原因；码由引擎给，文案在这里组装（`AGENTS.md` §5.7）。 */
+const CHART_ADD_FAILURE: Record<"sheet-missing" | "drawing-exists" | "no-worksheet-root", string> = {
+  "sheet-missing": "这张表在文件里已经找不到了",
+  "drawing-exists": "它已经有一个图表或图片，一张表只能挂一个",
+  "no-worksheet-root": "表部件的结构读不懂",
+};
+
 /** 渲染层送回来的保存请求：一张表只带跨界的那部分，原文由主进程自己重读。 */
 export interface SheetSavePayload {
   /** 当前文档路径；null 表示还没落过盘。 */
   path: string | null;
   /** 所有表的当前内容，顺序与打开时一致。 */
   sheets: SheetPayload[];
+  /** 本次要新插入的原生图表；已写进文件的那些不在这里（它们随底包原样保留）。 */
+  charts?: SheetChartRequest[];
   /** 另存为时对话框用的缺省文件名。 */
   defaultName?: string;
 }
@@ -52,7 +68,7 @@ export function registerSheetHandlers(ipc: IpcMain, getWindow: () => BrowserWind
 
   ipc.handle("sheet:save", async (_e, payload: SheetSavePayload): Promise<SheetSaveResult> => {
     if (!payload.path) return { ok: false, message: "没有目标路径。" };
-    return saveSheetDoc(payload.path, payload.path, payload.sheets);
+    return saveSheetDoc(payload.path, payload.path, payload.sheets, payload.charts);
   });
 
   ipc.handle("sheet:save-as", async (_e, payload: SheetSavePayload): Promise<SheetSaveResult> => {
@@ -66,7 +82,7 @@ export function registerSheetHandlers(ipc: IpcMain, getWindow: () => BrowserWind
     // 未建模部件（图表、透视表、外部链接…）只存在于打开的那份文件里，
     // 所以另存为必须以它为底，否则存出去的包会少掉用户没让我们碰的东西。
     const base = payload.path ?? result.filePath;
-    return saveSheetDoc(result.filePath, base, payload.sheets);
+    return saveSheetDoc(result.filePath, base, payload.sheets, payload.charts);
   });
 }
 
@@ -92,17 +108,19 @@ export async function openSheetDoc(filePath: string): Promise<SheetOpenResult> {
 }
 
 /**
- * 把渲染层的内容写回磁盘：重读底包 → 按 `partPath` 逐表落地 → 原子替换。
+ * 把渲染层的内容写回磁盘：重读底包 → 按 `partPath` 逐表落地 → 插图表 → 原子替换。
  *
  * @param targetPath 要写的路径。
  * @param basePath 未建模部件的来源路径（通常是当前文档；另存为时是原文件）。
  * @param sheets 渲染层带回的表内容。
- * @returns ok:true + 落盘路径；任何一张表配不上就整批不写（§2.4 的事务语义）。
+ * @param charts 本次要新插入的原生图表（AI 出图那条，spec 决策 D5）；省略即不碰图表部件。
+ * @returns ok:true + 落盘路径；表配不上、图表插不进（那张表已有画图部件）都整批不写（§2.4 的事务语义）。
  */
 export async function saveSheetDoc(
   targetPath: string,
   basePath: string,
   sheets: SheetPayload[],
+  charts?: SheetChartRequest[],
 ): Promise<SheetSaveResult> {
   try {
     const baseExists = await fileExists(basePath);
@@ -116,6 +134,12 @@ export async function saveSheetDoc(
       if (!target) return { ok: false, message: `表 ${payload.name} 在文件里找不到了，本次保存已取消。` };
       applySheetPayload(target, payload);
       file.writeSheet(target);
+    }
+    for (const request of charts ?? []) {
+      const added = await file.addChart(request.partPath, request.chart);
+      if (!added.ok) {
+        return { ok: false, message: `图表插不进这张表（${CHART_ADD_FAILURE[added.code]}），本次保存已取消。` };
+      }
     }
     const out = await file.toBytes();
     if (await fileExists(targetPath)) {
