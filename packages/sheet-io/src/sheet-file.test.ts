@@ -704,6 +704,23 @@ describe("公式落盘（spec 阶段 4 D4：`<f>` 交给 Excel，缓存值 `<v>`
     // 缓存值仍按这一格自己的数字格式显示（实测夹具 `@s=1` 是内建 3：千分位、不带小数）
     expect(cellDisplayText(edited.sheet.cells["C2"]!)).toBe("240");
   });
+
+  it("改了公式引用的格子后存盘：`<v>` 是新和，撤销再存回到 Excel 留下的那份缓存（spec D8 的落盘证据）", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const originalSum = Number(payload.cells["G2"]?.cachedValue);
+    const increaseBy = 100;
+    const applied = runSheetOps(payload, [setCellTextOp(payload, "C2", String(Number(payload.cells["C2"]?.value) + increaseBy))!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+
+    const written = await writeAndReopen(applied.after);
+    expect(written.partXml).toContain(`<c r="G2"><f>SUM(C2:C4)</f><v>${originalSum + increaseBy}</v></c>`);
+    expect(cellDisplayText(written.sheet.cells["G2"]!)).toBe(String(originalSum + increaseBy));
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    const undone = await writeAndReopen(reverted.after);
+    expect(undone.partXml).toContain(`<c r="G2"><f>SUM(C2:C4)</f><v>${originalSum}</v></c>`);
+  });
 });
 
 describe("分析读工具跑在真实 .xlsx 上（阶段 4 · 验收 B10/B11 的落盘证据）", () => {

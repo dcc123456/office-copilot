@@ -9,7 +9,7 @@
  * 求值器**永不抛异常**（验收 B9：给模型的得是错误串，不是崩溃）。
  * 取数口径与 Excel 一致：区间里的空格、文本、布尔一律跳过；比较不区分大小写；`<>` 是不等于。
  */
-import { formatA1, indexToColName, parseA1, parseRange } from "./address.js";
+import { formatA1, indexToColName, parseA1, parseRange, type A1Range } from "./address.js";
 import type { CellScalarValue } from "./model.js";
 import type { SheetPayload } from "./sheet-dto.js";
 
@@ -69,6 +69,24 @@ export function evaluateFormula(formula: string, sheet: SheetPayload, origin?: s
     if (error instanceof EvaluationBlocked) return { ok: false, reason: error.message };
     return { ok: false, reason: "公式求值没走通" };
   }
+}
+
+/**
+ * 列出一条公式在本表内引用到的地址区间（复用求值器自己的词法扫描，不再写第二份引用解析，§3.1）。
+ *
+ * @param formula 公式体，不含前导 `=`。
+ * @returns 0 基的引用区间数组，可为空（纯常量公式）；含跨表 `!`、外部 `[1]`、数组常量 `{}`、已有错误值 `#`
+ *   这些我们不解释的结构时返回 **null**——调用方据此判"依赖证明不了"，不许把它当成"没有依赖"。
+ */
+export function formulaReferencedRanges(formula: string): A1Range[] | null {
+  const tokens = tokenize(formula);
+  if (!tokens) return null;
+  const ranges: A1Range[] = [];
+  for (const token of tokens) {
+    if (token.kind === "range" && token.range) ranges.push(token.range);
+    else if (token.kind === "ref" && token.address) ranges.push({ start: token.address, end: token.address });
+  }
+  return ranges;
 }
 
 /**

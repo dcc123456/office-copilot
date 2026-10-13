@@ -684,3 +684,42 @@ describe("按一列重排整块行（spec 决策 D7：第五类 op sortRows）",
     if (!refusal.ok) expect(refusal.reason).toContain("50000");
   });
 });
+
+describe("改动落地后刷新受影响公式的缓存（spec 决策 D8）", () => {
+  it("改 C2 后引用它的公式格换成真实值；撤销连缓存一起回到批前那一份", () => {
+    const sheet = sheetOf([cellOf(2, 1, 380), cellOf(2, 2, 120), cellOf(2, 3, 940), cellOf(2, 4, 210), formulaCell("D3", 3, 2, "SUM(C2:C5)")]);
+    const applied = runSheetOps(sheet, [setCellTextOp(sheet, "C2", "500")!]);
+    expect(applied.ok).toBe(true);
+    expect(applied.after.cells["D3"]?.value).toBe(1770);
+    expect(applied.after.cells["D3"]?.cachedValue).toBe(1770);
+    // 刷新是一条自带逆操作的普通 op，不是"偷偷改现场"：撤销时才回得来（C15 的契约）。
+    expect(applied.ops.map((op) => op.kind)).toEqual(["setCellValue", "setCellValue"]);
+    expect(applied.inverses).toHaveLength(2);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("本地算不出来的公式原样保留：volatile、跨表引用、以及两者混合", () => {
+    const volatileSheet = sheetOf([cellOf(2, 1, 380), formulaCell("D2", 3, 1, "TODAY()")]);
+    expect(runSheetOps(volatileSheet, [setCellTextOp(volatileSheet, "C2", "500")!]).after.cells["D2"]).toEqual(volatileSheet.cells["D2"]);
+
+    const crossSheet = sheetOf([cellOf(2, 1, 380), formulaCell("D2", 3, 1, "SUM('其它表'!C2:C2)")]);
+    expect(runSheetOps(crossSheet, [setCellTextOp(crossSheet, "C2", "500")!]).after.cells["D2"]).toEqual(crossSheet.cells["D2"]);
+
+    const mixedSheet = sheetOf([cellOf(2, 1, 380), formulaCell("D2", 3, 1, "SUM(C2:C2)+TODAY()")]);
+    expect(runSheetOps(mixedSheet, [setCellTextOp(mixedSheet, "C2", "500")!]).after.cells["D2"]).toEqual(mixedSheet.cells["D2"]);
+  });
+
+  it("只刷被牵连的那条：没引用的公式格不动，只改列宽的批一条额外 op 都不加", () => {
+    const sheet = sheetOf([cellOf(2, 1, 380), cellOf(2, 2, 120), formulaCell("D2", 3, 1, "SUM(C2:C2)"), formulaCell("D9", 3, 8, "SUM(C3:C3)")]);
+    const widthOnly = runSheetOps(sheet, [setColumnWidthOp(sheet, 2, 103)!]);
+    expect(widthOnly.ops).toHaveLength(1);
+    expect(widthOnly.after.cells["D2"]?.value).toBe(0);
+
+    const applied = runSheetOps(sheet, [setCellTextOp(sheet, "C2", "500")!]);
+    expect(applied.after.cells["D2"]?.value).toBe(500);
+    expect(applied.after.cells["D9"]?.value).toBe(0);
+  });
+});

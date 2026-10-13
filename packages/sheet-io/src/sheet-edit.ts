@@ -6,10 +6,10 @@
  * 形状与 Word 的 `CoreOp` 同构：`before` 与 `after` 都存在 op 里，逆操作就是两者交换，
  * 落地前先核对现场等于 `before`，对不上就整条跳过并报"部分撤销"（§2.4/§2.5）。
  */
-import { formatA1, formatRange, indexToColName, parseA1, parseRange, type A1Range } from "./address.js";
+import { formatA1, formatRange, indexToColName, parseA1, parseRange, rangeContains, type A1Address, type A1Range } from "./address.js";
 import { resolveColumnRef } from "./analysis/sheet-table.js";
 import { parseUserCellText } from "./cell-text.js";
-import { evaluateFormula } from "./formula-eval.js";
+import { evaluateFormula, formulaReferencedRanges } from "./formula-eval.js";
 import { shiftFormula } from "./formula-refs.js";
 import { columnWidthPxToChars } from "./geometry.js";
 import type { CellScalarValue, SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
@@ -138,22 +138,24 @@ type ApplyOutcome = { sheet: SheetPayload; inverse: SheetCoreOp } | { reason: st
  *
  * @param sheet 当前表的载荷（入参不被改动）。
  * @param ops 待应用的一批 op，必须都指向同一张表。
- * @returns `SheetOpsResult`；`after` 永远是新对象。
+ * @returns `SheetOpsResult`；`after` 永远是新对象。批里改过格子内容时，被牵连的公式缓存会作为
+ *   **额外的 `setCellValue` op** 追加进 `ops`/`inverses`（spec D8），所以调用方看到的条数可能比提交的多。
  */
 export function runSheetOps(sheet: SheetPayload, ops: SheetCoreOp[]): SheetOpsResult {
-  return applyOps(sheet, ops);
+  return applyOps(sheet, ops, false);
 }
 
 /**
  * 撤销：把逆操作队列倒序应用回去。
  *
  * @param sheet 现场载荷（可能已被用户后来的手工编辑改过）。
- * @param inverses `runSheetOps` 记下的逆操作队列。
+ * @param inverses `runSheetOps` 记下的逆操作队列（含 D8 那条缓存刷新自己的逆操作）。
  * @returns `SheetOpsResult`；认不出目标（内容变了、行列被挪过）的条目进 `skipped`，
- *   调用方必须据此报"部分撤销"，不许猜一个位置继续写（§2.5）。
+ *   调用方必须据此报"部分撤销"，不许猜一个位置继续写（§2.5）。撤销批**不再刷新一轮公式缓存**：
+ *   它的契约是回到批前那个样子，而不是顺手把别的格子"算对"。
  */
 export function revertSheetOps(sheet: SheetPayload, inverses: SheetCoreOp[]): SheetOpsResult {
-  return applyOps(sheet, inverses.slice().reverse());
+  return applyOps(sheet, inverses.slice().reverse(), true);
 }
 
 /**
@@ -194,6 +196,16 @@ export function setCellTextOp(sheet: SheetPayload, address: string, text: string
 }
 
 /**
+ * 公式算出来的值对应到格子的 `kind`（写公式与刷缓存两处要用同一套判定，§3.2）。
+ *
+ * @param value 求值结果；`null` 是空格。
+ * @returns `kind` 字段；数值与空都记 `number`（与读入端 `t` 缺失时的判定一致）。
+ */
+function formulaCellParts(value: CellScalarValue): { kind: SheetCell["kind"] } {
+  return { kind: typeof value === "string" ? "string" : typeof value === "boolean" ? "boolean" : "number" };
+}
+
+/**
  * 写一条公式，并按 spec 决策 D4 同时算出缓存值。
  *
  * `<f>` 是让 Excel/WPS 打开后能重算的活公式，`<v>` 是让 app 当场能显示数字。本地算不出来时
@@ -217,7 +229,7 @@ export function setCellFormulaOp(sheet: SheetPayload, address: string, formula: 
     address,
     colIndex: parsedAddress.colIndex,
     rowIndex: parsedAddress.rowIndex,
-    kind: typeof value === "string" ? "string" : typeof value === "boolean" ? "boolean" : "number",
+    ...formulaCellParts(value),
     value,
     formula: body,
     ...(evaluated.ok ? { cachedValue: value } : {}),
@@ -1177,19 +1189,60 @@ function applyOne(sheet: SheetPayload, op: SheetCoreOp): ApplyOutcome {
 }
 
 /**
+ * 规划"受影响公式格的缓存刷新"（spec 决策 D8），产出的是**普通 `setCellValue` op**，
+ * 所以它天然带着自己的逆操作：撤销时先回缓存再回数据，逐格还原到批前那份（C15/C17 的契约不破）。
+ *
+ * 只动"值确实变了"的公式格；算不出来的（白名单外 / volatile / 跨表 / 循环）**原样保留**——
+ * 我们既证明不了它过期、也给不出更好的数字，抹掉会让用户在自己没碰过的格子里看到空白（与 §2.3 同一条口径）。
+ *
+ * @param sheet 本批用户 op 全部落地之后的载荷。
+ * @param changedAddresses 这次改动碰到的格子（0 基）。几何变动（插删、排序）不走这里，见 D8 的边界说明。
+ * @returns 待应用的 op 列表；没有公式格需要刷时为 `[]`。
+ */
+function planFormulaRefresh(sheet: SheetPayload, changedAddresses: A1Address[]): SheetCoreOp[] {
+  const planned: SheetCoreOp[] = [];
+  for (const [address, cell] of Object.entries(sheet.cells)) {
+    if (!cell.formula || cell.rawXml) continue;
+    const ranges = formulaReferencedRanges(cell.formula);
+    // null = 引用里有我们不解释的结构（跨表、数组常量等），证明不了有没有被牵连，按 D8 不碰。
+    if (!ranges || !ranges.some((range) => changedAddresses.some((changed) => rangeContains(range, changed)))) continue;
+    const parsedAddress = parseA1(address);
+    if (!parsedAddress) continue;
+    const evaluated = evaluateFormula(cell.formula, sheet, address);
+    if (!evaluated.ok) continue;
+    const parts = formulaCellParts(evaluated.value);
+    if (cell.value === evaluated.value && cell.kind === parts.kind) continue;
+    planned.push({
+      kind: "setCellValue",
+      partPath: sheet.partPath,
+      target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
+      before: cell,
+      after: { ...cell, ...parts, value: evaluated.value, cachedValue: evaluated.value },
+    });
+  }
+  return planned;
+}
+
+/**
  * 顺序应用一批 op，失败的挑出去；`inverses` 与已落地的 `ops` 同序。
  *
  * 一批 op 都是照**同一份快照**锚定的，而第一条 op 本身就会改掉它那一行的内容指纹——
  * 不重新锚定的话，同一行的第二条 op 会以"认不出这一行"被跳过（阶段 4 的交叉读探针实测到的）。
  * 所以这里记一张"批内改过的条：旧指纹 → 新指纹"的表，只在这批 op 内部生效；
  * 批外的改动（用户后来的手工编辑）仍然按原样拦下来，`AGENTS.md` §2.5 的语义不受影响。
+ *
+ * @param sheet 现场载荷（入参不被改动）。
+ * @param ops 待应用的一批 op。
+ * @param isUndo 是否撤销批：撤销批落地后不再刷新一轮公式缓存（spec D8），正向批会在 op 全部落地后追加刷新。
+ * @returns `SheetOpsResult`；正向批的 `ops`/`inverses` 可能比提交的条数多（多出的是缓存刷新 op）。
  */
-function applyOps(sheet: SheetPayload, ops: SheetCoreOp[]): SheetOpsResult {
+function applyOps(sheet: SheetPayload, ops: SheetCoreOp[], isUndo: boolean): SheetOpsResult {
   let current = sheet;
   const opsApplied: SheetCoreOp[] = [];
   const inverses: SheetCoreOp[] = [];
   const skipped: SheetSkippedOp[] = [];
   const reanchors = new Map<string, SheetTrackAddress>();
+  const changedCells: A1Address[] = [];
   for (const planned of ops) {
     const op = reanchorOp(planned, reanchors);
     const landedOn = trackLandedOn(current, op);
@@ -1202,6 +1255,20 @@ function applyOps(sheet: SheetPayload, ops: SheetCoreOp[]): SheetOpsResult {
     current = outcome.sheet;
     opsApplied.push(op);
     inverses.push(outcome.inverse);
+    if (op.kind === "setCellValue") {
+      const changed = parseA1(op.after?.address ?? op.before?.address ?? "");
+      if (changed) changedCells.push(changed);
+    }
+  }
+  // 正向批：把被牵连的公式缓存刷成真实值（D8）。撤销批不刷——撤销的契约是回到批前那个样子。
+  if (!isUndo) {
+    for (const refreshOp of planFormulaRefresh(current, changedCells)) {
+      const outcome = applyOne(current, refreshOp);
+      if ("reason" in outcome) continue;
+      current = outcome.sheet;
+      opsApplied.push(refreshOp);
+      inverses.push(outcome.inverse);
+    }
   }
   return { ok: skipped.length === 0, before: sheet, after: current, ops: opsApplied, inverses, skipped };
 }
