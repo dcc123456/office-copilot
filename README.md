@@ -377,7 +377,7 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-13 实测）：`sheet-io` 226、`desktop` 452、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-13 实测）：`sheet-io` 230、`desktop` 455、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
@@ -386,7 +386,7 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 - `sheet-tools`：12 个工具入参校验用例（JSON 语法错、缺字段、多字段、越界都回错误串而不是抛异常）
 - `apps/cli`：4 个用例（挑表按名字与 1 基序号、`--metric` 的 `avg`→`average`、分组键逗号切分）
 - `server`：mock `fetch`，验证 tool-calling 循环产出提案 / 纯聊天状态
-- `desktop`：452 个用例。文档侧原有：`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入（局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档）、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里）、`electron/fsutil` 的原子写（走真文件系统临时目录：`rename` 那一刻目标仍是整份旧内容、失败不留 `.tmp`）。表格侧新增：`sheet/sheetGridModel` 几何/可见窗口/键盘步进/点→地址/改列宽、`sheet/sheetHistory` 认形状并倒回逆操作、`ai/sheetAgent` 的工具环与提案→op（含图表回合、按一列重排整行、引擎拒绝时理由原样进 `notes` 而不是静默丢掉半份提案）、`sheet/chartPreviewModel` 的引用→数据→图型映射与图例/标题显隐规则
+- `desktop`：455 个用例。文档侧原有：`ai/docEdit` 内容寻址 + 逆操作 + 单条撤销、`ai/diff` 中文分词 diff + git 风格行号/折叠上下文、`ai/DiffView` 渲染出的 diff 结构、`ai/diagramSpec` 图形布局、`editor/formatDocument` 离线排版幂等且只改格式、`editor/docBlocks.live` 用 App 真实 schema（`editorExtensions.ts`）跑格式写入（局部加粗/红字/高亮不被整段抹平、列表项改对齐不破坏 `bulletList`、排版后撤销能还原原文档）、`editor/templates` 公文/论文模板套版、`hooks/useAnchoredMenu` 弹层贴边不出屏、`hooks/usePointerDrag` 捕获指针后松手必然解绑（面板宽度的方向与夹取也在这里）、`electron/fsutil` 的原子写（走真文件系统临时目录：`rename` 那一刻目标仍是整份旧内容、失败不留 `.tmp`）。表格侧新增：`sheet/sheetGridModel` 几何/可见窗口/键盘步进/点→地址/改列宽、`sheet/sheetHistory` 认形状并倒回逆操作、落地条数按**提交的那批**算（引擎会额外追加公式缓存刷新 op，D8；拿它的条数当分子会说出"部分写入 2/2"）、`ai/sheetAgent` 的工具环与提案→op（含图表回合、按一列重排整行、引擎拒绝时理由原样进 `notes` 而不是静默丢掉半份提案）、`sheet/chartPreviewModel` 的引用→数据→图型映射与图例/标题显隐规则
 
 > 注意：根 `pnpm test` 是 `pnpm -r` + `passWithNoTests: true`，**某个包一个用例都没有也是全绿**
 > （`packages/shared` 目前没有测试文件）。验收时按上面的逐包通过数核对，别只看总退出码；

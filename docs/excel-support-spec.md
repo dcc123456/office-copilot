@@ -262,6 +262,10 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 因此它天然带逆操作，撤销时先回缓存再回数据；`applyOps` 多一个 `isUndo`，**撤销批不刷新一轮**——
 它的契约是"回到批前那个样子"，不是顺手把别的格子算对。调用方要接受 `result.ops.length` 可能大于提交条数。
 
+**装配面口径**（`3dcf06e`）：条数一变长，凡是拿 `result.ops.length` 当"落地了几条"的地方都会说谎。桌面提案卡那句
+「部分写入（x/y）」的分子改成 `sheetCommitTally(提交那批, result)` = `提交条数 - skipped.length`，分母是提交条数本身；
+引擎追加的刷新 op 不改变用户看到的分子分母。
+
 **验收**（已落地，`83463c7`）：
 `[x]` 单测：改 `C2` → `D3` 的新值进载荷（`1770`）；`ops` 是两条 `setCellValue`；写公式格自己（`setCellFormulaOp`）行为不变；
       volatile（`TODAY()`）/ 跨表（`'其它表'!A1`）/ 混算（`SUM(C2:C2)+TODAY()`）三种格子 `toEqual` 原格一字不动；
@@ -276,6 +280,11 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
       Cmd+Z → `D3` 回到 `1650`；再改一次并保存，部件里是 `<f>SUM(C2:C5)</f><v>2030</v>`，
       同一份文件里那条 `D4 <f>TODAY()</f>` 仍然没有 `<v>`（没被牵连，与 A4 的口径一致）。
       记一笔探针自身的坑：在网格里敲 Enter 是"先下移一格再进编辑"，所以那一下写进去的是 `C3`（120→500）而不是 `C2`。
+`[x]` **装配面实测**（`3dcf06e`，`tmp/d8-tally-app-probe.mjs` 打桩端点 + CDP，夹具 `tmp/d8-partial.xlsx` 里那条
+      `D5 <f>C3</f>` 专门用来让"删第 3 行"被 #REF! 守卫拦下）：提案两条，卡片读回
+      「部分写入（1/2）：公式引用的格子正好在要删掉的区间里，Excel 会把它变成 #REF!：C3」，
+      网格 `C2` 380→500 的同时 `D3` 当场 `1650`→`1770`（刷新那条 op 在真实 UI 里也生效）。
+      修之前同一场景会说「部分写入（2/2）」——一条被拦下却报全写，这正是 D8 让 `result.ops` 变长的副作用。
 
 ---
 
@@ -745,6 +754,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | **Chromium 对被遮挡/后台窗口节流 `requestAnimationFrame` 与定时器**：探针用 rAF 定拍时，窗口没在前台就永远不回调 | 性能探针挂了 10 分钟无输出，差点被当成 app 卡死 | 探针一律 `setTimeout` 定拍 + `PerformanceObserver("longtask")` 计数，启动带 `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling`，并对每条 CDP 调用设硬超时；必要时 `Page.setWebLifecycleState {state:"active"}`。**报数字前先确认它不是节流后的假象** |
 | **键入 `50%` 读回来显示成 `50.00%`**（`parseUserCellText` 给的是内建 10 号格式，ECMA-376 里 10 是 `0.00%`，`0%` 是 9 号；实测见 §二 P12 末段） | 用户输入与网格显示不一致，看着像"app 自己加了两位小数"；AI 写百分比列时同样中招 | **已解决**（`e75bc68`）：格式按键入的小数位数选——0 位走内建 9、2 位走内建 10，内建表盖不住的位数用自定义码 `0.0%`/`0.000%`（保存时照旧只追加 `<numFmts>`）。单测钉住六种输入的"显示回敲进去的原话"，产物经 openpyxl 独立读回：`12%→0%`、`12.5%→0.0%`、`12.500%→0.000%` |
 | **决策的边界凭"我们自己的引擎大概是这么写的"落笔**（D8 第一稿写"插删时 Excel 会改写相对引用而我们不改写"，据此划出整批跳过刷新这条边界；实现时读 `sheet-edit.ts` 才发现 `shiftFormula` 本来就会改写——**前提整个是假的**，结论却碰巧对） | 文档里留下一条谁也复现不了的"理由"，后来人照它做判断会走偏；更糟的是它看起来像取证过 | **机制类断言要连自家代码一起取证**：写"我们不做 X"之前先 grep 到那个 X 的实现看它到底做不做（本文 D8 已按实测理由改写：跳过几何批的真实约束是撤销契约——刷新会改掉被刷行的内容指纹，逆操作现场认不出就报假"部分撤销"）。既有测试红的时候先当**证据**读，别当碍事的东西改（第一版全表刷新被两条撤销用例拦下，那两条正是这条边界的出处） |
+| **引擎给返回值追加了用户没提交的 op**（D8 之后 `result.ops` 比提交条数长），下游每处拿它当「落地了几条」的文案都会跟着说谎 | 桌面提案卡当场说出「部分写入（2/2）」这种自相矛盾的话（明明有一条被拦下），用户据此以为改动全生效 | **口径收在一个纯函数里**：条数一律由 `sheetCommitTally(提交那批, result)` 算（分子 = 提交条数 - `skipped.length`），装配面不许再直接读 `result.ops.length`；改引擎返回形状时，把消费它的每处文案一起查一遍（`3dcf06e`） |
 
 ---
 
@@ -802,6 +812,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
 | 4 | 本提交（docs） | A4 的 UI 那一半（"需 Excel 重算"的两句提示改成实跑结论） | `[x]`（UI 与产物形状实测；"Excel 真重算"仍 `[!] BLOCKED`，A8 同） | `tmp/recalc-ui-probe.mjs` 驱动构建产物：点 `D3`（`=SUM(C2:C5)`）与 `D4`（`=TODAY()`）时 `.sheet-recalc-hint` 的两句原文、命令面板存盘后 app 自己写出的 `<c r="D3">…<v>1650</v></c>` / `<c r="D4"><f>TODAY()</f></c>`（无 `<v>`）与 `<calcPr calcId="124519" fullCalcOnLoad="1"/>`、`.bak` 在，以及 `oc sheet check` 0 条 / openpyxl `data_only` 读到 `D3=1650`、`D4=None`——全部数字与判据见 §五 第 4 条。这条只回填证据，代码一行未改，所以门禁数字与上一提交一致（sheet-io 226 / desktop 452 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2 = 1006） |
 | 4 | 本提交（docs） | A4 的"打开能重算"那一半第一次有第三方办公软件的实测（含一个推翻归因的对照组） | `[~]`（Numbers 实测；**Excel/WPS 仍 `[!] BLOCKED`**，A8 同） | `python3 + zipfile` 从 app 自己存出的 `tmp/recalc-app.xlsx` 造两份夹具：`tmp/recalc-mismatch.xlsx`（`D3` 缓存故意写坏成 `<v>999999</v>`，`<f>` 一字不动）与 `tmp/recalc-noflag.xlsx`（再把 `<calcPr calcId="124519" fullCalcOnLoad="1"/>` 削成只有 `calcId`）。`osascript` 交给 Numbers 打开后问 `value of cell`：**两份都回 `D3=1650.0`（真实和，不是坏缓存）与 `D4=2026年10月13日 星期二`**（`TODAY()` 我们一个字节的 `<v>` 都没写）。结论两条：① D4 的"写 `<f>` 让办公软件自己算"与 A4 的"不许拿过期数字冒充结果"在真实办公软件里成立；② **`fullCalcOnLoad` 的功劳不成立**——对照组去掉标记照样重算，Numbers 对它不敏感，所以这句只写成"符合 ECMA-376 的意图、Excel 侧未实测"（§七 新增一行讲这条归因边界）。顺带把 Numbers 那条通道能问出的东西写全：`value of cell` 必须挂在 `table` 上（挂 `sheet` 报 `-1728`），`open` 后 `count of tables` 可能是 0 要轮询（`AGENTS.md` §8 第②条同步补这两句）。代码一字未改，门禁与上一提交一致（合计 1006） |
 | 4 | `83463c7` + 本提交（docs） | 决策 **D8**（A4 的死角：改了数据之后公式格的缓存值仍是过期数字） | `[x]`（引擎、落盘、第三方交叉核对、真实 app 四项全实测） | 刷新的产物是**自带逆操作的 `setCellValue` op**，追加进同一批（`result.ops` 因此可能比提交条数多），撤销批与几何批（插删/排序/列宽）不参与。第一版做成"批后全表刷新"时被两条既有撤销用例当场拦下——它们钉住的是 C15/C17 的契约，所以是**实现错了不是测试写错了**，这条边界按测出来的理由改写（本文 D8）。实测数字：单测改 `C2` 380→500 后 `D3` 载荷与 `cachedValue` 都成 `1770`，volatile/跨表/混算三种格子 `toEqual` 原样；落盘往返那条断言产物里 `<c r="G2"><f>SUM(C2:C4)</f><v>460</v></c>`、撤销再存回到 Excel 留下的 `360`。**Numbers 交叉核对**：探针产物它读回 `C3=500.0 D3=2030.0`、`stale-probe` 那份 `1770.0`，与我们写进 `<v>` 的数同一个（`close saving no`，用户文件未动）。**真实 app 实跑**（§7.2，`tmp/d8-app-probe.mjs` 走 CDP 打构建产物）：`D3` 起先显示 `1650` → 改被它引用的格子**当场变 2030** → Cmd+Z 回到 `1650` → 再改并保存，部件里 `<f>SUM(C2:C5)</f><v>2030</v>`，同一份文件里 `D4 <f>TODAY()</f>` 仍无 `<v>`（未牵连），`auditXlsxPackage` 回 `[]`。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io **230**（+4：3 条 `sheet-edit` + 1 条 `sheet-file` 落盘）/ desktop **452** / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2，**合计 1010** |
+| 5 | `3dcf06e` + 本提交（docs） | D8 的下游副作用：装配面把「部分写入 x/y」的分子按提交条数算 | `[x]`（单测 + 真实 app 卡片文案实测） | 引擎追加的公式缓存刷新 op 让 `result.ops.length` 大于提案条数，卡片原来那句在真实场景里会说「部分写入（2/2）」——明明有一条被 #REF! 守卫拦下。桌面侧新增纯函数 `sheetCommitTally(提交那批, result)`（`apps/desktop/src/sheet/sheetHistory.ts`）+ 3 条单测；夹具 `tmp/d8-partial.xlsx`（`D5 <f>C3</f>` 专供拦截）经桩端点 + CDP 打构建产物，卡片读回「部分写入（1/2）：公式引用的格子正好在要删掉的区间里，Excel 会把它变成 #REF!：C3」，网格 `C2` 380→500 时 `D3` 当场 1650→1770。本次门禁：`pnpm build` EXIT=0、`pnpm test` EXIT=0，逐包核对 sheet-io 230 / desktop **455**（+3） / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / apps/cli 4 / server 2，**合计 1013** |
 
 ---
 
