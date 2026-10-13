@@ -661,6 +661,8 @@ describe("分析读工具跑在真实 .xlsx 上（阶段 4 · 验收 B10/B11 的
     expect(read.rows[0]!.cells).toEqual(["月份", "地区", "销量", "日期", "增长", "备注"]);
     expect(read.rows[1]!.cells[0]).toBe("粗蓝");
     expect(read.rows[1]!.cells[2]).toBe("120");
+    // D2 是序列号 46053 + 自定义格式 `yyyy-mm-dd`：显示串由引擎换算，不是我们手算的日期（§2.1）
+    expect(read.rows[1]!.cells[3]).toBe("2026-01-31");
     expect(read.rows[1]!.cells[4]).toBe("12.00%");
     expect(read.rows[1]!.cells[5]).toBe("");
   });
