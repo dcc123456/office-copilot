@@ -294,6 +294,43 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 **完成判定**：`sheet-tools` 全部入参有 zod 单测；桌面 `sheetAgent` 用 mock `fetch` 测过工具环与截断；
 用真实端点探针跑 ≥3 类任务（分析/整理/计算）并记录 token 与失败样本；产出的 `.xlsx` 读回一致且 Excel 能重算公式。
 
+**提交 10 的实际结果**（`470d370`，分析引擎）：列画像 / 分组聚合 / 去重键落在 `packages/sheet-io/src/analysis/**`，
+模型只指定"按哪几列分组、对哪列做什么聚合"，数字一律由引擎算（§零.4）；列引用解析不出来时返回 `ok:false` + 可读理由，
+工具层把理由回灌给模型而不是抛异常。
+
+**提交 11 的实际结果**（`0e7cb74`，公式子集求值 = D4 的写侧）：
+
+- 落点是 **`packages/sheet-io/src/formula-eval.ts`（单文件）**，不是计划里的 `src/formula/**`：
+  求值器是一个自足的递归下降解析器（切词 → 比较/连接/加减/乘除/幂/一元/后缀 → 最小单元），拆成目录会把一条
+  token 流拆到三个文件里读；与包内 `cell-text.ts`、`formula-refs.ts` 同一族命名（§4.5 kebab-case）。
+- 白名单按 D4：`SUM/AVERAGE/MIN/MAX/COUNT/COUNTIF/SUMIF/ROUND/ABS/IF/CONCAT(ENATE)` + 算术、比较、`&`、`%`、
+  一元正负、`^`（右结合、高于乘法，与 Excel 一致）。**口径照 Excel**：区间里的空格/文本/布尔跳过，
+  "看着像数字的文本"仍按文本处理（`SUM(A2:A4,D2)` 不把 `D2` 的 `"15"` 计进来），文本与数字比较时文本更大。
+- **失败不猜**：volatile（`TODAY/NOW/RAND/RANDBETWEEN/OFFSET/INDIRECT/CELL/INFO`）、跨表 `!`、外部簿 `[1]`、
+  数组常量 `{}`、错误值 `#`、白名单外的函数、循环引用 → `{ok:false, reason}`，`setCellFormulaOp` 照常写 `<f>`
+  但**不写 `<v>`**，并把 `recalcNeeded` 回报给调用方（验收 A4）。求值器**永不抛异常**，垃圾输入也是错误串（验收 B9）。
+- 依赖格的值**现算不信缓存**：带 `<f>` 的格被引用时递归求值；引用链上的格子集合往下传，
+  `A1↔B1` 这种互相引用在耗尽调用栈之前判成循环。依赖格自己算不出时整条判为算不出——
+  中间层把它咽下来就会把"算不出"变成"算出个 0"，那是 D4 红线的反面。
+- 桌面入口：`SheetView` 编辑框以 `=` 开头改走 `setCellFormulaOp`（其余文字仍走 `setCellTextOp`）；
+  编辑栏那条 `.sheet-recalc-hint` 分成两句话——"这条公式本地算不出来，格子里没有值"与
+  "公式显示的是缓存值，改了数据要在 Excel / WPS 里重算"，不再用一句覆盖两种情况。
+- **测试**：`formula-eval.test.ts` 18 条（口径、优先级、拒绝结构、永不抛异常）；`sheet-edit.test.ts` 新增 4 条
+  （算出缓存值 + 撤销后整格消失、算不出时值为空且 `recalcNeeded`、样式/`attrs` 原样带走、空公式返回 null）；
+  `sheet-file.test.ts` 新增 3 条落盘往返（`<c r="F2"><f>AVERAGE(C2:C4)</f><v>120</v></c>`、
+  `<c r="F3"><f>TODAY()</f></c>` **只有 `<f>`**、带格式的格改成公式后 `@s` 不动且显示仍按原格式）。
+  逐包核对：sheet-io **152**（12 个文件）/ desktop **416**（37 个文件）/ docx-io 296 / word-client 8 / word-tools 6 / server 2，
+  `pnpm build` 与 `pnpm test` 均 EXIT=0（重定向后读退出码，§8）。
+- **第三方交叉读**（`tmp/xlsx-probe/formula-cross-read.mjs`，不进主干，§6.5/§7.3）：把上面三条 op 落到真实 `.xlsx` 后
+  用 exceljs 读回 —— `F2={formula:"AVERAGE(C2:C4)",result:120}`、`F3={formula:"TODAY()"}`（**没有 result，即没有过期数字**）、
+  `C2=120`（这条 op 被同批跳过，见下条），`xl/workbook.xml` 里 `<calcPr fullCalcOnLoad="1"/>` 在。
+  这是"不是我读我自己写"的证据；"Excel/WPS 真的重算"那一半本机仍无可视通道，A4 保持 `[~]`、A8 保持 BLOCKED。
+- **实跑钉出一个 op 层的既有约束**（不是公式引入的，是阶段 3 内容寻址在批内的死角）：一条批里的 op 全部照**批前的快照**
+  锚定行指纹，所以**同一行在一批里改两格时，第二条会被"认不出这一行"跳过**。上面 `C2` 那条就是这个现象。
+  单次编辑（UI 一次一条）碰不到，但阶段 4 的"加两列计算值 / 整理去重"必然是每行多条 op，**必须先解决**：
+  批内已经改过的行要把后续 op 的锚点重新指到改动之后的指纹上，且只在同一批内生效——
+  跨批（用户后来的手工编辑）仍按 C15 拦住，否则就破坏了"撤销不牵连手工编辑"。已记进 §七。
+
 ### 阶段 5 · 图表
 
 **目标**：AI 选区出图；app 内可看（ECharts），`.xlsx` 内为原生可编辑图表（D5 spike 成功）或明确记录的贴图降级。
@@ -329,7 +366,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 3 | 行列插入/删除的 op（C16 的字面要求） | `packages/sheet-io/src/sheet-edit.ts`（`insertTracksOp`/`deleteTracksOp` + `applyShiftOp` 位移与逆操作）；视图入口 `src/sheet/SheetView.tsx`（表头右键菜单，复用 `menuRect` 与 `.ctx-menu`） | `ec4bda4` + `e662914` |
 | 3 | 保存路径不拍平富文本（§2.3 红线，实跑时才发现的既有缺陷） | `packages/sheet-io/src/xlsx-strings.ts`（run 指纹复用 + `reuseOrAppend` + `writeEntry` 回写颜色）、`xlsx-sheet.ts` 调用点 | `c099727` |
 | 4 | 分析引擎（列类型推断、缺失统计、分组聚合、去重键、异常值） | `packages/sheet-io/src/analysis/**` | 提交 10 |
-| 4 | 公式子集求值（D4 的函数白名单）+ 缓存值写入 | `packages/sheet-io/src/formula/**` | 提交 11 |
+| 4 | 公式子集求值（D4 的函数白名单）+ 缓存值写入 | **实际**：`packages/sheet-io/src/formula-eval.ts`（单文件递归下降，计划的 `src/formula/**` 目录没建，理由见阶段 4 提交 11）+ `sheet-edit.ts` 的 `setCellFormulaOp` + `SheetView.tsx` 的 `=` 入口 | `0e7cb74`（提交 11） |
+| 4 | 一批 op 里同一行的多条改动要都能落地（提交 12 的前置，见 §七） | `packages/sheet-io/src/sheet-edit.ts`（`applyOps` 的批内重新锚定） | 待做 |
 | 4 | 工具 schema 与 JSON 工具定义 | `packages/sheet-tools/src/index.ts` | 提交 12 |
 | 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | `src/ai/sheetAgent.ts` `src/ai/AIPanel.tsx` | 提交 13 |
 | 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | `packages/sheet-io/src/chart-spec.ts` `src/sheet/ChartView.tsx` | 提交 14 |
@@ -355,6 +393,11 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 4. `[~]` 公式写回后 **Excel/WPS 打开能重算**（读回断言 `<f>` 存在且合法，`<v>` 为缓存值）；无法本地求值的函数在 UI 明示"需 Excel 重算"，不许显示过期数字当作结果。
    **阶段 1 到位的部分**：`<f>`+`<v>` 成对读写，跨簿引用 `'[1]Sheet1'!$A$2` 不被改写或多余转义；exceljs 读回公式 `SUM(C2:C6)` 与缓存值 `660`。
    **阶段 2 到位**：选中带公式的格时，编辑栏下方出现 `.sheet-recalc-hint`「公式显示的是文件里的缓存值，需在 Excel / WPS 里重算」（`SheetView.tsx`），显示的是缓存值而不是我们算的结果。
+   **阶段 4 到位**（`0e7cb74`）：白名单函数由 `formula-eval.ts` 当场算出缓存值（D4 的写侧），算不出的**只写 `<f>` 不写 `<v>`**
+   并回报 `recalcNeeded`；编辑栏提示分两句（"本地算不出来，格子里没有值" / "显示的是缓存值"）。落盘单测钉住
+   `<c r="F2"><f>AVERAGE(C2:C4)</f><v>120</v></c>` 与 `<c r="F3"><f>TODAY()</f></c>` 两种形状；
+   第三方 exceljs 交叉读回 `F2={formula:"AVERAGE(C2:C4)",result:120}`、`F3={formula:"TODAY()"}`（无 result），
+   `xl/workbook.xml` 带 `<calcPr fullCalcOnLoad="1"/>`。
    **仍未到位**：Excel/WPS 真的重算这一半本机无法验证（§8：WPS 无可视通道），保持 BLOCKED。
 5. `[~]` 保存走 `.tmp → rename`，原地写回保留 `.bak`；保存中断不会留下半个文件。
    **已证**：写回内容正确性有单测钉住（`sheet-file.test.ts`「跨界载荷」一条：改 `C2` → 重开底包 → `applySheetPayload` → `writeSheet` → 断言 `<c r="C2" s="1"><v>777</v></c>`，并在配不上 `partPath` 时整批不写）。
@@ -436,6 +479,7 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 未建模部件"逐字节保留"在 sharedStrings/styles 上做不到（它们互相引用，改一个值可能动 string 表） | 阶段 1 红线 | **已被实测消解**（§二 P2/P3/P5）：策略是定点替换 `<sheetData>` + string 表**只追加** + `cellXfs/numFmts/fonts` **只追加不重排**（位置索引重排会让用户格式错位）。单测必须钉住"改一个格不移动任何索引" |
 | 大表全量载入内存 | 阶段 2 可用性 | 阶段 1 就定"稀疏 + 分 sheet 惰性解析"；超阈值（如 >20 万格）明确提示只读 |
 | 本地公式求值与 Excel 结果不一致 | AI"数据计算"可信度 | 只支持白名单函数；UI 与 modlog 里标注缓存值来源；不一致的场景（循环引用、volatile 函数如 `TODAY()`）一律留空 `<v>` |
+| **一批 op 里同一行改两格时第二条被"认不出这一行"跳过**（阶段 4 实测发现，`0e7cb74` 的交叉读探针钉出） | AI 的"加两列计算值""整表整理"都要每行发多条 op，按现状会**静默少改**，只剩 `skipped` 里一条理由 | 批内重新锚定：本批已经改过的行，把后续 op 的指纹改成改动之后的那把，重写只在同一批内生效；跨批（用户后来的手工编辑）仍按 C15 拦住。**这是提交 12（工具 schema）之前的前置项** |
 | 无法用 Word/WPS 目视验证 | 验收永远缺最后一环 | 沿用 Word 线的做法：结构级替代证据 + 明确 BLOCKED（`docs/word-parity-spec.md` §8.12） |
 | 引入 Univer/SheetJS 的诱惑（"省几周"） | 破坏全局约束 3/6 | 本文 §二 已留否决理由；未来若要改选，必须先推翻 §零.6 再讨论 |
 
@@ -459,6 +503,9 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 3 | `c099727` | §2.3（写回不拍平局部格式） | `[x]` | 真实 app 保存时富文本格被重新 intern，颜色丢 + 追加重复 `<si>`；改成按 run 逐字段指纹复用，三条单测钉住（含"走桌面载荷那条路"）。实跑结论：`uniqueCount` 保持 11、`A2` 仍指原条目 |
 | 3 | `ec4bda4` `e662914` `c099727` | E24–E25 | `[x]` | `pnpm build` EXIT=0、`pnpm test` EXIT=0；逐包核对 sheet-io **96** / desktop **416**（37 个文件）/ docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 3 | 同上 | E26 | `[x]` | 临时 CDP harness 驱动**构建产物**里的真实 app：开→拒绝（合并区被劈开，文件未动）→插入→保存→撤销→再保存回到逐字节一致；`sharedStringIndex`/`runs` 经 contextBridge 双向无损这一点也实测过（`PROBE_RECV` 那次）。踩到的坑（旧实例没退净 → 调试端口连上旧进程）写进阶段 3 收尾 |
+| 4 | `470d370` | §零.4（数字来自引擎） | `[x]`（引擎侧） | 列画像 / 分组聚合 / 去重键落在 `packages/sheet-io/src/analysis/**`：模型只指定"按哪几列分组、对哪列做什么聚合"，值一律由引擎算；列引用解析不出时返回 `ok:false` + 理由，不抛异常 |
+| 4 | `0e7cb74` | A4（写侧）、B9（求值器不崩） | `[~]`（A4 的"Excel 真重算"仍 BLOCKED） | 白名单函数当场算出 `<v>`，算不出的只写 `<f>`；两条形状有落盘单测，第三方 exceljs 交叉读到 `formula/result` 与"只有 formula"。逐包核对 sheet-io **152** / desktop **416**，`pnpm build`+`pnpm test` EXIT=0 |
+| 4 | 待做 | C15 在批内的死角（同一行多条 op） | `[ ]` | 交叉读探针实测：一批里改同一行的两格，第二条被"认不出这一行"跳过。工具层每条提案都要落地，先解决批内重新锚定再做提交 12（见 §七） |
 | 4 | — | B9–B14 | `[ ]` | |
 | 5 | — | D5 落地 | `[ ]` | |
 | 6 | — | D18/E24–E28 | `[ ]` | |
