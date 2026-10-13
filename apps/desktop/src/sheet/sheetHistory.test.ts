@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runSheetOps, setCellTextOp, setColumnWidthOp, type SheetCell, type SheetPayload } from "@office-copilot/sheet-io";
-import { isSheetEditRecord, pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheetHistory.js";
+import { isSheetEditRecord, pickLatestSheetEdit, sheetCommitTally, sheetEditRecordOf, undoSheetEdit } from "./sheetHistory.js";
 
 /**
  * 造一张最小表（与 IO 包的测试夹具同形状）。
@@ -99,5 +99,47 @@ describe("表格改动写进修改历史（spec 阶段 3 · C15/C17）", () => {
     const outcome = undoSheetEdit({ ...sheet, partPath: "xl/worksheets/sheet9.xml" }, record);
     expect(outcome.appliedCount).toBe(0);
     expect(outcome.reason).toContain("另一张表");
+  });
+});
+
+/**
+ * 一张带公式的表：`C1` 存着 `SUM(A1:A2)`，缓存值随传入的 `a2Value` 变（现场核对用它认行）。
+ *
+ * @param a2Value `A2` 的值——把它改成与提案时不一样，那条 op 就会被现场核对拦下。
+ * @returns `SheetPayload`。
+ */
+function sheetWithFormula(a2Value: number): SheetPayload {
+  return sheetOf([cellOf(0, 0, 10), cellOf(0, 1, a2Value), { ...cellOf(2, 0, 30), formula: "SUM(A1:A2)", cachedValue: 30 }]);
+}
+
+describe("落地条数按提交的那批算（spec 决策 D8 之后 `result.ops` 会变长）", () => {
+  it("引擎追加的公式缓存刷新不算进「部分写入（x/y）」：全落地时是 1/1", () => {
+    const sheet = sheetWithFormula(20);
+    const submitted = [setCellTextOp(sheet, "A1", "99")!];
+    const result = runSheetOps(sheet, submitted);
+    // 刷新的那条确实混进了 `result.ops`（99+20=119），所以条数比提交的多——这正是不能拿它当分子的原因
+    expect(result.ops).toHaveLength(2);
+    expect(result.after.cells["C1"]?.value).toBe(119);
+    expect(sheetCommitTally(submitted, result)).toEqual([1, 1]);
+  });
+
+  it("有一条没落地时报 1/2，而不是自相矛盾的 2/2", () => {
+    const sheet = sheetWithFormula(20);
+    const landed = setCellTextOp(sheet, "A1", "99")!;
+    const rejected = { ...setCellTextOp(sheet, "A2", "5")!, partPath: "xl/worksheets/sheet2.xml" };
+    const submitted = [landed, rejected];
+    const result = runSheetOps(sheet, submitted);
+    expect(result.skipped).toHaveLength(1);
+    // 落地 1 条 + 引擎追加 1 条 = 2 条，旧的写法会说出"部分写入（2/2）"
+    expect(result.ops).toHaveLength(2);
+    expect(sheetCommitTally(submitted, result)).toEqual([1, 2]);
+  });
+
+  it("一条都没落地时分子为 0（卡片据此报「这次没有写入」）", () => {
+    const sheet = sheetWithFormula(20);
+    const submitted = [{ ...setCellTextOp(sheet, "A1", "99")!, partPath: "xl/worksheets/sheet2.xml" }];
+    const result = runSheetOps(sheet, submitted);
+    expect(result.ops).toHaveLength(0);
+    expect(sheetCommitTally(submitted, result)).toEqual([0, 1]);
   });
 });

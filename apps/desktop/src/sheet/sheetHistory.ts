@@ -107,3 +107,18 @@ export function undoSheetEdit(sheet: SheetPayload, record: SheetEditRecord): She
     reason: result.ops.length ? null : `这次改动的内容后来被改过，已不再安全回滚${result.skipped.length ? `：${result.skipped.map((item) => item.reason).join("；")}` : ""}`,
   };
 }
+
+/**
+ * 数一次落地给"部分写入（x/y）"用的两个数（spec 决策 D8 之后不能再直接用 `result.ops.length` 当分子）。
+ *
+ * `runSheetOps` 会把受牵连的公式缓存刷新作为**额外的 op** 追加进 `result.ops`，所以那个条数
+ * 比交出去的批还大；拿它当分子会说出"部分写入（2/2）"这种自相矛盾的话——明明有一条没落地。
+ * 分子只能是"交出去的那批里真正落地的条数"，它就是提交条数减去被跳过的条数。
+ *
+ * @param submitted 交出去的那批 op（提案卡或视图给的原样，不含引擎自己追加的刷新 op）。
+ * @param result `runSheetOps` 的返回。
+ * @returns `[已落地, 提交条数]`；已落地不会大于提交条数。
+ */
+export function sheetCommitTally(submitted: SheetCoreOp[], result: SheetOpsResult): [number, number] {
+  return [Math.max(0, submitted.length - result.skipped.length), submitted.length];
+}

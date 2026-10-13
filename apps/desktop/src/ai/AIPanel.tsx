@@ -51,6 +51,7 @@ import {
 import { toast } from "../components/ui/Toast.js";
 import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
 import { ChartPreview } from "../sheet/ChartPreview.js";
+import { sheetCommitTally } from "../sheet/sheetHistory.js";
 import { runSheetAgent } from "./sheetAgent.js";
 import { formatA1 } from "@office-copilot/sheet-io";
 import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
@@ -771,7 +772,7 @@ export function AIPanel({
         return;
       }
       const result = sheet?.onCommitOps(card.ops, card.summary);
-      if (!result || !result.ops.length) {
+      if (!result || !sheetCommitTally(card.ops, result)[0]) {
         patchSheetCard(id, (c) => ({
           ...c,
           status: "failed",
@@ -781,8 +782,10 @@ export function AIPanel({
         return;
       }
       // 落地条数与提案条数不一致时必须说出来：剩下那些没生效（AGENTS.md §2.5）。
+      // 分子按提交的那批算，不用 `result.ops.length`——引擎会把受牵连的公式缓存刷新额外追加进那一批（spec D8）。
+      const [landed, submitted] = sheetCommitTally(card.ops, result);
       const partial = result.skipped.length
-        ? `部分写入（${result.ops.length}/${card.ops.length}）：${result.skipped.map((item) => item.reason).join("；")}`
+        ? `部分写入（${landed}/${submitted}）：${result.skipped.map((item) => item.reason).join("；")}`
         : undefined;
       patchSheetCard(id, (c) => ({ ...c, status: "applied", message: partial }));
       onChanged();
