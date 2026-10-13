@@ -288,7 +288,7 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
   （`/json` 返回空数组），而连上去的调试端口又可能是旧实例的，于是"改了代码、跑的还是旧进程"。
   与 §8 的"探针跑的是 dist"同一条族：跑 app 级验收前先 `pgrep -f "apps/desktop"` 数一遍，清零再起。
 
-### 阶段 4 · AI 工具层：分析 + 整理 + 计算
+### 阶段 4 · AI 工具层：分析 + 整理 + 计算 — `[x] 已完成 2026-10-13`（整理按 §七 的定案只做四类 op，排序/拆合列/统一格式不在写侧）
 
 **目标**：自然语言 → 工具回路 → 提案 → 用户确认 → 落地。覆盖分析（描述/聚合/找异常）、整理（去重/拆合列/统一格式/排序）、计算（新增计算列写公式）。
 **完成判定**：`sheet-tools` 全部入参有 zod 单测；桌面 `sheetAgent` 用 mock `fetch` 测过工具环与截断；
@@ -364,9 +364,11 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
   desktop 416 / docx-io 296 / word-client 8 / word-tools 6 / server 2。
 - **已到位（提交 13 前半，`dba6fb4` `1f5ec47` `c52c1b7` `e69780e`）**：写侧只开 `sheet_submit_proposal` 一个出口、
   `ai:tool-turn` 的一轮转发、`src/ai/sheetAgent.ts` 的工具环（截断上送、非法入参不抛、提案→op、暂停/继续、8 轮上限）。
-- **仍没做**：面板上的表格分支——提案卡片、"应用到表格"的确认按钮、全自动那一路的直接落地（提交 13d）；
-  真实端点探针跑"分析 / 整理 / 计算"各 ≥1 个任务（提交 13e，B13）。
-  `sheet_create_chart` 按计划属阶段 5，不在本次工具面里（这条偏差在此显式记录）。
+- **已到位（提交 13d，`f0f9853`）**：面板的表格分支——提案卡片（`Item` 多一支 `t:"sheet"`）、"应用到表格"的确认按钮、
+  全自动那一路的直接落地与 toast 提示、暂停后卡上的"继续"。真实 app 实跑见 §八 与 B12/B14。
+- **已到位（13e，按 §6.5 探针代码只留在 `tmp/`，不入主干）**：node 侧一次性探针（`tmp/sheet-agent-probe.mjs`）打真实端点跑"分析 / 计算 / 整理"各一条，
+  工具序列与落地/撤销数字记在 B13。
+- `sheet_create_chart` 按计划属阶段 5，不在本次工具面里（这条偏差在此显式记录）。
 
 ### 阶段 5 · 图表
 
@@ -408,7 +410,7 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | 一批里改多列列宽要都能落地（同一族的列轴问题，见 §七） | `packages/sheet-io/src/sheet-edit.ts`（`applyColumnWidthOp` 先精确整段、不一致时按现场重算覆盖带，`splitColumnBand`/`sameColumnWidth` 抽出复用） | 512fb0f |
 | 4 | 工具 schema 与 JSON 工具定义 | **实际**：`packages/sheet-tools/src/index.ts`（四个读工具）+ 引擎侧先补三条读口 `packages/sheet-io/src/analysis/sheet-table.ts`（`readRange`/`findRows`/`describeSheet` 的 `maxColumns`），理由见阶段 4 提交 12 | `b87a88b` + `dba6fb4` + `cd65c5b`（提交 12） |
 | 4 | 写侧工具 schema 与提案：`sheet_submit_proposal`（改格/改公式/插删行列/去重/列宽） | **实际**：`packages/sheet-tools/src/index.ts` 的 `SheetEdit` 四类 + `SubmitProposalArgs`。**已定的决策**：排序、拆合列、统一数字格式**不开**——现有四类 op 各自有安全的逆操作，第五类 move op 没建（要建得先解决"撤销整表前像"与 §2.5 的内容寻址），用一批 `setCellTextOp` 凑排序更会把用户后来的手工编辑牵连进去。边界写进工具描述与系统提示词，模型只能提这四项（理由见 §七同一行） | `dba6fb4` + `1f5ec47`（提交 13） |
-| 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | **实际**：`src/ai/sheetAgent.ts`（提示词、`sheetContextOf` 截断拼装、工具环、`sheetOpsOfProposal` 提案→op）+ `electron/aiHandlers.ts` 的 `ai:tool-turn` 一轮转发 + preload/`global.d.ts` 的跨界类型（§5.2 三处一起改）为 `c52c1b7` + `e69780e`（提交 13）。**卡片渲染分支待做**：`src/ai/AIPanel.tsx` 的表格分支（提交 13d） | `c52c1b7` + `e69780e` |
+| 4 | 桌面 agent：提示词、区域截断、提案装配、卡片渲染分支 | **实际**：`src/ai/sheetAgent.ts`（提示词、`sheetContextOf` 截断拼装、工具环、`sheetOpsOfProposal` 提案→op）+ `electron/aiHandlers.ts` 的 `ai:tool-turn` 一轮转发 + preload/`global.d.ts` 的跨界类型（§5.2 三处一起改）为 `c52c1b7` + `e69780e`（提交 13）。**卡片渲染分支已落**：`src/ai/AIPanel.tsx` 的表格分支（提案卡 / "应用到表格" / 全自动直接落地 / 暂停后"继续"），面板按模式各挂一份会话 key | `c52c1b7` + `e69780e` + `f0f9853` |
 | 5 | `ChartSpec` + ECharts 渲染 + canvas→PNG | `packages/sheet-io/src/chart-spec.ts` `src/sheet/ChartView.tsx` | 提交 14 |
 | 5 | chart part 写入（`xl/charts` + drawing + rels + content-types 更新） | `packages/sheet-io/src/xlsx-chart.ts` | 提交 15 |
 | 6 | CLI 子命令、README、AGENTS 更新 | `apps/cli/src/**` `README.md` `AGENTS.md` | 提交 16 |
@@ -456,19 +458,35 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 10. `[x]`（引擎侧，`b87a88b`）**数字来自引擎**：单测固定住"聚合值由 `sheet-io` 计算"，模型给出的数字若与引擎不符，以引擎为准并记 warning。
     **实测**：`describeSheet`/`aggregateSheet`/`findRows`/`readRange` 的值全部由引擎算，并有 3 条用例跑在真实 `.xlsx` 夹具上（画像 `sum=360` 与表里 `SUM` 的缓存值同为一条断言）。
     工具环落地后（`e69780e`），模型能看到的数字只有引擎回包那一份，提示词里写死"不许凭样本心算整表结论"；
-    **仍未做**：对模型最终答复里的数字与引擎值做交叉核对并记 warning——那需要在答复文本里再解析一遍数字，属下一阶段可选强化。
+    **仍未做**：对模型最终答复里的数字与引擎值做**自动**交叉核对并记 warning——那需要在答复文本里再解析一遍数字，属下一阶段可选强化。
+    13e 的人工交叉核对已过一遍：答复"华东 270 / 华北 90 / 合计 360"逐项与 `sheet_aggregate` 回包、与夹具落盘断言的 `sum=360` 同值。
 11. `[x]`（上限已锁 `b87a88b` `dba6fb4`，拼装已落 `e69780e`）上送内容默认截断（表头 + ≤50 行样本 + 结构摘要），有单测锁死这个上限。
     **实测**：`readRange` 默认 ≤50 行、单格 ≤120 字，`describeSheet` 默认 ≤50 列并回报 `columnsTruncated`，聚合/命中默认 ≤50 条而计数不受影响；各有单测。
     `sheetContextOf` 的拼装由两条单测钉住：五行小表不出现截断说明；70 行的表只上送到第 50 行并写明"共 70 行、后面的行要接着读"。
-12. `[~]` 半自动模式：提案必须用户点确认才落地；全自动模式的每步仍受 §2.5 撤销约束。
-    **已到位**：`runSheetAgent` 全程只读载荷，产出的是 `ops` 与 `notes`，写表发生在既有的 `commitSheetOps`（`App.tsx:290`）里——它才是唯一落地口，并写 modlog；
-    代理自己没有任何写文件的通道（§2.8 的结构性保证）。
-    **待做**：面板上的"应用到表格"按钮与卡片渲染分支（提交 13d），以及全自动模式那一路的用户选择。
-13. `[ ]` 真实端点探针（一次性、`tmp/`）跑通"分析 / 整理 / 计算"各 ≥1 个任务，记录：模型实际调用的工具序列、失败样本、未转义引号这类解析坑（本仓已有 ark 回包先例）。
-14. `[~]` 暂停/继续行为与 Word 一致：中断后半截提案留在卡上，点"继续"能接着写。
-    **已到位**（`e69780e`）：表格的提案不是一段半截文本，所以这里的"暂停"停在**轮与轮之间**——`isPaused` 在下一轮请求发出前收住，`messages`（含已跑完的工具回包）原样带回，
+12. `[x]` 半自动模式：提案必须用户点确认才落地；全自动模式的每步仍受 §2.5 撤销约束。
+    **到位**：`runSheetAgent` 全程只读载荷，产出的是 `ops` 与 `notes`，写表发生在既有的 `commitSheetOps`（`App.tsx`）里——它才是唯一落地口，并写 modlog；
+    代理自己没有任何写文件的通道（§2.8 的结构性保证）。面板分支在 `f0f9853`：卡片列出四类改动的可读行，半自动只有点"应用到表格"才交 `commitSheetOps`。
+    **真实 app 实跑**（`tmp/sheet-ai-probe.mjs` 走 CDP 打构建产物，独立 `--user-data-dir`，不碰用户正在跑的实例）：
+    半自动下卡片停在 `pending`，网格无变化；点"应用到表格"后卡片转 `applied`（"已写入表格 / 查看修改历史"），`C6` 出现引擎算出的 `360`，
+    标题栏出脏点，Cmd+Z 把这条改动倒回去（网格尾部回到 `…3/31/2026, 销售, E17`）。全自动下不改网格也留有记录，`commitSheetOps` 那条 modlog 一字未改。
+13. `[x]` 真实端点探针（一次性、`tmp/`）跑通"分析 / 整理 / 计算"各 ≥1 个任务，记录：模型实际调用的工具序列、失败样本、未转义引号这类解析坑（本仓已有 ark 回包先例）。
+    **怎么跑的**：页面里包不了 `aiToolTurn`（contextBridge 属性不可配置，实测 `TypeError: Cannot redefine property`），
+    所以探针在 node 里直接 `import` **同一个** `src/ai/sheetAgent.ts`（node 24 的 type stripping 吃得下，它唯一的相对 import 是纯类型），
+    只把 `ask` 换成自己发的那一次 HTTP；工具定义、执行、提案→op 的翻译、落地与撤销全是产品代码本体。
+    **实跑序列**（`tmp/sheet-agent-13e.json`，服务商 ark，逐条都是新开的 `.xlsx`）：
+    - 分析：`sheet_aggregate{groupBy:[地区], sum/count 销量, hasHeader}` → 答复"华东 270（2 行）/ 华北 90（1 行）/ 合计 360"。2 轮，数字全部来自引擎回包（B10 的交叉核对：与阶段 4 夹具上那条 `sum=360` 断言同值）。
+    - 计算：`sheet_submit_proposal{set_cell C6 =SUM(C2:C4)}` → 1 条 `setCellValue`，`runSheetOps` 落地 1/1，逆操作撤销 1/1。1 轮。
+    - 整理：`sheet_find{销量, "<100"}` → `sheet_submit_proposal{delete_rows[4], set_column_width B 140px}` → 2 条 op，**落地 1/2**，
+      被拦的是删行：夹具里 `SUM(C2:C4)` 的引用正好落在要删的带内，引擎按 `#REF!` 挡下并给出那句理由（面板同步报"部分写入（1/2）"）。撤销 1/1。
+    **失败样本与坑**：三次都没复现"未转义引号"（`tmp/llm-probe` 那次的长文场景才出现），本轮三个 `arguments` 都能 `JSON.parse`；
+    真实 app 里同一句整理指令重复跑过一次，第二次 `set_column_width` 因为现场宽度已经是 140 不再产生 op，卡片显示"1 处改动"却列了两行改动、
+    末尾以"未写入"收尾——这是 `ops.length` 与 `edits.length` 两个口径的展示差异，不是漏改，落地侧行为（0 条 op 就不写）是对的。
+14. `[x]` 暂停/继续行为与 Word 一致：中断后半截提案留在卡上，点"继续"能接着写。
+    **已到位**（代理侧 `e69780e`）：表格的提案不是一段半截文本，所以这里的"暂停"停在**轮与轮之间**——`isPaused` 在下一轮请求发出前收住，`messages`（含已跑完的工具回包）原样带回，
     继续时把 transcript 传回去就不重发摘要（两条单测钉住：暂停时一次请求都没发；继续时请求体里的 messages 就是带回来的那份）。
-    **待做**：面板上的暂停/继续按钮（提交 13d）。
+    **真实 app 实跑**（`f0f9853`，`tmp/sheet-ai-4-pause.json`）：发出整理指令 2.5 秒后点 composer 的"暂停"，卡片当场变成
+    `0 处改动 | 已暂停，工具回合停在两轮之间。点「继续」接着跑。` 带"继续/忽略"两颗按钮；点"继续"后**同一张卡**收尾到提案结果，
+    中间没有重复上送结构摘要（transcript 直接回灌），网格全程未被动过。
 
 ### C. 可撤销性与历史（对应 `AGENTS.md` §2.5）
 
@@ -565,7 +583,8 @@ AI 被要求"加一列同比增长率"时，落到 `.xlsx` 的是 `<c><f>(C2-C1)
 | 4 | `b87a88b` `dba6fb4` `cd65c5b` | B9、B10、B11（读侧） | `[x]`（读工具面；B10 的"与引擎不符记 warning"与 B11 的"拼装上送"仍待提交 13） | 引擎新增 `readRange`/`findRows`/`describeSheet` 的 `maxColumns`，条件判定复用 `formula-eval.toCriteria`（筛出的行与 `COUNTIF` 同一口径）；新包 `packages/sheet-tools` 只依赖 zod、不 import `sheet-io`，`parseToolArguments` 永不抛异常。三条读路径各有真实 `.xlsx` 夹具上的落盘用例。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 sheet-io **176**（12 个文件）/ **sheet-tools 9**（新包）/ desktop 416 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 4 | `c52c1b7` | §5.2（跨界一次改三处）、B12 的前置 | `[x]` | 新增 `ai:tool-turn`：主进程只转发一轮（收 `messages`+`tools`，回 `content`+`toolCalls`），工具在哪执行由渲染层决定，因为表格载荷只在那边。顺带修好一处潜伏缺陷——`runStream` 此前没把 `AbortController` 的 `signal` 接到 `fetch` 上，按"暂停"只是不再回抛事件，请求仍在后台跑到 180 秒；现在三条调用路径共用 `postChat`，单测钉住"取消真的中止 fetch"。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **423** / sheet-io 176 / sheet-tools 11 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
 | 4 | `e69780e` | B9、B10、B11、B14（代理侧）、§零.4 | `[x]`（代理侧，UI 分支待 13d） | `src/ai/sheetAgent.ts` 跑工具环：上送只有"结构摘要 ≤50 列 + 样本 ≤50 行"，六件工具全部转给 `sheet-io` 执行，非法入参/幻觉方法名回一句话不抛；`sheet_submit_proposal` 的四类条目翻成 op，翻不动的逐条给原因，删行会让手写公式变 `#REF!` 时由引擎的现场核对挡住（单测实测到那条理由）。暂停/继续按"停在轮与轮之间"实现：`isPaused` 收住、`transcript` 带回、继续时不重发摘要，转满 8 轮没结论就停。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **437**（新增 `sheetAgent.test.ts` 14 条）/ sheet-io 176 / sheet-tools 11 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
-| 4 | — | B12 的确认按钮、B13（真实端点探针）、B14 的面板 | `[ ]` | 提交 13d/13e |
+| 4 | `f0f9853` | B12、B14（面板侧）、D 组（复用现有卡片样式） | `[x]` | `src/ai/AIPanel.tsx` 多一支 `t:"sheet"` 的条目与 `SheetPanelBridge`（只交载荷 + `onCommitOps`），`App.tsx` 把同一个 `commitSheetOps` 升级成返回 `SheetOpsResult \| null`，好让卡片能如实报"部分写入（x/y）"。零新增 CSS（复用 `.ai-card*`/`.op-list`），面板按模式各挂一份 `key` 让文档与表格的会话互不串台。**真实 app 实跑**（CDP 打构建产物 + 独立 `--user-data-dir`）：半自动提案卡 →"应用到表格"→ `C6` 出现引擎算出的 `360` → Cmd+Z 回到原样；全自动那条 toast"已直接写入表格，可在修改历史里撤销这次改动"；暂停后卡片写"已暂停，工具回合停在两轮之间"，"继续"在同一张卡上收尾。本次门禁：`pnpm build`/`pnpm test` EXIT=0，逐包核对 desktop **437** / sheet-io 176 / sheet-tools 11 / docx-io 296 / word-client 8 / word-tools 6 / server 2 |
+| 4 | —（`tmp/` 探针，§6.5 不入主干） | B13、B10 的答复侧交叉核对 | `[x]` | node 侧 `tmp/sheet-agent-probe.mjs` import **同一个** `sheetAgent.ts`，只把 `ask` 换成自己发的 HTTP，三条任务各新开一份 `.xlsx`。序列与数字见 B13。顺带钉死一条环境事实：contextBridge 的属性不可配置，页面 JS 包不了 `aiToolTurn`，工具序列只能 node 侧抓。阶段 4 到此收口，阶段 5（图表）与阶段 6（CLI/文档）另起提交 |
 | 5 | — | D5 落地 | `[ ]` | |
 | 6 | — | D18/E24–E28 | `[ ]` | |
 
