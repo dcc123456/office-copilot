@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { columnWidthCharsToPx, revertSheetOps, runSheetOps, type SheetPayload } from "@office-copilot/sheet-io";
+import { columnWidthCharsToPx, revertSheetOps, runSheetOps, type SetCellNumberFormatOp, type SheetPayload } from "@office-copilot/sheet-io";
 import { SHEET_TOOLS, type SheetEditT } from "@office-copilot/sheet-tools";
 import type { ToolTurnRequest, ToolTurnResult } from "../global.js";
 import { runSheetAgent, sheetContextOf, sheetOpsOfProposal } from "./sheetAgent.js";
@@ -80,7 +80,7 @@ describe("sheetContextOf：上送的只有摘要与截断过的样本", () => {
   });
 });
 
-describe("sheetOpsOfProposal：只有能安全撤销的五类才变成 op", () => {
+describe("sheetOpsOfProposal：只有能安全撤销的六类才变成 op", () => {
   it("改值 / 列宽 / 删行各成一条 op，按现场核对全部落得下", () => {
     const sheet = sampleSheet();
     const edits: SheetEditT[] = [
@@ -142,6 +142,29 @@ describe("sheetOpsOfProposal：只有能安全撤销的五类才变成 op", () =
     ]);
     expect(ops).toEqual([]);
     expect(notes).toEqual(["认不出列「不存在列」，那条列宽跳过。", "不是地址 那一格写不了，已跳过。"]);
+  });
+
+  it("整列统一数字格式展开成逐格 op，落地只改格式、撤销把整列退回原样", () => {
+    const sheet = sampleSheet();
+    const { ops, notes } = sheetOpsOfProposal(sheet, [{ type: "set_number_format", column: "销售额", format: "0.00%" }]);
+    // 逐格怎么改由引擎按现场判定：装配面只交列与格式码，不自己数哪些格要改。
+    const formatOps = ops.filter((op): op is SetCellNumberFormatOp => op.kind === "setCellNumberFormat");
+    expect(formatOps).toHaveLength(ops.length);
+    expect(ops.length).toBeGreaterThan(0);
+    expect(notes).toEqual([]);
+
+    const result = runSheetOps(sheet, ops);
+    expect(result.ok, result.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    const first = formatOps[0]!;
+    expect(result.after.cells[first.after.address]?.numberFormat).toEqual({ numFmtId: 10, isDateLike: false });
+    expect(result.after.cells[first.after.address]?.value).toBe(first.after.value);
+    expect(revertSheetOps(result.after, result.inverses).after.cells).toEqual(sheet.cells);
+  });
+
+  it("准入表外的格式码成不了 op，理由交给上层而不是静默丢掉", () => {
+    const { ops, notes } = sheetOpsOfProposal(sampleSheet(), [{ type: "set_number_format", column: "销售额", format: "0.0000%" }]);
+    expect(ops).toEqual([]);
+    expect(notes).toHaveLength(1);
   });
 
   it("宽度本来就一样时不算改动：既不出 op 也不报错", () => {
