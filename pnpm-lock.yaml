@@ -72,6 +72,12 @@ importers:
       '@office-copilot/docx-io':
         specifier: workspace:*
         version: link:../../packages/docx-io
+      '@office-copilot/opc':
+        specifier: workspace:*
+        version: link:../../packages/opc
+      '@office-copilot/pptx-io':
+        specifier: workspace:*
+        version: link:../../packages/pptx-io
       '@office-copilot/sheet-io':
         specifier: workspace:*
         version: link:../../packages/sheet-io

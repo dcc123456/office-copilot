@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, shell, ipcMain, clipboard } from "electron";
 import path from "node:path";
 import { registerFileHandlers } from "./fileHandlers.js";
 import { registerSheetHandlers } from "./sheetHandlers.js";
+import { registerPptxHandlers } from "./pptxHandlers.js";
 import { registerAIHandlers } from "./aiHandlers.js";
 import { registerSettingsHandlers } from "./settingsStore.js";
 import { registerSnapshotHandlers } from "./snapshotStore.js";
@@ -283,6 +284,7 @@ app.whenReady().then(async () => {
   mainWindow = createWindow();
   registerFileHandlers(ipcMain, () => mainWindow);
   registerSheetHandlers(ipcMain, () => mainWindow);
+  registerPptxHandlers(ipcMain, () => mainWindow);
   registerAIHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerSnapshotHandlers(ipcMain);

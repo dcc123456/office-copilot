@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { loadPackage, parseRelationships, relativeTarget, relsPathFor, resolveTarget, unmodelledParts } from "./opc.js";
+import { newlyIntroducedIssues, type OpcAuditIssue } from "./audit.js";
 import { contentTypesWith, nextPartIndex, nextRelIdFor, relsWith } from "./write.js";
 import * as xml from "./xml.js";
 
@@ -110,5 +111,38 @@ describe("write：§2.10 新建部件的关系与内容类型登记原语", () =
   it("nextPartIndex 数已有的同类部件再 +1（1 基）", () => {
     expect(nextPartIndex(["xl/charts/chart1.xml", "xl/charts/chart2.xml", "xl/styles.xml"], "xl/charts/chart", ".xml")).toBe(3);
     expect(nextPartIndex(["ppt/presentation.xml"], "ppt/slides/slide", ".xml")).toBe(1);
+  });
+});
+
+/**
+ * 保存前那道闸门的判定：只拦"这次改动新引入的"结构问题。
+ *
+ * 拦下后调用方整批不写盘（`AGENTS.md` §2.4），渲染层把问题拼成一句中文，
+ * 所以这里钉的是"什么该拦"，不是文案。`.xlsx` 与 `.pptx` 两条保存路共用这一份判定。
+ */
+describe("newlyIntroducedIssues：闸门只对本次事务负责", () => {
+  /** 造一条问题记录；码取真实存在的通用码，别编。 */
+  function issue(code: OpcAuditIssue["code"], part: string, detail = ""): OpcAuditIssue {
+    return { code, part, detail };
+  }
+
+  it("底包本来就有的问题不拦（第三方导出器留下的，不该因此让人存不了盘）", () => {
+    const base = [issue("part-not-declared", "xl/printerSettings.bin", "bin")];
+    expect(newlyIntroducedIssues(base, base)).toEqual([]);
+    expect(
+      newlyIntroducedIssues(base, [...base, issue("unresolved-relationship-id", "xl/worksheets/sheet1.xml", "rId7")]),
+    ).toEqual([issue("unresolved-relationship-id", "xl/worksheets/sheet1.xml", "rId7")]);
+  });
+
+  it("同一个码落在不同部件上是两条问题，不许互相抵掉", () => {
+    const base = [issue("relationship-target-missing", "ppt/slides/slide1.xml", "rId1 -> ppt/slideLayouts/slideLayout9.xml")];
+    const out = [...base, issue("relationship-target-missing", "ppt/slides/slide2.xml", "rId1 -> ppt/slideLayouts/slideLayout9.xml")];
+    expect(newlyIntroducedIssues(base, out)).toEqual([
+      issue("relationship-target-missing", "ppt/slides/slide2.xml", "rId1 -> ppt/slideLayouts/slideLayout9.xml"),
+    ]);
+  });
+
+  it("输出干净时什么都不拦", () => {
+    expect(newlyIntroducedIssues([issue("declared-part-missing", "ppt/media/image1.png")], [])).toEqual([]);
   });
 });

@@ -5,6 +5,7 @@
  * 内容类型表覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、部件里引用的 `r:id` 查得到，
  * 它们只碰 `OpcPackage` 的通用字段。再给 `.pptx`（以及未来的 `.docx`）用就是第二次、第三次复制，所以提到 `opc`。
  * 各格式**自己的**元素顺序判定（如 `<worksheet>` 的 `xsd:sequence`）仍留在各自包里，把这里的通用结果拼上去。
+ * 同层还有 `newlyIntroducedIssues`：保存前"只拦本次新引入的问题"那道判定，两种格式一模一样，也抽在这里。
  *
  * 判定依据取 ECMA-376 / ISO-IEC 29500-1 的显式约束（OPC 见 Part 2 §10.1.2、§9.2、§13.2.1），不取"Office 大概会喜欢"：
  * - `[Content_Types].xml` 必须覆盖每个部件（Part 2 §10.1.2）；
@@ -91,4 +92,29 @@ export async function auditOpcPackage(pkg: OpcPackage): Promise<OpcAuditIssue[]>
     }
   }
   return issues;
+}
+
+/**
+ * 只留"本次事务新引入的"结构问题——保存前那道闸门的判定，`.xlsx` 与 `.pptx` 同一条规则。
+ *
+ * @param baseIssues 底包（磁盘上原来那份）审计出来的问题。
+ * @param outIssues 准备写出的字节审计出来的问题。
+ * @returns 底包里没有的那些。底包本来就不合规（第三方导出器留下的）不该让用户没法保存，
+ *   写盘这一侧只对**本次事务**负责（`AGENTS.md` §2.4）。
+ */
+export function newlyIntroducedIssues<Issue extends OpcAuditIssueFields>(baseIssues: Issue[], outIssues: Issue[]): Issue[] {
+  const seen = new Set(baseIssues.map(issueKey));
+  return outIssues.filter((issue) => !seen.has(issueKey(issue)));
+}
+
+/** 一条问题的身份：码 + 部件 + 细节。同一个包审两遍，同一条问题会得到同一个键。 */
+interface OpcAuditIssueFields {
+  code: string;
+  part: string;
+  detail: string;
+}
+
+/** 一条问题的身份键。 */
+function issueKey(issue: OpcAuditIssueFields): string {
+  return `${issue.code}@${issue.part}@${issue.detail}`;
 }

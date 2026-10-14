@@ -18,6 +18,7 @@ import {
   type SheetPayload,
   type WorkbookPayload,
 } from "@office-copilot/sheet-io";
+import { newlyIntroducedIssues } from "@office-copilot/opc";
 import { fileExists, writeFileAtomically } from "./fsutil.js";
 
 /** 渲染层据此决定走表格那条路；`.xlsm` 由 `SheetFile` 明确拒绝，不在可打开的扩展名里。 */
@@ -178,24 +179,6 @@ async function auditQuietly(bytes: Uint8Array): Promise<CompatIssue[]> {
   } catch {
     return [];
   }
-}
-
-/**
- * 只留"这次保存新引入的"结构问题。
- *
- * @param baseIssues 底包（磁盘上原来那份）审计出来的问题。
- * @param outIssues 准备写出的字节审计出来的问题。
- * @returns 底包里没有的那些。底包本来就不合规（第三方导出器留下的）不该让用户没法保存，
- *   这里只对**本次事务**负责（`AGENTS.md` §2.4）。
- */
-export function newlyIntroducedIssues(baseIssues: CompatIssue[], outIssues: CompatIssue[]): CompatIssue[] {
-  const seen = new Set(baseIssues.map(issueKey));
-  return outIssues.filter((issue) => !seen.has(issueKey(issue)));
-}
-
-/** 一条问题的身份键：码 + 部件 + 细节，同一个包审两遍会得到同一个键。 */
-function issueKey(issue: CompatIssue): string {
-  return `${issue.code}@${issue.part}@${issue.detail}`;
 }
 
 /**

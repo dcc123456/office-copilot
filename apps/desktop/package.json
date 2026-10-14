@@ -17,6 +17,8 @@
   },
   "dependencies": {
     "@office-copilot/docx-io": "workspace:*",
+    "@office-copilot/opc": "workspace:*",
+    "@office-copilot/pptx-io": "workspace:*",
     "@office-copilot/sheet-io": "workspace:*",
     "@office-copilot/sheet-tools": "workspace:*",
     "@tiptap/core": "^2.27.2",

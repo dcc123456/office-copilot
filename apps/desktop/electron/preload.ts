@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { ToolTurnRequest, ToolTurnResult } from "./aiHandlers.js";
 import type { SessionRecord, SessionSummary, SessionTurn } from "./sessionStore.js";
 import type { SheetOpenResult, SheetSavePayload, SheetSaveResult } from "./sheetHandlers.js";
+import type { PptxEditPayload, PptxEditResult, PptxOpenResult, PptxRevertPayload } from "./pptxHandlers.js";
 
 interface AITransformPayload {
   action: string;
@@ -102,6 +103,13 @@ const api = {
     ipcRenderer.invoke("sheet:save", payload),
   saveSheetAs: (payload: SheetSavePayload): Promise<SheetSaveResult> =>
     ipcRenderer.invoke("sheet:save-as", payload),
+
+  // 幻灯片（.pptx）：跨界 only 结构化形状与文字，幻灯片 XML 原文与 op 都留在主进程（spec 阶段 3）。
+  readPptx: (filePath: string): Promise<PptxOpenResult> => ipcRenderer.invoke("ppt:read", filePath),
+  editPptx: (payload: PptxEditPayload): Promise<PptxEditResult> => ipcRenderer.invoke("ppt:edit", payload),
+  revertPptx: (payload: PptxRevertPayload): Promise<PptxEditResult> => ipcRenderer.invoke("ppt:revert", payload),
+  savePptxAs: (payload: PptxEditPayload): Promise<PptxEditResult> =>
+    ipcRenderer.invoke("ppt:save-as", payload),
   /** Electron 32: File.path is removed; resolve a dropped File to its disk path. */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   writeDocx: (payload: { path: string; doc: unknown }): Promise<SaveResult> =>
