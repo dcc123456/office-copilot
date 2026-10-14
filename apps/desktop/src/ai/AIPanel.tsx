@@ -2199,9 +2199,11 @@ export function AIPanel({
             placeholder={
               sheet
                 ? "说要对这张表做什么，⌘/Ctrl+Enter 发送。例如：按区域汇总销售额，再删掉重复的行。"
-                : mode === "chat"
-                  ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
-                  : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
+                : slides
+                  ? "说要对这份文稿改哪里，⌘/Ctrl+Enter 发送。例如：把第 1 页标题改成 Q3 复盘，第 2 页那个文本框往下挪 60 像素。"
+                  : mode === "chat"
+                    ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
+                    : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
             }
           />
           <div className="composer-row">
