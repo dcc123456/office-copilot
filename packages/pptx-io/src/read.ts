@@ -36,6 +36,8 @@ export interface SlideShape {
    * 整段覆盖会把局部格式拍平（`AGENTS.md` §2.3），那种段落只许按 run 逐条改。
    */
   paragraphRunCounts: number[];
+  /** 每段里逐 run 的现文字，与 `paragraphRunFormats` 一一对应；AI 提 run 级改动要靠它对准 run 序号。 */
+  paragraphRunTexts: string[][];
   /** 每段的 run 格式，与 `paragraphTexts` 一一对应（该段第 i 条 run 是第 i 项）；只含该 run 显式写了的属性。 */
   paragraphRunFormats: RunFormat[][];
   /** 形状自己写的 `<a:xfrm>`（CSS px @96DPI）；没有写（几何继承自版式）时 undefined，禁止烘焙（D3）。 */
@@ -167,6 +169,8 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
   const spPr = firstChild(el, "p:spPr");
   const txBody = firstChild(el, "p:txBody");
   const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
+  // 一次扫描拿到每段的 `<a:r>`，条数 / 文字 / 格式三份都从它派生（扫三遍是同一件事重复做，§3.2）。
+  const runsByParagraph = paragraphs.map((p) => findChildren(p, "a:r"));
   return {
     shapeId: Number(cNvPr?.attributes["id"] ?? 0),
     name: String(cNvPr?.attributes["name"] ?? ""),
@@ -175,8 +179,9 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
     placeholderRef: ph ? String(ph.attributes["type"] ?? ph.attributes["idx"] ?? "") : undefined,
     hasOwnGeometry: !!spPr && !!firstChild(spPr, "a:xfrm"),
     paragraphTexts: paragraphs.map((p) => text(p)),
-    paragraphRunCounts: paragraphs.map((p) => findChildren(p, "a:r").length),
-    paragraphRunFormats: paragraphs.map((p) => findChildren(p, "a:r").map(readRunFormat)),
+    paragraphRunCounts: runsByParagraph.map((runs) => runs.length),
+    paragraphRunTexts: runsByParagraph.map((runs) => runs.map((run) => text(run))),
+    paragraphRunFormats: runsByParagraph.map((runs) => runs.map(readRunFormat)),
     boxPx: readBoxPx(spPr),
   };
 }

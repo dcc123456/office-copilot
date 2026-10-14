@@ -9,6 +9,7 @@
 export * from "./parts.js";
 export * from "./units.js";
 export * from "./read.js";
+export * from "./analysis.js";
 export * from "./pptx-file.js";
 export * from "./edit.js";
 export * from "./audit.js";
