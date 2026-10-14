@@ -376,8 +376,14 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 （内建表 + 内建表盖不住的小数位 + 自定义日期写法，带引号字面量的那种与四位小数的都回 null）；
 按列展开是 `sheet-edit.ts:numberFormatColumnOps`，工具面条目 `set_number_format`，装配在 `sheetAgent.ts` 的 switch。
 `[~]` 撤销回到批前的 `@s`、同批里已有的 `setCellValue` 不受牵连 —— 单测钉住（`sheet-edit.test.ts` 三条 + `cell-text.test.ts` 准入四条）。
-**仍缺**：下面这条落盘/openpyxl 的往返、装配面那层的单测（`sheetAgent.test.ts` 里补一条 `set_number_format` 提案→op）、
-以及 §7.2 的真实 app 走一遍。
+`[x]` 落盘往返 + **openpyxl 独立读回**（替代"Excel 目视"那条 BLOCKED）：夹具 C 列三格统一成 `0.00%` 写进
+`.xlsx`，`openpyxl@3.1.5` 读回每格 `number_format` 都是 `0.00%`，值仍是 `120/150/90`，文本格 `C1` 仍 `General`、
+日期列 `D2` 仍 `yyyy-mm-dd`；`sheet-file.test.ts` 两条把"读回来一致"和"`cellXfs` 只追加"钉住（产物 `tmp/d10-format.xlsx`）。
+顺带测出并修掉一条 §2.5 的**既有缺陷**：写盘时 `resolveNumberFormatStyles` 是就地给格子补 `styleIndex`，
+而 `applySheetPayload` 让表与上层载荷**共用同一批 cell 对象**，于是存过一次盘，op 记录里的前像就被写盘路径改脏，
+撤销当场报「C2 现在装的不是这条改动记录时的内容」，三条格式 op 全军覆没。现在改成"要换格式的格复制一份、
+整表换 `cells` 映射"，上层载荷一个字都不动。
+**仍缺**：装配面那层的单测（`sheetAgent.test.ts` 里补一条 `set_number_format` 提案→op）、以及 §7.2 的真实 app 走一遍。
 
 **落点清单**（D10 动工前把这一轮读代码的取证一次交清，照这条走不必重查）：
 
