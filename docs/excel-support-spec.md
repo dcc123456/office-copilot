@@ -332,6 +332,20 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 `[ ]` 拆列的复合批：落盘往返 + 撤销逐格回到批前（含 D8 追加的刷新 op），未建模部件不被牵连。
 `[ ]` 合列出的 `&` 公式经 `evaluateFormula` 算得出缓存值再写 `<v>`；`sheet_submit_proposal` 的 `edits` 面补对应类型与中文理由。
 
+**落点清单**（拆列/合列**不开新 op kind**，所以这一节的活是"引擎里加一个把意图展开成批的函数"+ 工具面与装配各一处）：
+
+- 拆列 `splitColumnOps(sheet, {column, separator, into?})`：`insertTracksOp(sheet, "col", 右侧列号)`（`sheet-edit.ts:314`）
+  + 每行一条 `setCellTextOp`（`sheet-edit.ts:174`，文本由引擎按分隔符切，§2.11）；拆出来的段数与目标列数对不上、
+  或源格是公式/日期就整条拒绝并给中文理由——**不许**把公式格的显示文本当"内容"拆。
+- 合列 `joinColumnsOps(sheet, {columns, separator, into})`：每行一条 `setCellFormulaOp`（`sheet-edit.ts:222`，
+  公式体 `=A2&" "&B2` 由引擎拼，缓存值走 D8/D9 那条刷新通路）；要删源列由提案**显式**带 `deleteTracksOp`（`sheet-edit.ts:330`），
+  删不动就如实报 D9 第 2 条的理由，不许把"合完顺手删列"当默认。
+- 展开函数一律落 `packages/sheet-io`（§3.3），返回 `{ops, notes}` 而不是自己落地；工具面进
+  `packages/sheet-tools/src/index.ts` 的 `SheetEdit` union，装配进 `apps/desktop/src/ai/sheetAgent.ts:184` 的 switch，
+  与 D10 同一条改提示词（"条目只有…五种"要一起更新）。
+- 撤销判据现成：复合批落地后 `ops` 里就是普通的 `insertTracks`/`setCellValue`，`revertSheetOps` 倒序应用逆操作即可，
+  不需要新代码；要测的是**批内重新锚定**（D8 记的那条：插列之后同一行的多条 `setCellValue` 能不能都落上）。
+
 
 ### D10 — 统一数字格式：一条只改 `numberFormat` 的 op，继续走 `cellXfs` 只追加那条通路
 
@@ -355,6 +369,26 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 `[ ]` 落盘往返：`cellXfs` 只追加或复用、不重排（既有断言），重开后格式与显示一致；`auditXlsxPackage` 回 `[]`。
 `[ ]` 撤销回到批前的 `@s`；同批里已有的 `setCellValue` 不受牵连。
 `[ ]` openpyxl 独立读回 `number_format` 字符串与我们写入的 `formatCode` 一致（替代"Excel 目视"那条 BLOCKED）。
+
+**落点清单**（D10 动工前把这一轮读代码的取证一次交清，照这条走不必重查）：
+
+- **写盘侧一行都不用动**：`sheet-file.ts:422-426` 已经只凭 `cell.numberFormat` 走 `styles.withNumberFormat`，
+  `cellXfs`/`numFmts` 的"只追加不重排"与"不拍平 font/fill/border/alignment"都由 P11 的用例钉着。缺的只有 op 与工具面。
+- **op 形状照 `SetCellValueOp`**（`sheet-edit.ts:44-51`）：新 kind `setCellNumberFormat`，`target: SheetCellTarget`、
+  `before`/`after` 是整格前像/后像；`applyOne`（`sheet-edit.ts:1188`）加一支分派，逆操作沿用 `applyCellOp:599-604`
+  那条"**落地之后**重新寻址"（这次改动自己就换了行内容指纹，沿用旧指纹会认不出自己）。
+- **造 op 要幂等**：`setCellNumberFormatOp(sheet, address, format)` 在现场格式已等于目标时返回 `null`，
+  与 `setColumnWidthOp:262` 同一条口径（"改了也看不出"不算漏改，别让它进 `skipped`）。
+- **格式码只认一张表**：`cell-text.ts:19` 的 `BUILTIN_FORMAT_CODES` 是唯一准入名单；表外的自定义码只收投影层盖得住的
+  形状（`percentFormatWithDecimals:268` 已经在产 `0.0%`/`0.000%` 这类），认不出就回一句中文理由（D10 第 3 条），
+  **禁止**照字符串塞进 `<numFmt>` 就当没事发生。
+- **按列展开归引擎**（§3.3、§2.11）：`numberFormatColumnOps(sheet, colIndex, format)` 只对 `kind` 为 `number`
+  与日期那类格出 op，文本格跳过并回条数——"把文本转成数字"是改值，得由 `setCellValue` 明说。
+- **工具面**：`packages/sheet-tools/src/index.ts:169` 旁加 `SetNumberFormatEdit` 并接进 `SheetEdit` 的 discriminatedUnion；
+  同文件 187 行那段"仍不在这里是拆合列与统一数字格式"与 397 行的工具描述（"统一数字格式现在提不了"）**必须一起改**，
+  否则提示词与 schema 打架；`index.test.ts` 补一条入参校验。
+- **装配**：`apps/desktop/src/ai/sheetAgent.ts:184 sheetOpsOfProposal` 加 `case "set_number_format"`，
+  列名→列号复用 `resolveColumnRef`；该文件 45 行系统提示里"条目只有…五种"要改成六种。
 
 ---
 
