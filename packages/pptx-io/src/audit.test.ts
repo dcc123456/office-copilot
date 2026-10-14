@@ -77,7 +77,7 @@ describe("auditPptxPackage：PowerPoint 会判损坏的几类结构问题", () =
     ]);
   });
 
-  it("幻灯片连关系表都没有时，报缺版式关系（§19.3.1.2）", async () => {
+  it("幻灯片连关系表都没有时，报缺版式关系（PowerPoint 侧的必须关联）", async () => {
     const parts = { ...okParts(), "ppt/slides/_rels/slide1.xml.rels": undefined };
     expect(await auditPptxPackage(await deckBytes(parts))).toEqual([
       { code: "slide-missing-layout-relationship", part: "ppt/slides/slide1.xml", detail: "" },

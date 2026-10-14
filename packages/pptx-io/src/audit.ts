@@ -7,9 +7,11 @@
  *
  * 与格式无关的五条（内容类型覆盖、关系可解析、`r:id` 落点、Id 不重复）一律来自 `@office-copilot/opc` 的
  * `auditOpcPackage`，全仓只一份 OPC 判定（§3.2）；本文件只补 `.pptx` 专属的两条：
- * - `<p:sld>` 必须有 `<p:cSld>`，且 `cSld` 里必须有 `<p:spTree>`（Part 1 §19.3.1.9 / §19.3.1.10 的必选元素）；
- * - 幻灯片部件必须有一条指向版式（slideLayout）的内部关系（Part 1 §19.3.1.2）。关系指向的版式部件**是否存在**
- *   已经由通用审计那条覆盖，这里只判"有没有这条关系"。
+ * - `<p:sld>` 必须有 `<p:cSld>`，且 `cSld` 里必须有 `<p:spTree>`（Part 1 §19.3.1.16 的 cSld；官方
+ *   "Working with presentation slides" 明确 SDK 里 `CommonSlideData` 包 `ShapeTree` 才凑齐"表示一张幻灯片所需的最小元素"）；
+ * - 幻灯片部件必须有一条指向版式（slideLayout）的内部关系（同页原话："Each instance of the Slide class must also be
+ *   associated with instances of the SlideLayout and SlideMaster classes"；§19.3.1 里没有这条 MUST，它属 PowerPoint 侧约束）。
+ *   关系指向的版式部件**是否存在**已经由通用审计那条覆盖，这里只判"有没有这条关系"；母版（slideMaster）由版式自己的关系链到，未单列判定。
  *
  * 只判"会不会被判损坏"，不判版式好不好看：继承几何、主题解析由 `read.ts` 负责。
  */
@@ -65,7 +67,7 @@ function hasShapeTree(text: string): boolean {
 }
 
 /**
- * 找一张幻灯片是否有指向版式部件的内部关系（§19.3.1.2 要求它存在）。
+ * 找一张幻灯片是否有指向版式部件的内部关系（官方 "Working with presentation slides" 把与 SlideLayout 的关联列为必须）。
  *
  * @param rels 该幻灯片自己的关系表（没有关系表时 undefined）。
  * @returns 有这条内部关系时 true；只有 External 关系或类型对不上时 false。
