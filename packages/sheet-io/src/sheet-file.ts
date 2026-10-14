@@ -6,7 +6,7 @@
  * 2. 单位/颜色/序列号的解释只发生在本包（`AGENTS.md` §2.1 的同一条纪律，换成表格域）。
  * 3. 读不懂的东西记进 `warnings`/`unsupported` 一路带到 UI，不许静默丢弃。
  */
-import { isWorksheetRelationship, loadPackage, readText, relativeTarget, resolveTarget, type OpcPackage } from "./opc.js";
+import { loadPackage, readText, relativeTarget, relsPathFor, resolveTarget, type OpcPackage } from "@office-copilot/opc";
 import { children, isElement, parseDocument, type Element } from "./xml.js";
 import type { SheetCell, SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
 import type { ResolvedChart } from "./chart-spec.js";
@@ -308,7 +308,7 @@ export class SheetFile {
     this.stagePart(parts.drawingPartPath, parts.drawingXml);
     this.stagePart(parts.drawingRelsPath, parts.drawingRelsXml);
     this.stagePart(
-      this.relsPathFor(sheetPartPath),
+      relsPathFor(sheetPartPath),
       await this.relsWith(sheetPartPath, relId, DRAWING_REL_TYPE, parts.drawingPartPath),
     );
     this.stagePart(
@@ -319,17 +319,6 @@ export class SheetFile {
       ]),
     );
     return { ok: true, chartPartPath: parts.chartPartPath, drawingPartPath: parts.drawingPartPath, sheetPartPath };
-  }
-
-  /**
-   * 关系文件的位置：`xl/worksheets/sheet1.xml` → `xl/worksheets/_rels/sheet1.xml.rels`。
-   *
-   * @param partPath 源部件路径。
-   * @returns 对应的 `.rels` 路径。
-   */
-  private relsPathFor(partPath: string): string {
-    const slash = partPath.lastIndexOf("/");
-    return `${partPath.slice(0, slash)}/_rels/${partPath.slice(slash + 1)}.rels`;
   }
 
   /**
@@ -355,7 +344,7 @@ export class SheetFile {
    */
   private async relsWith(sourcePartPath: string, relId: string, relType: string, targetPartPath: string): Promise<string> {
     const relationship = `<Relationship Id="${relId}" Type="${relType}" Target="${relativeTarget(sourcePartPath, targetPartPath)}"/>`;
-    const original = await readText(this.pkg.zip, this.relsPathFor(sourcePartPath));
+    const original = await readText(this.pkg.zip, relsPathFor(sourcePartPath));
     return original
       ? original.replace("</Relationships>", `${relationship}</Relationships>`)
       : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
@@ -499,7 +488,7 @@ export class SheetFile {
     if (this.originalParts.has(SHARED_STRINGS_PART)) return;
     const relId = this.nextRelIdFor(WORKBOOK_PART);
     this.pkg.zip.file(
-      this.relsPathFor(WORKBOOK_PART),
+      relsPathFor(WORKBOOK_PART),
       await this.relsWith(WORKBOOK_PART, relId, SHARED_STRINGS_REL_TYPE, SHARED_STRINGS_PART),
     );
     this.pkg.zip.file(
@@ -555,4 +544,17 @@ function childElements(xmlText: string, containerName: string | undefined, name:
   const container = containerName ? children(root).find((node) => isElement(node) && node.name === containerName) : root;
   if (!container) return [];
   return children(container).filter((node) => isElement(node) && node.name === name);
+}
+
+/**
+ * 关系类型 URI 是不是"指向一张 worksheet"。
+ *
+ * 表格专属（`pptx`/`docx` 没有 worksheet 这个类型），所以留在本包，不塞进通用的 `@office-copilot/opc`。
+ * 只比 URI 结尾，不比对整个命名空间串——各版本 Office 的命名空间前缀一致，结尾段才是语义。
+ *
+ * @param type `Relationship/@Type` 原值。
+ * @returns 是 worksheet 关系时 true。
+ */
+function isWorksheetRelationship(type: string): boolean {
+  return type.endsWith("/relationships/worksheet");
 }

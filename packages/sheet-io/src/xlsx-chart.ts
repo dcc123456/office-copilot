@@ -7,7 +7,7 @@
  * 这里是**纯字符串拼装**：部件之间的引用关系由 `SheetFile.addChart` 负责登记（`sheet-file.ts`）。
  */
 import { chartExtentEmu, type ResolvedChart } from "./chart-spec.js";
-import { relativeTarget } from "./opc.js";
+import { relativeTarget } from "@office-copilot/opc";
 import { escapeAttr, escapeText } from "./xml.js";
 
 /** 图表部件与画图部件的产物集合，路径都是包内正斜杠路径。 */

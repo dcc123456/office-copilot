@@ -14,8 +14,8 @@
  *
  * 只判"会不会被判损坏"，不判"图好不好看"：数值口径、图表语义由 `analysis/` 与 `chart-spec.ts` 负责。
  */
-import { loadPackage, readText, resolveTarget } from "./opc.js";
-import { xml } from "@office-copilot/docx-io";
+import { loadPackage, readText, resolveTarget } from "@office-copilot/opc";
+import { xml } from "@office-copilot/opc";
 
 /**
  * `<worksheet>` 允许的子元素顺序（ECMA-376 Part 1 §18.3.1.100 的 `xsd:sequence`，与 MS-OFFMACRO2 公布的

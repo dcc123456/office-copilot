@@ -1,11 +1,12 @@
 /**
  * OPC（zip 包）读取：部件清单、`[Content_Types].xml`、关系表。
  *
- * 复用 `@office-copilot/docx-io` 已经导出的通用 XML 助手与 `jszip`，不再写第二套
- * XML 遍历/序列化（`AGENTS.md` §3.1）。
+ * 这一层是**格式无关**的——`.docx`/`.xlsx`/`.pptx` 的包结构规则同属 ECMA-376 Part 2 (OPC)，
+ * 之前它住在 `sheet-io` 里且没有对外导出，pptx 线要用就只能再写第三套（`AGENTS.md` §3.2）。
+ * 各格式特有的关系类型判断（例如"这是不是一张 worksheet"）留在各自的包里，不塞进这里。
  */
 import JSZip from "jszip";
-import { xml } from "@office-copilot/docx-io";
+import * as xml from "./xml.js";
 
 /** 已加载的包。`entryNames` 含目录项，读内容前要先过 `readText`。 */
 export interface OpcPackage {
@@ -25,12 +26,10 @@ export interface OpcRelationship {
   targetMode: string;
 }
 
-const RELATIONSHIP_NS_SUFFIX = "/relationships";
-
 /**
  * 读取包并解析全部关系表。
  *
- * @param bytes `.xlsx` 的原始字节。
+ * @param bytes 办公文档的原始字节（`.xlsx`/`.docx`/`.pptx` 都是 zip）。
  * @returns 可直接查部件文本的包对象；不是 zip 时由 JSZip 抛错，调用方负责转成用户可读提示。
  */
 export async function loadPackage(bytes: Uint8Array): Promise<OpcPackage> {
@@ -86,21 +85,11 @@ export function parseRelationships(relsXml: string): OpcRelationship[] {
 }
 
 /**
- * 关系类型 URI 里的工作表类型判断。
- *
- * @param type `Relationship/@Type`。
- * @returns 是 worksheet 关系时为 true（用 URI 结尾判断，不比对整个命名空间串）。
- */
-export function isWorksheetRelationship(type: string): boolean {
-  return type.endsWith(`${RELATIONSHIP_NS_SUFFIX}/worksheet`);
-}
-
-/**
  * 把 `@Target` 换算成包内路径。
  *
  * OPC 允许三种写法：相对关系文件所在目录（`worksheets/sheet1.xml`）、相对源部件目录、
  * 绝对 `/xl/...`，还允许 `..`。`docx-io` 里的 `wordPartPath` 把基准硬编码成了 `word/`，
- * 这里的基准是从关系文件路径推出来的，所以对 `xl/` 与根目录都成立。
+ * 这里的基准是从关系文件路径推出来的，所以对任何格式的目录都成立。
  *
  * @param sourcePartPath 源部件路径，如 `xl/workbook.xml`（不是 `.rels` 本身）。
  * @param target `Relationship/@Target` 原值。
@@ -115,7 +104,7 @@ export function resolveTarget(sourcePartPath: string, target: string): string {
 /**
  * `resolveTarget` 的反向：把包内绝对路径写成关系文件里该出现的相对 `@Target`。
  *
- * 只在**新建**关系时用（`SheetFile.addChart`）。写错一层目录 Excel 会直接判文档损坏，
+ * 只在**新建**关系时用（图表、画图部件）。写错一层目录办公软件会直接判文档损坏，
  * 所以这里给出唯一的拼法，并且保证 `resolveTarget(src, relativeTarget(src, dst)) === dst`。
  *
  * @param sourcePartPath 源部件路径，如 `xl/worksheets/sheet1.xml`。
@@ -154,11 +143,25 @@ export async function readText(zip: JSZip, partPath: string): Promise<string | u
 }
 
 /**
- * 列出包里"存在但没有被建模"的部件（阶段 1 保真验收用）。
+ * 关系文件的位置：`xl/worksheets/sheet1.xml` → `xl/worksheets/_rels/sheet1.xml.rels`；
+ * 根级部件（不含 `/`）落在包根的 `_rels/` 下。
+ *
+ * @param partPath 源部件路径。
+ * @returns 对应的 `.rels` 路径。
+ */
+export function relsPathFor(partPath: string): string {
+  const slash = partPath.lastIndexOf("/");
+  const folder = slash < 0 ? "" : partPath.slice(0, slash);
+  const file = slash < 0 ? partPath : partPath.slice(slash + 1);
+  return `${folder ? `${folder}/` : ""}_rels/${file}.rels`;
+}
+
+/**
+ * 列出包里"存在但没有被建模"的部件（保真验收用）。
  *
  * @param pkg 已加载的包。
  * @param modelledPaths 我们已知会读写的路径集合。
- * @returns 其余文件部件的路径，顺序稳定（按路径排序）。
+ * @returns 其余文件部件的路径，顺序稳定（按路径排序）；关系文件不计入（它属于登记结构，不是内容部件）。
  */
 export function unmodelledParts(pkg: OpcPackage, modelledPaths: ReadonlySet<string>): string[] {
   return pkg.entryNames.filter(

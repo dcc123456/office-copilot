@@ -1,11 +1,10 @@
 /**
- * 与 `@office-copilot/docx-io` 共用的 XML 助手出口。
+ * 与 `@office-copilot/opc` 共用的 XML 助手出口。
  *
- * 这些遍历/序列化函数本来就是通用 OOXML 能力（`packages/docx-io/src/xml.ts`），
- * 从包口 `export * as xml` 出去了，这里只做**再导出 + 类型别名**，
- * 不再写第二份（`AGENTS.md` §3.1：按能力搜索，已有就复用）。
+ * 这些遍历/序列化函数是通用 OOXML 能力，三种格式（docx/xlsx/pptx）共用一份，
+ * 这里只做**再导出 + 类型别名 + 表格专属的两个小工具**（`AGENTS.md` §3.1/§3.2）。
  */
-import { xml } from "@office-copilot/docx-io";
+import { xml } from "@office-copilot/opc";
 
 export const {
   parseDocument,
@@ -27,8 +26,8 @@ export type Element = ReturnType<typeof xml.parseDocument>;
 /** 序列化接受的任何节点。 */
 export type XmlNode = Parameters<typeof xml.serialize>[0];
 
-/** OOXML 各部件统一的 XML 声明；实测所有部件都带 `standalone="yes"` 且声明后不接换行。 */
-export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+/** OOXML 统一的 XML 声明；定义在 `@office-copilot/opc`，这里只是别名，不留第二份。 */
+export const XML_DECLARATION = xml.XML_DECLARATION;
 
 /** spreadsheetml 主命名空间（实测所有 `xl/**` 部件的默认 xmlns 都是它）。 */
 export const SPREADSHEET_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";

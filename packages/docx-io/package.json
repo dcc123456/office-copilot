@@ -17,6 +17,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@office-copilot/opc": "workspace:*",
     "@office-copilot/shared": "workspace:*",
     "@rgrove/parse-xml": "^4.2.3",
     "jszip": "^3.10.1"
