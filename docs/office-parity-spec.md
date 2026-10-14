@@ -345,7 +345,7 @@ pptx-io 原 26 条未改未减。
   `createFolders: false`。
 **仍缺**：画布式选中与拖拽尺寸（本批是列表里的数字输入框，不是 WYSIWYG 拖拽）、notes/母版继承链解析（阶段 2 那条）。
 
-### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级四类编辑 op + 叠放次序结构 op（含视图上那四个按钮）+ 内容寻址撤销 + modlog 落盘已落（真 app 实测跨进程撤销）；增删形状那批结构 op 与历史面板的幻灯片渲染仍缺`
+### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级四类编辑 op + 叠放次序结构 op（含视图上那四个按钮）+ 增删形状那批结构 op（含视图上的「加文本框 / 删形状」）+ 内容寻址撤销 + modlog 落盘已落（真 app 实测跨进程撤销）；历史面板的幻灯片渲染与画布式选中仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
 **实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。
@@ -364,7 +364,15 @@ D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 点「撤销上一次保存」只回最后那一次点击（磁盘回到 `3:TextBox 2 -> 2:Title 1 -> 4:TextBox 3`），**草稿没被吞掉**（仍 1 处待保存、值仍是「正文乙改过」）；
 最后点「保存」→ 磁盘上 `<a:t>` 依次是 `正文乙改过 | 标题甲 | 正文丙`，与新的叠放顺序一致。事后 `auditPptxPackage` **0 条**，python-pptx 独立读到叠放 `[3, 2, 4]`、文字 `['正文乙改过', '标题甲', '正文丙']`。
 顺手实测出一条**读侧的宽容**：夹具的幻灯片 XML 少一个 `</a:p>` 时，`readSlideShapes` 不报错，面板如实显示「这张幻灯片没有可读出的形状」——解析失败现在被折成"没有形状"，见下面「仍缺」。
-**仍缺**：增删形状那批结构 op（新建 `p:sp` 要分配 `<p:cNvPr @id>`，而 ECMA 要求该 id 在**整份文档**内唯一——python-pptx 的 turbo-add 注释就明说撞号会让 PowerPoint 报修复错误，所以得先算全局最大号），以及历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下）。
+**仍缺**：历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下），以及画布式选中与拖拽尺寸（现在能改几何的是数字输入框）。
+**增删形状这批（`addTextBox` / `removeShape`，本批新落）**：一手依据纠正了本文件前面那句"ECMA 要求 `p:cNvPr @id` 在**整份文档**内唯一"——**它是错的**。
+python-pptx 分配形状号的那段源码（`tmp/pylibs/pptx/oxml/shapes/groupshape.py:151-163` 的 `max_shape_id`）取的是**这一页 spTree 上的** `xpath("//@id")` 最大值，注释写 "XML id-values have document scope"，那份 document 就是这一个幻灯片部件；
+本机实测也对得上：`tmp/pptx-edit/probe.pptx` 两页的 id 分别是 `[1,2,3]` 与 `[1,2]`，**跨页本来就重复**。
+所以引擎按"这一页部件内 `max(@id)+1`"分配（`maxShapeIdInPart` 扫这一页 XML 里所有数字 `@id`，`p:section/@id` 那种 GUID 非数字、正好被过滤掉），新建的 `<p:sp>` 骨架逐字照 python-pptx 的 `CT_Shape._textbox_sp_tmpl()`（`oxml/shapes/autoshape.py:388`，也就是 PowerPoint 自己插入文本框写的那一段：`p:nvSpPr > cNvPr/cNvSpPr txBox="1"/nvPr`、`p:spPr > a:xfrm + a:prstGeom prst="rect" + a:noFill`、`p:txBody > a:bodyPr + a:lstStyle + a:p`），
+名字沿用它的 `"TextBox %d" % (id-1)`；空文字时保留模板那个 `<a:p/>`，不造空 run；文字来自用户输入，写进 `<a:t>` 前过 `opc` 的 `escapeText`（§3.6 只在系统边界校验）。
+新形状挂在形状子序列末尾 = 最顶层（叠放语义同上），删形状就是把那一个元素从 spTree 里摘掉——**不动 `.rels`、不动 `[Content_Types].xml`**：OPC 只要求被引用的关系存在，删元素只会少引用不会多引用，所以 §2.10 那"三处一起登记"没有要回滚的东西，撤销与前像核对一句没改（结构 op 共用整页前/后像这一条通道）。
+单测 7 条：形状号是本页最大值 +1 且已有形状逐字不动、px→EMU 只在 `units.ts` 那一处（96px→914400）、空串保留 `<a:p/>`、文字里的 `<` `&` 转义后读回原样、宽高非正与部件缺失各回理由且不落盘、删形状后其余形状逐字不动 + 撤销逐字回原、删到最后一个形状是合法操作（读侧回空数组不抛异常）。
+**顺带抽出 `loadSlidePart`**：`locateShape` 里"读部件 + 解析 + 失败给中文理由"那一段现在与整页粒度的 `addTextBox` 共用（§3.2 第二次出现就抽）。
 另有一条本批实测撞到的**读侧宽容**：幻灯片部件解析失败时 `readSlideShapes` 回空数组，面板于是只显示「这张幻灯片没有可读出的形状」，把"这一页读不懂"说成了"这一页是空的"——该如实分成两句（阶段 2 的读侧要补一条失败理由通道）。
 **实测（modlog 落盘 + 内容寻址撤销这条已达标，本批新落）**：撤销的凭据不再只活在渲染层的内存批次里。
 `apps/desktop/src/slides/slideHistory.ts` 把每次落地那批 op（整页前/后像）连同 label/summary 写成一条 `幻灯片改动` 记录，
@@ -383,6 +391,16 @@ modlog 里出现 `{label:"幻灯片改动", summary:"手工改了 1 处", opCoun
 单测：4 条引擎用例钉现场核对（一致才写回 / 同批两条改同一页能一路链回原样 / 那一页后来又被手工改过则整条撤不动且"用户自己改的"一个字不丢 /
 部件已不在包里给理由不抛异常），1 条出入口用例钉"拿旧批次撤不动、最新那批照旧能撤"，6 条记录层用例钉三类记录互不认错与按 ts 取最新。
 **没有新增第二条撤销通道**：手工保存与 AI 提案仍共用 `App.tsx` 那一个落地口，历史里也只有那一个来源。
+**真 app 实跑（`tmp/probe/slide-add-remove-ui.mjs`，这一批不涉及 LLM、CDP 驱动 dist）**：打开 `tmp/slide-add-remove/probe.pptx`（第 1 页两个形状 `ids=[2,3]`）→
+点第 1 页标题行的「加文本框」→ 磁盘形状子序列当场变 `[2,3,4]`，列表多出一行 `TextBox 3`，类型标签是"文本框"、那四个几何框里的值是 `96 / 96 / 480 / 144`（px 交出什么读回什么，视图里没有第二次换算），
+段输入框是可编辑的"新文本框"而不是那行只读提示；把它改成 `Q4 目标` 点「保存」→ 磁盘 `<a:t>` 变 `Q4 目标`、脏点不出现；点那行的「删形状」→ 磁盘回到 `[2,3]`、
+`txBox="1"` 由 2 变回 1，且整页 XML **去掉 XML 声明后与原文件逐字一致**（声明那行的差异是本仓既有的整页重写行为：原文件是 `<?xml version='1.0'…?>` 单引号 + 换行，我们一律写双引号且不接换行，语义等价）；
+点「撤销上一次保存」（那批是"删形状"）→ 形状 4 连同 `Q4 目标` 一起回来。事后 `auditPptxPackage` **0 条**、`CHANGED_PARTS` 只有 `ppt/slides/slide1.xml`（其余部件逐字节没动）；
+python-pptx 独立读到 3 个形状：`id=4 name='TextBox 3' type=TEXT_BOX (17) text='Q4 目标' left/top/w/h = 1.0/1.0/5.0/1.5 英寸`（= 96/96/480/144 px @96DPI），
+且 `s.shapes[-1]` 就是新那个（最顶）。历史里是 3 条 `幻灯片改动`（`在第 1 页加一个文本框` / `手工改了 1 处` / `删掉「TextBox 3」`），撤完最后那条转 `undone:true`——**没有新开第二条历史栈**。
+视图侧的一条新守卫：删形状落地后把**那个形状**的未保存草稿一并丢掉（`slideDeckModel.dropShapeDrafts`）。
+不丢会出一条静默写错地方的路：形状号是"本页最大值 +1"，删掉的正好是最大号时下一次新建会把这个号发给新形状，用户给旧框打的字就落进新框；
+3 条单测钉住"只掉那一个形状的各段与它的几何"、"号 4 的清理不带走号 41 的草稿（分隔符算在键里）"、"没命中时原对象返回"。
 **历史面板这一批故意没动**：`HistoryPanel` 现在把所有记录都按文档记录渲染（`describeCoreOp` 对幻灯片 op 返回 undefined，
 逐条改动列表是空的，且那个「撤销这次修改」按钮接的是 Tiptap 那条撤销），幻灯片记录要进面板得先按格式分派——
 而该文件正带着 dcc 未提交的改动，改它会撞车，所以本批只把记录与撤销做扎实，AI 提案卡上的幻灯片那张仍不给「查看修改历史」入口。
@@ -587,3 +605,5 @@ open tmp/p0/deck.pptx（3 页 + 备注 + 图表 + 表格，建在 WPS 模板上�
 
 探针产物全部在 `tmp/`（`pptx-kn-check.pptx`、`kn-export/`、`kn-export.pptx`、`kn-export.pdf`、`pptx-pip.log`），
 按 §6.5/§7.3 由本次执行者清理，不入库。
+
+  增删形状这批：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 16 / **pptx-io 52**（+7 条新建/删除：形状号在本页内取、骨架与单位、空段、转义、拒绝不落、逐字回原、删到空）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 495**（+3 条 `dropShapeDrafts`）`，合计 **1152**。`packages/opc` 另多导出一个 `XmlNode` 类型（自己走子树时要按它接 `isElement` 收窄），不是新实现。
