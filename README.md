@@ -432,8 +432,9 @@ pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --no
 - 远端：`git@github.com:dcc123456/office-copilot.git`（`main`）。改动完成即提交并推送，不在本地堆积。
 - **不入库的东西**：`node_modules`、`dist`、`apps/desktop/release/`（`.dmg` / `.app` 构建产物，单个可达
   数百 MB）、`certs/**`（除 `.gitkeep`）、`.env`、`apps/server/data/*.sqlite`。
-  `tmp/`（测试与探针产物、夹具、验证用的 `.xlsx`）**没有 `.gitignore` 条目**，所以它每次都以未跟踪目录出现在
-  `git status` 里——按 `AGENTS.md` §7.3 靠人工不暂存，谁也不要 `git add -A`。
+  `tmp/`（测试与探针产物、夹具、验证用的 `.xlsx`）**已于 2026-10-14 经批准进 `.gitignore`**（`591ed89`）。
+  口径没变：探针产物只准落在 `tmp/`、自己负责清理，里面可能躺着复制来的探针配置（含真实 Key），
+  所以照 `AGENTS.md` §7.3 逐文件点名 `git add`，谁也不要 `git add -A` / `git add .`。
 - 提交信息：描述部分用中文，格式 `<type>(<scope>): <做了什么 + 为什么>`；一个提交只做一件事。
 - AI 代理与人类同样受 **`AGENTS.md`** 约束，尤其是第 2 节「领域不变量」（单位/颜色换算只在
   `packages/docx-io` 与 `packages/sheet-io` 各自的进出口、局部格式不许被拍平、新建 OPC 部件要三处一起登记、
