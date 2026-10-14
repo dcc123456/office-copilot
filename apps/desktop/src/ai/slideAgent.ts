@@ -40,6 +40,7 @@ const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这�
   前三条指到"某一页某个形状的某段某 run"，中间两条指到形状（叠放方向是 up/down/top/bottom），后两条是结构改动：
   add_text_box 只给页号与四个几何值加文字（新形状号由引擎落地时分配，同一份提案里引用不到它），remove_shape 给页号与形状号。
   同一批里删掉的形状就别再改它的文字或字体（落地按顺序执行，那条必然失败并整批不写）。改版式与母版这里做不了，遇到就直说做不了。
+- set_shape_geometry 想只改一个轴（比如只把宽改一下），那个形状必须自己写过几何；画像里 hasOwnGeometry=false 的形状（标题/正文那类占位符，值从版式继承）要改就把四个值一起给。
 - 一段里如果有多条 run（read_slide_text 会标出来），必须逐 run 改，整段覆盖会拍平那一截的粗体与字号——这是禁止的。
 - 字号单位是 pt，几何单位是屏幕 px；EMU、半磅这些换算由引擎做，你不许换算数字往字段里塞。
 - 颜色只认 #rrggbb 六位十六进制。
@@ -146,6 +147,14 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
         notes.push(`第 ${edit.slideNumber} 页的「${shape.name}」是组合形状，几何改不了（子偏移语义不同），这条跳过。`);
         continue;
       }
+      // 占位符那一类自己没写 `<a:xfrm>`：`<a:off>` 的 x、y 与 `<a:ext>` 的 cx、cy 在 OOXML 里都是必填，
+      // 只给一轴时引擎写出来的文件会被 PowerPoint 判损坏，所以这条同样别交（理由见 pptx-io 的 missingPairValues）。
+      if (!shape.boxPx && !hasFullBox(edit)) {
+        notes.push(
+          `第 ${edit.slideNumber} 页「${shape.name}」的位置尺寸是从版式继承的（它自己没写），要改就得把 leftPx、topPx、widthPx、heightPx 四个一起给，这条跳过。`,
+        );
+        continue;
+      }
       requests.push({
         kind: "geometry",
         target: { partPath: slide.partPath, shapeId: shape.shapeId },
@@ -184,6 +193,16 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
  */
 function isGroupShape(shape: SlideShape): boolean {
   return shape.kind === "group";
+}
+
+/**
+ * 这条几何提案是不是把四个值都给齐了（占位符那种只能整对给，见 `slideRequestsOfProposal` 里的用法）。
+ *
+ * @param edit 已判定为 `set_shape_geometry` 的那条提案。
+ * @returns true 表示 `leftPx`、`topPx`、`widthPx`、`heightPx` 全部给了数字。
+ */
+function hasFullBox(edit: Extract<PptxEditT, { type: "set_shape_geometry" }>): boolean {
+  return edit.leftPx !== undefined && edit.topPx !== undefined && edit.widthPx !== undefined && edit.heightPx !== undefined;
 }
 
 /**

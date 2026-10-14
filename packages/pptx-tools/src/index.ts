@@ -91,7 +91,10 @@ const SetRunColorEdit = z
   })
   .strict();
 
-/** 一条移动 / 缩放形状的请求；四个方位至少给一个由 `SubmitProposalArgs` 顶层校验。几何单位是屏幕 px（不是 EMU、不是 pt），换算由引擎做（§2.1）。 */
+/**
+ * 一条移动 / 缩放形状的请求；四个方位至少给一个由 `SubmitProposalArgs` 顶层校验。几何单位是屏幕 px（不是 EMU、不是 pt），换算由引擎做（§2.1）。
+ * 自己没写 `<a:xfrm>` 的形状（占位符那类）必须四个一起给，因为 `<a:off>` 的 x、y 与 `<a:ext>` 的 cx、cy 在 OOXML 里都是必填（校验在 `pptx-io` 的 `setShapeGeometry`）。
+ */
 const SetShapeGeometryEdit = z
   .object({
     type: z.literal("set_shape_geometry"),
@@ -288,7 +291,8 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
         "把你打算对幻灯片做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
         "七类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
-        "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px）；" +
+        "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
+        "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒）；" +
         "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
         "add_text_box 在某页新加一个文本框（四个几何值都要给，文字必填，形状号由引擎在落地时分配，这一份提案里引用不到它）；" +
         "remove_shape 删掉某个形状（连同它的文字一起没，可撤销）。" +

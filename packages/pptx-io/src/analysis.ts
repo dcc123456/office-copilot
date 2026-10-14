@@ -72,7 +72,7 @@ export interface SlideOutlineEntry {
     kind: SlideShape["kind"];
     /** 占位符角色（`type` 或 `idx`），非占位符为 null。 */
     placeholderRef: string | null;
-    /** 有没有自己的 `<a:xfrm>`（false＝几何继承自版式，改几何会被拒，D3）。 */
+    /** 有没有自己的 `<a:xfrm>`（false＝几何继承自版式，改几何要把四个值一起给，D3）。 */
     hasOwnGeometry: boolean;
     /** 这一页上这个形状的文字概要（拼接串，超长已截）。 */
     text: string;

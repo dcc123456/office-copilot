@@ -159,6 +159,21 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     expect(notes[1]).toContain("「TextBox 3」在同一批里已经被删掉");
   });
 
+  it("几何继承自版式的形状（标题占位符那种）只给一轴时不交出：引擎写出来会缺必填属性，整批不落地（§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "set_shape_geometry", slideNumber: 1, shapeId: 2, topPx: 60 },
+      { type: "set_shape_geometry", slideNumber: 1, shapeId: 4, heightPx: 200 },
+      { type: "set_shape_geometry", slideNumber: 1, shapeId: 2, leftPx: 96, topPx: 60, widthPx: 480, heightPx: 120 },
+    ]);
+    // 形状 4 自己写了几何，单改高度合法；形状 2 没写，只有四个一起给的那条能落
+    expect(requests).toEqual([
+      { kind: "geometry", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4 }, box: { heightPx: 200 } },
+      { kind: "geometry", target: { partPath: "ppt/slides/slide1.xml", shapeId: 2 }, box: { leftPx: 96, topPx: 60, widthPx: 480, heightPx: 120 } },
+    ]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("从版式继承");
+  });
+
   it("多 run 的段落按模型指的 run 改，不整段覆盖（§2.3）", () => {
     const { requests } = slideRequestsOfProposal(sampleDeck(), [
       { type: "set_run_text", slideNumber: 1, shapeId: 4, paraIndex: 0, runIndex: 1, text: "只改第二截" },

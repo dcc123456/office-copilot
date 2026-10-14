@@ -176,7 +176,8 @@ export async function setRunColor(file: PptxFile, target: ShapeRunTarget, hex: s
  * @param file 已打开的读写器。
  * @param target 形状定位坐标（部件路径 + 形状号）。
  * @param box 位置/尺寸（CSS px @96DPI）；给了哪个改哪个，left/top 允许负值，width/height 须为正。
- * @returns `{ ok, op }`：无属性、尺寸非法、定位失败或形状是组合（子偏移语义不同，暂不支持）时 `{ ok:false, reason }`。
+ * @returns `{ ok, op }`：无属性、尺寸非法、定位失败、形状是组合（子偏移语义不同，暂不支持）、
+ *   或补丁会让 `<a:off>` / `<a:ext>` 缺一半必填属性时 `{ ok:false, reason }`。
  *   px→EMU 换算走 `units.ts`，那是全仓唯一的一处（§2.1）。对占位符写显式 `<a:xfrm>` 是用户明示的覆盖，不是读侧烘焙（D3 只禁止读侧把继承几何固化）。
  */
 export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarget, box: ShapeGeometryPatch): Promise<SlideEditResult> {
@@ -188,19 +189,52 @@ export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarg
   const located = await locateShape(file, target);
   if (!located.ok) return located;
   if (located.shape.name === "p:grpSp") return { ok: false, reason: "组合形状的几何暂不支持（子偏移语义不同）。" };
-  const spPr = getOrCreateSpPr(located.shape);
-  const xfrm = getOrCreateChild(spPr, "a:xfrm", true); // CT_ShapeProperties：xfrm 是第一个子元素
+  const spPr = firstChild(located.shape, "p:spPr");
+  const xfrm = spPr ? firstChild(spPr, "a:xfrm") : undefined;
+  const missing = [
+    ...missingPairValues(xfrm ? firstChild(xfrm, "a:off") : undefined, [
+      { attribute: "x", field: "leftPx", patch: box.leftPx },
+      { attribute: "y", field: "topPx", patch: box.topPx },
+    ]),
+    ...missingPairValues(xfrm ? firstChild(xfrm, "a:ext") : undefined, [
+      { attribute: "cx", field: "widthPx", patch: box.widthPx },
+      { attribute: "cy", field: "heightPx", patch: box.heightPx },
+    ]),
+  ];
+  if (missing.length > 0) {
+    return { ok: false, reason: `这个形状没写全自己的几何，而 <a:off> 与 <a:ext> 的必填属性得一次给齐，只写一半会被 PowerPoint 判损坏：还缺 ${missing.join("、")}。` };
+  }
+  const mutableSpPr = getOrCreateSpPr(located.shape);
+  const mutableXfrm = getOrCreateChild(mutableSpPr, "a:xfrm", true); // CT_ShapeProperties：xfrm 是第一个子元素
   if (box.leftPx !== undefined || box.topPx !== undefined) {
-    const off = getOrCreateChild(xfrm, "a:off", false);
+    const off = getOrCreateChild(mutableXfrm, "a:off", false);
     if (box.leftPx !== undefined) off.attributes["x"] = String(pxToEmu(box.leftPx));
     if (box.topPx !== undefined) off.attributes["y"] = String(pxToEmu(box.topPx));
   }
   if (box.widthPx !== undefined || box.heightPx !== undefined) {
-    const ext = getOrCreateChild(xfrm, "a:ext", false);
+    const ext = getOrCreateChild(mutableXfrm, "a:ext", false);
     if (box.widthPx !== undefined) ext.attributes["cx"] = String(pxToEmu(box.widthPx));
     if (box.heightPx !== undefined) ext.attributes["cy"] = String(pxToEmu(box.heightPx));
   }
   return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
+}
+
+/**
+ * 数一数 `<a:off>` / `<a:ext>` 这一对必填属性，补丁给全了没有。
+ * 依据：ECMA-376 §20.1.1.15 `CT_Point2D` 与 §20.1.1.14 `CT_PositiveSize2D` 把 x、y（cx、cy）都定成必填，
+ * python-pptx 读到只有 `y` 的 `<a:off>` 直接抛 `InvalidXmlError`（本机实测）。不许拿"另一轴从版式继承"去猜，一猜就把用户没要求的那一轴钉死了。
+ *
+ * @param pair 现有的 `<a:off>` 或 `<a:ext>`，形状没写时是 undefined。
+ * @param requirements 该元素的必填属性名、对应字段名与补丁值（没给的是 undefined）三者配对。
+ * @returns 现有元素与补丁**都**没覆盖到的字段名；齐了则是空数组。
+ */
+function missingPairValues(
+  pair: Element | undefined,
+  requirements: Array<{ attribute: string; field: string; patch: number | undefined }>,
+): string[] {
+  return requirements
+    .filter((entry) => pair?.attributes[entry.attribute] === undefined && entry.patch === undefined)
+    .map((entry) => entry.field);
 }
 
 /**

@@ -513,6 +513,19 @@ describe("pptx-io：形状几何 op（移动 / 缩放）", () => {
     expect(after).toContain("<p:spPr><a:xfrm><a:off x=\"952500\" y=\"952500\"/><a:ext cx=\"1905000\" cy=\"1905000\"/></a:xfrm></p:spPr>");
   });
 
+  it("占位符那种自己没写几何的形状，只给一轴时带原因拒绝（OOXML 里 x、y 与 cx、cy 都是必填）", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 标题 shapeId=2，<p:spPr/> 是空的
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const onlyTop = await setShapeGeometry(file, { partPath, shapeId: 2 }, { topPx: 60 });
+    expect(onlyTop.ok).toBe(false);
+    if (!onlyTop.ok) expect(onlyTop.reason).toContain("leftPx");
+    const onlyWidth = await setShapeGeometry(file, { partPath, shapeId: 2 }, { widthPx: 200 });
+    expect(onlyWidth.ok).toBe(false);
+    if (!onlyWidth.ok) expect(onlyWidth.reason).toContain("heightPx");
+    expect(await file.partText(partPath)).toBe(original); // 拒了就不许留下半个 <a:off>
+  });
+
   it("apply 后部件变、revert 逐字回到原样", async () => {
     const file = await PptxFile.open(await minimalDeck());
     const partPath = file.model.slides[0]!.partPath;
