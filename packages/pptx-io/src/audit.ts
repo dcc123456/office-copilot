@@ -14,6 +14,7 @@
  *   关系指向的版式部件**是否存在**已经由通用审计那条覆盖，这里只判"有没有这条关系"；母版（slideMaster）由版式自己的关系链到，未单列判定。
  * - 几何元素 `<a:off>`/`<a:ext>`（组合形状那对是 `<a:chOff>`/`<a:chExt>`）的必填属性不许只写一半：Part 1 §20.1.1.15 `CT_Point2D`
  *   与 §20.1.1.14 `CT_PositiveSize2D` 把 x、y 与 cx、cy 都定为 required attribute，python-pptx 读到半个 `<a:off y>` 直接抛 `InvalidXmlError`（本机实测）。
+ *   同一条里的 `CT_Transform2D` 还把 `off|chOff` 与 `ext|chExt` 两个 choice 各定为必选子元素，所以 `<a:xfrm>` 少一整块也算损坏。
  *
  * 只判"会不会被判损坏"，不判版式好不好看：继承几何、主题解析由 `read.ts` 负责。
  */
@@ -64,13 +65,23 @@ const REQUIRED_TRANSFORM_PAIRS: Record<string, [string, string]> = {
 };
 
 /**
- * 找出一张幻灯片里"只写了一半"的几何元素。
+ * `<a:xfrm>` 的必选子元素（`CT_Transform2D` 里是两个 choice：`off|chOff` 与 `ext|chExt` 各必须有一个）。
+ *
+ * 组合形状用 chOff/chExt 那一支，所以每一档给两个可接受的名字。
+ */
+const REQUIRED_TRANSFORM_CHILDREN: Array<[string, string]> = [
+  ["off", "chOff"],
+  ["ext", "chExt"],
+];
+
+/**
+ * 找出一张幻灯片里"只写了一半"的几何元素：属性只写一半，或 `<a:xfrm>` 少一个必选子元素。
  *
  * 与写侧那条守卫（`edit.ts` 的 `missingPairValues`）配成一对：那边是不许写出来，这边是万一从别处
  * 进了这种 XML（旧产物、别的工具），落盘前的审计要能看见（§2 红线；python-pptx 读到半个 `<a:off y>` 会抛 `InvalidXmlError`）。
  *
  * @param root 幻灯片部件的根元素。
- * @returns 每处一句"元素名 缺 x、y"；没有时是空数组。
+ * @returns 每处一句"元素名 缺 x"；没有时是空数组。
  */
 function incompleteTransforms(root: xml.Element): string[] {
   const found: string[] = [];
@@ -79,6 +90,11 @@ function incompleteTransforms(root: xml.Element): string[] {
       const missing = pair.filter((attribute) => el.attributes[attribute] === undefined);
       if (missing.length > 0) found.push(`${el.name} 缺 ${missing.join("、")}`);
     }
+  }
+  for (const xfrm of xml.collectDescendantsByLocalName(root, "xfrm")) {
+    const childNames = new Set(xml.children(xfrm).map((el) => xml.localName(el.name)));
+    const missing = REQUIRED_TRANSFORM_CHILDREN.filter((choice) => !choice.some((name) => childNames.has(name)));
+    if (missing.length > 0) found.push(`${xfrm.name} 缺 ${missing.map((choice) => choice.join("/")).join("、")}`);
   }
   return found;
 }

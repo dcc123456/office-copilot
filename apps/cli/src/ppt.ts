@@ -31,7 +31,7 @@ const PPT_ISSUE_TEXT: Record<PptxAuditIssue["code"], string> = {
   "unresolved-relationship-id": "部件引用的关系编号在自己的关系表里查不到，这块内容会丢",
   "slide-missing-shape-tree": "幻灯片缺 <p:cSld> 里的 <p:spTree>，这是必选元素，打开时报损坏",
   "slide-missing-layout-relationship": "幻灯片没有指向版式（slideLayout）的关系，PowerPoint 会修复或拒绝打开",
-  "slide-incomplete-transform": "几何元素只写了一半必填属性（x 与 y、cx 与 cy 得成对），打开时报损坏",
+  "slide-incomplete-transform": "几何变换只写了一半（<a:off> 的 x、y 与 <a:ext> 的 cx、cy 得成对，<a:xfrm> 里这两块也都要在），打开时报损坏",
 };
 
 /** 读侧不许抛异常：引擎给的"为什么不行"原样说给人听。 */

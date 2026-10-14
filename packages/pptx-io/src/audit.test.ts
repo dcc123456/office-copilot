@@ -43,8 +43,9 @@ describe("auditPptxPackage：PowerPoint 会判损坏的几类结构问题", () =
     ]);
   });
 
-  // 下面三条盯的是 `<a:off>`/`<a:ext>` 的必填属性只写了一半：§20.1.1.15 与 §20.1.1.14 把 x、y、cx、cy 全定为
-  // required attribute，python-pptx 读到半个 `<a:off y>` 直接抛 InvalidXmlError（本机实测）。写侧那条守卫在 `edit.ts`。
+  // 下面这几条盯的是几何那一类：`<a:off>`/`<a:ext>` 的必填属性只写一半，或 `<a:xfrm>` 少一整块必选子元素
+  // （§20.1.1.15 与 §20.1.1.14 把 x、y、cx、cy 全定为 required attribute，`CT_Transform2D` 把 off/ext 定为必选子元素）。
+  // python-pptx 读到半个 `<a:off y>` 直接抛 InvalidXmlError（本机实测）。写侧那条守卫在 `edit.ts`。
   it("几何元素只写了一半必填属性时报出，缺哪个属性念进 detail", async () => {
     const parts = partsWithSpPr('<a:xfrm><a:off y="571500"/><a:ext cx="5486400" cy="685800"/></a:xfrm>');
     expect(await auditPptxPackage(await buildDeckBytes(parts))).toEqual([
@@ -61,6 +62,14 @@ describe("auditPptxPackage：PowerPoint 会判损坏的几类结构问题", () =
     const parts = partsWithSpPr('<xfrm xmlns="http://schemas.openxmlformats.org/drawingml/2006/main"><chOff x="0" y="0"/><ext cx="5486400"/></xfrm>');
     expect(await auditPptxPackage(await buildDeckBytes(parts))).toEqual([
       { code: "slide-incomplete-transform", part: "ppt/slides/slide1.xml", detail: "ext 缺 cy" },
+    ]);
+  });
+
+  // `CT_Transform2D` 里 `off|chOff` 与 `ext|chExt` 两个 choice 各是必选子元素：属性写全了但少一整块，同样是损坏。
+  it("<a:xfrm> 少一个必选子元素时也报出，缺的那一块念进 detail", async () => {
+    const parts = partsWithSpPr('<a:xfrm rot="0"><a:off x="838200" y="571500"/></a:xfrm>');
+    expect(await auditPptxPackage(await buildDeckBytes(parts))).toEqual([
+      { code: "slide-incomplete-transform", part: "ppt/slides/slide1.xml", detail: "a:xfrm 缺 ext/chExt" },
     ]);
   });
 
