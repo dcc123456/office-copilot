@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, readPresentation, revertSlideEdit, setShapeRunText } from "./index.js";
+import { applySlideEdit, readPresentation, revertSlideEdit, setRunFont, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -140,5 +140,49 @@ describe("pptx-io：结构化文字编辑 op + 撤销", () => {
     const badShape = await setShapeRunText(file, { partPath, shapeId: 999, paraIndex: 0, runIndex: 0 }, "x");
     expect(badShape.ok).toBe(false);
     if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
+  });
+});
+
+describe("pptx-io：字体编辑 op（粗体 / 字号）", () => {
+  it("给已有 rPr 的 run 加字号，pt×100 落进 sz，邻居 run 的 b 不受影响（§2.1/§2.3）", async () => {
+    const file = await PptxFile.open(await twoRunDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, { sizePt: 24 });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const after = (await file.partText(partPath))!;
+    expect(after).toContain("<a:rPr b=\"1\" sz=\"2400\"/><a:t>标题甲</a:t>"); // 24pt → sz=2400，原 b=1 留住
+    expect(after).toContain("<a:rPr sz=\"1800\"/><a:t>副</a:t>"); // 邻居 run 一点没动
+  });
+
+  it("取消粗体写 b=0 而不是删属性，apply 后 revert 逐字回原", async () => {
+    const file = await PptxFile.open(await twoRunDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, { bold: false });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toContain("<a:rPr b=\"0\"/><a:t>标题甲</a:t>");
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("run 没有 rPr 时新建 <a:rPr/> 插到 <a:t> 之前", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 标题 run 是 <a:r><a:t>标题甲</a:t></a:r>，无 rPr
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, { bold: true, sizePt: 18 });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toContain("<a:r><a:rPr b=\"1\" sz=\"1800\"/><a:t>标题甲</a:t></a:r>");
+  });
+
+  it("没给任何字体属性或字号非正数时带原因拒绝", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const empty = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, {});
+    expect(empty.ok).toBe(false);
+    const badSize = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, { sizePt: 0 });
+    expect(badSize.ok).toBe(false);
+    if (!badSize.ok) expect(badSize.reason).toContain("字号");
   });
 });

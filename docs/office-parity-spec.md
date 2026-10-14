@@ -241,7 +241,7 @@ D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字�
 ### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
-**实测（run 级文字编辑这条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`，邻居 run 的 `rPr` 逐字不动（§2.3）；op 存整张幻灯片部件的前/后像，`apply`/`revert` 内容寻址（§2.5）。本机 python-pptx 交叉读真实 38 部件 deck：编辑后标题变、粗体 run 保住；`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**。**仍缺**：改字号/颜色/位置/增删形状等其它 op、modlog 落盘、渲染层提案卡装配。
+**实测（run 级文字 + 字体编辑这两条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建并插到 `<a:t>` 前），邻居 run 的 `rPr` 与文字逐字不动（§2.3）；两者共用一套定位（`locateRun`）与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` 在 python-pptx 生成的两 run 文本框上，把 run0 改成非粗体 20pt、run1 加粗，读回确认 run0 `bold=False size=20.0`、run1 `bold=True` 且原 11.0pt 未受牵连，仅 `slide1.xml` 一个部件变化。**仍缺**：改颜色/位置/增删形状等其它 op、modlog 落盘、渲染层提案卡装配。
 
 ### 阶段 5 · AI 工具面 + `slideAgent` — `[ ]`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。
