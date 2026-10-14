@@ -90,6 +90,17 @@ export function findChildren(el: Element, name: string): Element[] {
 }
 
 /**
+ * 去掉命名空间前缀，只留本地名。
+ *
+ * @param name 元素名原值（可能是 `p:cSld`，也可能是默认命名空间下的 `cSld`）。
+ * @returns 本地名；无冒号时原样返回。各格式的审计都要按本地名比对（`findChildren` 是精确匹配带前缀的原名）。
+ */
+export function localName(name: string): string {
+  const colon = name.indexOf(":");
+  return colon < 0 ? name : name.slice(colon + 1);
+}
+
+/**
  * 按标签名取第一个直接子元素。
  *
  * @param el 父元素。

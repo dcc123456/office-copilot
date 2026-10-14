@@ -5,17 +5,14 @@
  * 不能开只给一句"文件已损坏"），装不了桌面 Excel（`AGENTS.md` §8）。所以把 Excel 打开时会检查的
  * **OPC 完整性与部件内元素顺序**写成可机检的判定，产出结构化问题码，让 CLI/UI 各端自己拼文案（§5.7）。
  *
- * 判定依据一律取 ECMA-376 / ISO-IEC 29500-1 的显式约束（元素序列与 `minOccurs`），不取"Excel 大概会喜欢"：
- * - `[Content_Types].xml` 必须覆盖每个部件（Part 1 §10.1.2）；
- * - 每条非 External 关系的 Target 必须解析到真实存在的部件（§9.2）；
- * - 部件里引用的 `r:id` 必须在自己的关系表里存在（§13.2.1）；
+ * 其中与格式无关的五条（内容类型覆盖、关系可解析、`r:id` 落点、Id 不重复）来自 `@office-copilot/opc` 的
+ * 通用审计 `auditOpcPackage`（`AGENTS.md` §3，全仓只一份 OPC 判定），本文件只补 `.xlsx` 专属的两条部件顺序判定：
  * - `<worksheet>` 的子元素顺序是 XSD 的 `xsd:sequence`，顺序错 = 不合规（§18.3.1.100，MS-OFFMACRO2 附的 schema 片段可逐条核对）；
  * - `<sheetData>` 是 `worksheet` 唯一 `minOccurs="1"` 的孩子（同上）。
  *
  * 只判"会不会被判损坏"，不判"图好不好看"：数值口径、图表语义由 `analysis/` 与 `chart-spec.ts` 负责。
  */
-import { loadPackage, readText, resolveTarget } from "@office-copilot/opc";
-import { xml } from "@office-copilot/opc";
+import { auditOpcPackage, loadPackage, readText, xml, type OpcAuditCode } from "@office-copilot/opc";
 
 /**
  * `<worksheet>` 允许的子元素顺序（ECMA-376 Part 1 §18.3.1.100 的 `xsd:sequence`，与 MS-OFFMACRO2 公布的
@@ -62,33 +59,14 @@ const WORKSHEET_SEQUENCE = [
   "extLst",
 ] as const;
 
-/** 一条结构问题。 */
+/** 一条结构问题：通用码来自 `opc`，后面两项是 `.xlsx` 专属的部件顺序判定。 */
 export interface CompatIssue {
   /** 机器可判的问题码；文案由调用方组装（`AGENTS.md` §5.7）。 */
-  code:
-    | "part-not-declared"
-    | "declared-part-missing"
-    | "relationship-target-missing"
-    | "relationship-id-duplicate"
-    | "unresolved-relationship-id"
-    | "worksheet-child-order"
-    | "worksheet-missing-sheet-data"
-    | "chart-missing-chart";
+  code: OpcAuditCode | "worksheet-child-order" | "worksheet-missing-sheet-data" | "chart-missing-chart";
   /** 出问题的部件路径（包内路径，如 `xl/worksheets/sheet1.xml`）。 */
   part: string;
   /** 结构化细节（元素名、关系 Id、目标路径等），便于渲染层拼中文句子。 */
   detail: string;
-}
-
-/**
- * 去掉命名空间前缀，只留本地名。
- *
- * @param name 元素名（可能是 `c:chartSpace`，也可能是默认命名空间下的 `chartSpace`）。
- * @returns 本地名；无冒号时原样返回。
- */
-function localName(name: string): string {
-  const colon = name.indexOf(":");
-  return colon < 0 ? name : name.slice(colon + 1);
 }
 
 /**
@@ -100,69 +78,21 @@ function localName(name: string): string {
  */
 export async function auditXlsxPackage(bytes: Uint8Array): Promise<CompatIssue[]> {
   const pkg = await loadPackage(bytes);
-  const issues: CompatIssue[] = [];
-  const entrySet = new Set(pkg.entryNames);
-  const partNames = pkg.entryNames.filter((name) => !name.endsWith("/"));
+  const issues: CompatIssue[] = [...(await auditOpcPackage(pkg))];
 
-  // §10.1.2：每个部件都要被 Default（按扩展名）或 Override（按部件名）覆盖，漏了 Excel 直接不认这个部件。
-  for (const part of partNames) {
-    if (part === "[Content_Types].xml") continue;
-    const extension = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
-    if (pkg.overrideParts.has(part) || pkg.contentTypes.has(extension)) continue;
-    issues.push({ code: "part-not-declared", part, detail: extension });
-  }
-  // Override 指向不存在的部件同样是"包内容类型表说谎"，Excel 会在打开时报错。
-  for (const part of pkg.overrideParts.keys()) {
-    if (!entrySet.has(part)) issues.push({ code: "declared-part-missing", part, detail: "" });
-  }
-
-  // §9.2：每条非 External 关系的 Target 必须解析到真实存在的部件，同一张关系表里 Id 不许重复。
-  const idsBySourcePart = new Map<string, Set<string>>();
-  for (const [sourcePart, rels] of pkg.relsBySourcePart) {
-    const seen = new Set<string>();
-    for (const rel of rels) {
-      if (seen.has(rel.id)) issues.push({ code: "relationship-id-duplicate", part: sourcePart, detail: rel.id });
-      seen.add(rel.id);
-      if (rel.targetMode === "External") continue;
-      const target = resolveTarget(sourcePart, rel.target);
-      if (!entrySet.has(target)) {
-        issues.push({ code: "relationship-target-missing", part: sourcePart, detail: `${rel.id} -> ${target}` });
-      }
-    }
-    idsBySourcePart.set(sourcePart, seen);
-  }
-
-  for (const part of partNames) {
-    if (part === "[Content_Types].xml" || part.endsWith(".rels")) continue;
+  for (const part of pkg.entryNames.filter((name) => /^xl\/(worksheets|charts)\/[^/]+\.xml$/.test(name))) {
     const text = await readText(pkg.zip, part);
     if (!text) continue;
-    // §13.2.1：部件里引用的每个 `r:id` 都要能在**它自己**的关系表里查到（没有关系表就是全都查不到）。
-    const ids = idsBySourcePart.get(part) ?? new Set<string>();
-    for (const id of referencedRelIds(text)) {
-      if (!ids.has(id)) issues.push({ code: "unresolved-relationship-id", part, detail: id });
-    }
-    if (/^xl\/worksheets\/[^/]+\.xml$/.test(part)) issues.push(...auditWorksheet(part, text));
-    if (/^xl\/charts\/[^/]+\.xml$/.test(part)) {
+    if (part.startsWith("xl/worksheets/")) issues.push(...auditWorksheet(part, text));
+    if (part.startsWith("xl/charts/")) {
       const root = xml.parseDocument(text);
       // 图表部件一律带 `c:` 前缀，而 `findChildren` 按名字精确匹配，所以这里自己比本地名。
-      if (root && !xml.children(root).some((el) => localName(el.name) === "chart")) {
+      if (root && !xml.children(root).some((el) => xml.localName(el.name) === "chart")) {
         issues.push({ code: "chart-missing-chart", part, detail: "" });
       }
     }
   }
   return issues;
-}
-
-/**
- * 扫出部件文本里引用到的关系 Id（`r:id="..."` 这一族属性）。
- *
- * @param text 部件 XML 原文。
- * @returns 去重后的引用 Id 列表；写错的引用（前缀不是 `r` 的 `id=` 属性如 `c:idx val`）不会被误收。
- */
-function referencedRelIds(text: string): string[] {
-  const ids = new Set<string>();
-  for (const match of text.matchAll(/\br:id="([^"]+)"/g)) ids.add(match[1] ?? "");
-  return [...ids].filter(Boolean);
 }
 
 /**
@@ -176,9 +106,9 @@ function referencedRelIds(text: string): string[] {
 function auditWorksheet(part: string, text: string): CompatIssue[] {
   const root = xml.parseDocument(text);
   if (!root) return [];
-  const worksheet = localName(root.name) === "worksheet" ? root : xml.findChildren(root, "worksheet")[0] ?? root;
+  const worksheet = xml.localName(root.name) === "worksheet" ? root : xml.findChildren(root, "worksheet")[0] ?? root;
   const issues: CompatIssue[] = [];
-  const children = xml.children(worksheet).map((el) => localName(el.name));
+  const children = xml.children(worksheet).map((el) => xml.localName(el.name));
   if (!children.includes("sheetData")) issues.push({ code: "worksheet-missing-sheet-data", part, detail: "" });
 
   let previousIndex = -1;

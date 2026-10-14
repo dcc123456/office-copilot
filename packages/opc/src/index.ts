@@ -9,3 +9,4 @@ export * as xml from "./xml.js";
 export * from "./xml.js";
 export * from "./opc.js";
 export * from "./write.js";
+export * from "./audit.js";
