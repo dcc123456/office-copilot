@@ -377,7 +377,7 @@ pnpm test      # 逐包跑 vitest
 pnpm build     # 类型检查藏在 build 里（desktop / task-pane 走 tsc --noEmit）
 ```
 
-当前各包通过数（2026-10-14 实测，合计 1 028）：`sheet-io` 245、`desktop` 455、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
+当前各包通过数（2026-10-14 实测，合计 1 030）：`sheet-io` 245、`desktop` 457、`docx-io` 296、`sheet-tools` 12、`word-client` 8、`word-tools` 6、`apps/cli` 4、`server` 2。
 
 - `word-tools`：6 个 zod schema 校验用例
 - `word-client`：8 个 Office.js mock 用例（列出段落、替换、段落/表格插入、快照回滚、批量 `applyEdits` 等）
