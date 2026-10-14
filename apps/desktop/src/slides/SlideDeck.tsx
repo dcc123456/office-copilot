@@ -1,5 +1,6 @@
 /**
- * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色、形状的位置尺寸与叠放次序。
+ * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色、形状的位置尺寸与叠放次序，
+ * 并在这一页加一个文本框、删掉一个形状。
  *
  * 这里只做装配：草稿哪些能落地由 `slideDeckModel.ts` 说一不二，段落里有几条 run、形状有没有自己的
  * `<a:xfrm>` 都是 `@office-copilot/pptx-io` 读模型给的事实，改动一律收成 `PptxEditRequest` 交给主进程现做 op
@@ -14,6 +15,7 @@ import { toast } from "../components/ui/Toast.js";
 import {
   boxDraftKeyOf,
   draftKeyOf,
+  dropShapeDrafts,
   LAYER_DIRECTION_LABEL,
   layerEdgeNote,
   pendingEdits,
@@ -98,6 +100,22 @@ function shapeTitle(shape: SlideShape): string {
 /** 叠放那四个按钮的排列顺序（照 `LAYER_DIRECTION_LABEL` 的键序：相邻两层先、两端后）。 */
 const LAYER_DIRECTIONS = Object.keys(LAYER_DIRECTION_LABEL) as SlideLayerDirection[];
 
+/**
+ * 新建文本框的缺省位置与尺寸（CSS px @96DPI）。
+ *
+ * 本视图没有画布，点不出坐标，所以给一个固定的默认框，用户要挪位置就用行里那四个数字输入框
+ * （几何 op 已在）。这里只出现 px，不出现 EMU/914400 —— 换算仍在 `pptx-io/units.ts` 那一处（§2.1）。
+ */
+const NEW_TEXT_BOX_PX: ShapeBoxPx = { leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144 };
+
+/**
+ * 新建文本框里的第一句文字。
+ *
+ * 空文本框在 OOXML 里是 `<a:p/>`，读模型给出 0 条 run，那一行就成了只读行（多 run 守卫走的是同一条），
+ * 用户加了框却打不了字。所以缺省给一句可改的文字，文案归渲染层组装（§5.7）。
+ */
+const NEW_TEXT_BOX_TEXT = "新文本框";
+
 export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProps) {
   /** 未保存的草稿：run 级字段键见 `draftKeyOf`，几何键见 `boxDraftKeyOf`。 */
   const [drafts, setDrafts] = useState<Record<string, SlideDraft>>({});
@@ -162,32 +180,87 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
   }, [onRevert]);
 
   /**
-   * 立刻落地一条叠放次序改动——这一条**不进草稿**。
+   * 立刻落地一条**结构性**改动（叠放 / 加文本框 / 删形状）——这几条不进草稿。
    *
-   * 理由是 `up` / `down` 相对的是当前顺序：攒进草稿再点第二次会退化成只挪一层，而这四个按钮的语义
-   * 就是点一次动一次（PowerPoint 功能区同样即点即动）。落地后主进程回包里带重读磁盘的模型，
+   * 理由是它们描述的都不是"某个字段的绝对值"：`up` / `down` 相对的是当前顺序，删掉的形状不会再出现，
+   * 攒进草稿点第二次就退化成一次（PowerPoint 功能区同样即点即动）。落地后主进程回包里带重读磁盘的模型，
    * 形状列表按新的文档顺序重排；未保存的文字/几何草稿仍留在 `drafts` 里，不受牵连。
    *
+   * @param edit 那一条改动。
+   * @param summary 写进那份 modlog 的改动说明（文案在这里组装，§5.7）。
+   * @param failFallback 回包没带中文理由时的那句失败文案。
+   * @param doneToast 成功后的那句提示。
+   */
+  const commitNow = useCallback(
+    async (edit: PptxEditRequest, summary: string, failFallback: string, doneToast: string): Promise<boolean> => {
+      setIsBusy(true);
+      const done = await onCommit([edit], summary);
+      setIsBusy(false);
+      const note = failureNote(done, failFallback);
+      if (note) {
+        toast(note, "error");
+        return false;
+      }
+      toast(doneToast);
+      return true;
+    },
+    [onCommit],
+  );
+
+  /**
    * @param partPath 该页的幻灯片部件路径。
    * @param shape 要挪的那个形状。
    * @param direction 四个方向之一；到头的那些按钮是禁用的，不会走到引擎整批拒绝那条路（§2.4）。
    */
   const commitLayer = useCallback(
-    async (partPath: string, shape: SlideShape, direction: SlideLayerDirection) => {
-      setIsBusy(true);
-      const moved = await onCommit(
-        [{ kind: "layer", target: { partPath, shapeId: shape.shapeId }, direction }],
+    (partPath: string, shape: SlideShape, direction: SlideLayerDirection) =>
+      void commitNow(
+        { kind: "layer", target: { partPath, shapeId: shape.shapeId }, direction },
         `把「${shapeTitle(shape)}」${LAYER_DIRECTION_LABEL[direction]}`,
+        "这份演示文稿已经不在了，叠放次序没有改动。",
+        `已把「${shapeTitle(shape)}」${LAYER_DIRECTION_LABEL[direction]}`,
+      ),
+    [commitNow],
+  );
+
+  /**
+   * 在这一页末尾加一个文本框（挂在形状子序列末尾 = 最顶层）。
+   *
+   * @param partPath 该页的幻灯片部件路径。
+   * @param slideOrder 该页序号（0 基，只用于改动说明里那句"第几页"）。
+   */
+  const addTextBox = useCallback(
+    (partPath: string, slideOrder: number) =>
+      void commitNow(
+        { kind: "add_text_box", target: { partPath }, box: NEW_TEXT_BOX_PX, text: NEW_TEXT_BOX_TEXT },
+        `在第 ${slideOrder + 1} 页加一个文本框`,
+        "这份演示文稿已经不在了，文本框没有加上。",
+        "已加一个文本框，改完文字点保存",
+      ),
+    [commitNow],
+  );
+
+  /**
+   * 删掉一个形状（整页前像留在历史里，点「撤销上一次保存」能连它一起回来，§2.5）。
+   *
+   * 删成功后把**那个形状**的未保存草稿一并丢掉：新文本框的形状号是"这一页已有 `@id` 最大值 +1"，
+   * 删掉的正好是最大号时，下一次新建会把同一个号发给新形状——留着旧草稿就等于把用户给旧框打的字
+   * 静默写进新框。丢掉的是这一行还没保存的输入，形状本身在撤销里回得来。
+   *
+   * @param partPath 该页的幻灯片部件路径。
+   * @param shape 要删的那个形状。
+   */
+  const deleteShape = useCallback(
+    async (partPath: string, shape: SlideShape) => {
+      const done = await commitNow(
+        { kind: "remove_shape", target: { partPath, shapeId: shape.shapeId } },
+        `删掉「${shapeTitle(shape)}」`,
+        "这份演示文稿已经不在了，形状没有删除。",
+        `已删掉「${shapeTitle(shape)}」，要回退点「撤销上一次保存」`,
       );
-      setIsBusy(false);
-      const note = failureNote(moved, "这份演示文稿已经不在了，叠放次序没有改动。");
-      if (note) {
-        toast(note, "error");
-        return;
-      }
-      toast(`已把「${shapeTitle(shape)}」${LAYER_DIRECTION_LABEL[direction]}`);
+      if (done) setDrafts((current) => dropShapeDrafts(current, partPath, shape.shapeId));
     },
-    [onCommit],
+    [commitNow],
   );
 
   return (
@@ -214,6 +287,14 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
             <h3 className="slide-card-title">
               第 {slide.order + 1} 页
               <span className="slide-card-part">{slide.partPath}</span>
+              <button
+                type="button"
+                className="slide-add-textbox"
+                onClick={() => addTextBox(slide.partPath, slide.order)}
+                disabled={isBusy}
+              >
+                加文本框
+              </button>
             </h3>
             {slide.shapes.length === 0 ? <p className="slide-para-locked">这张幻灯片没有可读出的形状。</p> : null}
             {slide.shapes.map((shape) => {
@@ -239,6 +320,15 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                         );
                       })}
                     </span>
+                    <button
+                      type="button"
+                      className="slide-delete-shape"
+                      onClick={() => void deleteShape(slide.partPath, shape)}
+                      disabled={isBusy}
+                      title={`删掉「${shapeTitle(shape)}」，之后可点「撤销上一次保存」回退`}
+                    >
+                      删形状
+                    </button>
                   </div>
                   {shape.boxPx ? (
                     <div className="slide-box-fields">

@@ -107,7 +107,9 @@
   gap: 4px;
 }
 
-.slide-layer-buttons button {
+.slide-layer-buttons button,
+.slide-delete-shape,
+.slide-add-textbox {
   height: 22px;
   padding: 0 6px;
   border: 1px solid var(--border);
@@ -118,9 +120,20 @@
   font-size: 12px;
 }
 
-.slide-layer-buttons button:disabled {
+.slide-layer-buttons button:disabled,
+.slide-delete-shape:disabled,
+.slide-add-textbox:disabled {
   color: var(--text-muted);
   opacity: 0.6;
+}
+
+.slide-add-textbox {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.slide-delete-shape {
+  flex: 0 0 auto;
 }
 
 .slide-para-input {

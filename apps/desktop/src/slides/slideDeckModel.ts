@@ -66,6 +66,24 @@ export function boxDraftKeyOf(partPath: string, shapeId: number): string {
 }
 
 /**
+ * 删掉一个形状时把它那些还没保存的草稿一并丢掉。
+ *
+ * 形状号是"这一页已有 `@id` 最大值 +1"（见 `pptx-io/edit.ts` 的 `addTextBox`），删掉最大号那个之后
+ * 再新建就会把同一个号发给新形状；旧草稿留着就会把用户给旧框打的字静默写进新框。
+ *
+ * @param drafts 当前全部草稿，键见 {@link draftKeyOf} 与 {@link boxDraftKeyOf}。
+ * @param partPath 被删形状所在页的部件路径。
+ * @param shapeId 被删形状的形状号。
+ * @returns 去掉该形状那几条（该形状各段 + 它的几何那一条）之后的新对象；没命中时返回原对象。
+ */
+export function dropShapeDrafts(drafts: Record<string, SlideDraft>, partPath: string, shapeId: number): Record<string, SlideDraft> {
+  const runPrefix = `${partPath}#${shapeId}#`;
+  const boxKey = boxDraftKeyOf(partPath, shapeId);
+  const kept = Object.fromEntries(Object.entries(drafts).filter(([key]) => !key.startsWith(runPrefix) && key !== boxKey));
+  return Object.keys(kept).length === Object.keys(drafts).length ? drafts : kept;
+}
+
+/**
  * 叠放方向是不是已经到头（AI 提案与视图上的层级按钮共用这一刀，§3.2 不写第二份）。
  *
  * `shapes` 就是 `<p:spTree>` 里形状的文档顺序（读侧按它列），而那个顺序就是叠放次序：

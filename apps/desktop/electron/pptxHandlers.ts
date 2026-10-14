@@ -11,9 +11,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   PptxFile,
+  addTextBox,
   applySlideEdit,
   auditPptxPackage,
   moveShapeLayer,
+  removeShape,
   revertSlideEdits,
   setRunColor,
   setRunFont,
@@ -212,6 +214,10 @@ async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: tr
       return await setShapeGeometry(file, edit.target, edit.box);
     case "layer":
       return await moveShapeLayer(file, edit.target, edit.direction);
+    case "add_text_box":
+      return await addTextBox(file, edit.target, edit.box, edit.text);
+    case "remove_shape":
+      return await removeShape(file, edit.target);
   }
 }
 

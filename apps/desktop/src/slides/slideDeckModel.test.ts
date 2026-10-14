@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PptxEditRequest, PresentationModel, RunFormat, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -21,6 +21,18 @@ function textEditKey(edit: PptxEditRequest): string {
   if (edit.kind !== "text") throw new Error(`这条不是文字改动：${edit.kind}`);
   if (edit.target.runIndex !== 0) throw new Error(`本视图只改单 run 段落，runIndex 该是 0`);
   return draftKeyOf(edit.target.partPath, edit.target.shapeId, edit.target.paraIndex);
+}
+
+/**
+ * 把交出的一条改动折成断言里好读的短串。
+ *
+ * @param edit 模型层交出的一条改动。
+ * @returns 文字改动是 `partPath#shapeId#paraIndex`，其余是 `kind:形状号`；
+ *   整页粒度的那两条（加文本框）在这里出现说明用例写错了——草稿里没有这种键。
+ */
+function describeEdit(edit: PptxEditRequest): string {
+  if (edit.kind === "text") return textEditKey(edit);
+  return "shapeId" in edit.target ? `${edit.kind}:${edit.target.shapeId}` : `${edit.kind}:整页`;
 }
 
 /**
@@ -135,12 +147,18 @@ describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
       [draftKeyOf(PART, 2, 1)]: { text: "第二段改过" },
       [draftKeyOf(PART, 3, 0)]: { hex: "#123456" },
     };
-    expect(pendingEdits(deck, drafts).map((edit) => (edit.kind === "text" ? textEditKey(edit) : `${edit.kind}:${edit.target.shapeId}`))).toEqual([
+    expect(pendingEdits(deck, drafts).map(describeEdit)).toEqual([
       `${PART}#2#1`,
       "geometry:3",
       "color:3",
       "ppt/slides/slide2.xml#2#0",
     ]);
+  });
+
+  it("草稿里凭空写一个整页粒度的键也不会交出那种改动（加/删只由按钮直接送主进程）", () => {
+    const deck = deckOf([shapeOf(2, [["第一段", 1]])]);
+    const drafts = { "ppt/slides/slide1.xml#2": { text: "不像 run 键" }, [`${PART}@`]: { box: { widthPx: 10 } } };
+    expect(pendingEdits(deck, drafts).map(describeEdit)).toEqual([]);
   });
 });
 
@@ -173,5 +191,27 @@ describe("layerEdgeNote：到头的那个方向压根不许交出去", () => {
     for (const direction of ["up", "down", "top", "bottom"] as const) {
       expect(layerEdgeNote([lonely], lonely, direction), direction).toBe("这一页只有这一个形状，没有可叠放的邻居");
     }
+  });
+});
+
+describe("dropShapeDrafts：删掉的形状不留未保存的草稿", () => {
+  it("只去掉那一个形状的各段与它的几何，别的形状一条不少", () => {
+    const drafts = {
+      [draftKeyOf(PART, 2, 0)]: { text: "留着" },
+      [draftKeyOf(PART, 4, 0)]: { text: "要删的" },
+      [draftKeyOf(PART, 4, 1)]: { hex: "#ff0000" },
+      [boxDraftKeyOf(PART, 4)]: { box: { widthPx: 200 } },
+    };
+    expect(Object.keys(dropShapeDrafts(drafts, PART, 4))).toEqual([`${PART}#2#0`]);
+  });
+
+  it("形状号 4 的清理不会顺手带走形状号 41 的草稿（键里那个分隔符是算上的）", () => {
+    const drafts = { [draftKeyOf(PART, 4, 0)]: { text: "四号" }, [draftKeyOf(PART, 41, 0)]: { text: "四一号" } };
+    expect(Object.keys(dropShapeDrafts(drafts, PART, 4))).toEqual([`${PART}#41#0`]);
+  });
+
+  it("这一页这个形状压根没草稿时原对象返回，不白造一份新状态", () => {
+    const drafts = { [draftKeyOf(PART, 2, 0)]: { text: "留着" } };
+    expect(dropShapeDrafts(drafts, "ppt/slides/slide2.xml", 9)).toBe(drafts);
   });
 });

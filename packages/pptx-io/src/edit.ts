@@ -1,5 +1,6 @@
 /**
- * `.pptx` 结构化编辑 op：改某个形状某段某 run 的文字、字体、颜色，改形状的位置/尺寸与叠放次序，产出可撤销的前/后像。
+ * `.pptx` 结构化编辑 op：改某个形状某段某 run 的文字、字体、颜色，改形状的位置/尺寸与叠放次序，
+ * 在这一页新建文本框、删掉一个形状，全部产出可撤销的前/后像。
  *
  * 与 `sheet-io` 的 `runSheetOps`/`revertSheetOps` 同一套契约（`AGENTS.md` §2.8、§3 不许第二套撤销栈）：
  * 引擎只**产出提案**（带 `beforeXml`/`afterXml` 的 op），落地与撤销由上层在用户确认后调用 `apply`/`revert`。
@@ -9,9 +10,9 @@
  * 整段替换会把这些格式压平。这里只碰目标 run 自己的 `<a:t>` 文本或 `<a:rPr>` 属性，其它 run 一个字节都不动。
  * 实测：`serialize` 对本机真实幻灯片的往返**逐字一致**（仅声明后换行差异），所以重序列化不会误伤同段其它格式。
  */
-import { XML_DECLARATION, children, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element } from "@office-copilot/opc";
+import { XML_DECLARATION, children, escapeText, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element, type XmlNode } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
-import { ptToHalfPoint, pxToEmu, type ShapeGeometryPatch } from "./units.js";
+import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
 /** 一次幻灯片编辑的前/后像（部件粒度）：文字与字体 op 共用这一份形状。 */
 export interface SlideEditOp {
@@ -58,8 +59,14 @@ export interface ShapeGeometryTarget {
 /** 叠放方向：`up`/`down` 相邻挪一层，`top`/`bottom` 直接到两端（PowerPoint 功能区的那四个按钮）。 */
 export type SlideLayerDirection = "up" | "down" | "top" | "bottom";
 
+/** 整页粒度的坐标：新建形状不属于任何一个已有形状，只属于某一页。 */
+export interface SlidePartTarget {
+  /** 幻灯片部件路径。 */
+  partPath: string;
+}
+
 /**
- * 一条要落地的幻灯片改动：`kind` 与本文件那五个 op 生产者一一对应，坐标原样交给它们。
+ * 一条要落地的幻灯片改动：`kind` 与本文件那七个 op 生产者一一对应，坐标原样交给它们。
  *
  * 这是**跨界契约**（渲染层 → 主进程）放在引擎侧的理由：两边都按它构造与解析，
  * 写第二份就会有人改一边忘一边（`AGENTS.md` §3.2）。里面只有坐标与值，没有幻灯片原文，
@@ -70,7 +77,9 @@ export type PptxEditRequest =
   | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
   | { kind: "color"; target: ShapeRunTarget; hex: string }
   | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch }
-  | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection };
+  | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection }
+  | { kind: "add_text_box"; target: SlidePartTarget; box: ShapeBoxPx; text: string }
+  | { kind: "remove_shape"; target: ShapeGeometryTarget };
 
 /** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
 export interface PptxEditPayload {
@@ -239,10 +248,61 @@ export async function moveShapeLayer(file: PptxFile, target: ShapeGeometryTarget
 }
 
 /**
+ * 产出一条"在这一页新建一个文本框"的编辑提案，**不落地**。
+ *
+ * 新建的 `<p:sp>` 逐字照 python-pptx 的 `CT_Shape._textbox_sp_tmpl()`
+ * （`tmp/pylibs/pptx/oxml/shapes/autoshape.py:388`，PowerPoint 自己插入文本框时也是这一段：
+ * `p:nvSpPr > cNvPr/cNvSpPr txBox="1"/nvPr`，`p:spPr > a:xfrm + a:prstGeom prst="rect" + a:noFill`，
+ * `p:txBody > a:bodyPr + a:lstStyle + a:p`），只是把那个空的 `<a:p/>` 换成带一个 run 的段落。
+ * 形状号取**这一页部件内**已有 `@id` 的最大值 +1（一手依据：`oxml/shapes/groupshape.py` 的 `max_shape_id`
+ * 用的就是 spTree 上的 `xpath("//@id")`，注释写着 "XML id-values have document scope"——这份 document 就是这一页；
+ * 实测 `tmp/pptx-edit/probe.pptx` 两页的 id 分别是 `[1,2,3]` 与 `[1,2]`，跨页本来就重复）。
+ * 新形状追加在形状子序列末尾，也就是最顶层（叠放语义见 `moveShapeLayer` 的注释）。
+ *
+ * @param file 已打开的读写器。
+ * @param target 整页坐标（部件路径）。
+ * @param box 位置/尺寸（CSS px @96DPI，四个字段都要给）；px→EMU 只在 `units.ts` 发生（§2.1）。
+ * @param text 文本框里的文字；空串就是空白文本框。文字来自用户/模型输入，写进 XML 前一律转义（§3.6：边界校验只在系统边界做）。
+ * @returns `{ ok, op }`：部件缺失 / 解析失败 / 没有形状树 / 宽高非正时 `{ ok:false, reason }`。
+ */
+export async function addTextBox(file: PptxFile, target: SlidePartTarget, box: ShapeBoxPx, text: string): Promise<SlideEditResult> {
+  if (!(box.widthPx > 0)) return { ok: false, reason: `新文本框的宽度必须是正数 px：${box.widthPx}` };
+  if (!(box.heightPx > 0)) return { ok: false, reason: `新文本框的高度必须是正数 px：${box.heightPx}` };
+  const loaded = await loadSlidePart(file, target.partPath);
+  if (!loaded.ok) return loaded;
+  const spTree = shapeTreeOf(loaded.root);
+  if (!spTree) return { ok: false, reason: `这一页没有形状树（<p:spTree>）：${target.partPath}` };
+  const shapeId = maxShapeIdInPart(loaded.root) + 1;
+  appendShapeToTree(spTree, parseFragmentElement(textBoxXml(shapeId, box, text)));
+  return { ok: true, op: toOp(target.partPath, loaded.beforeXml, loaded.root) };
+}
+
+/**
+ * 产出一条"删掉指定形状"的编辑提案，**不落地**。
+ *
+ * 结构上就是把那一元素从 `<p:spTree>` 里摘掉：形状与它自己的关系（图片的 `r:embed`、图表的 `r:id`）
+ * 留在关系表里不影响合规性——OPC 只要求**被引用**的关系存在，不要求每条关系都有人引用，
+ * 而 `auditPptxPackage` 那五条判定查的是"部件里写到的 `r:id` 必须在关系表里"，删元素只会少引用、不会多引用。
+ * 因此这里不动 `[Content_Types].xml`、不动 `.rels`，也就没有 §2.10 那"三处一起登记"要回滚的东西。
+ *
+ * @param file 已打开的读写器。
+ * @param target 形状定位坐标（部件路径 + 形状号）。
+ * @returns `{ ok, op }`：定位失败或这一页没有形状树时 `{ ok:false, reason }`。删掉最后一个形状是合法操作（页面变空白），照做。
+ */
+export async function removeShape(file: PptxFile, target: ShapeGeometryTarget): Promise<SlideEditResult> {
+  const located = await locateShape(file, target);
+  if (!located.ok) return located;
+  const spTree = shapeTreeOf(located.root);
+  if (!spTree) return { ok: false, reason: `这一页没有形状树（<p:spTree>）：${target.partPath}` };
+  removeShapeFromTree(spTree, located.shape);
+  return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
+}
+
+/**
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由 `setShapeRunText`/`setRunFont`/`setRunColor`/`setShapeGeometry`/`moveShapeLayer` 产出的 op。
+ * @param op 由本文件那七个 op 生产者（`setShapeRunText` … `addTextBox`/`removeShape`）产出的 op。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -300,6 +360,9 @@ export async function revertSlideEdits(file: PptxFile, ops: SlideEditOp[]): Prom
   return { applied, skipped };
 }
 
+/** `loadSlidePart` 的成功结果：部件原文与解析好的根元素。 */
+type LoadedSlidePart = { ok: true; beforeXml: string; root: Element } | { ok: false; reason: string };
+
 /** `locateShape` 的成功结果：部件原文、解析好的根与目标形状元素。 */
 type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element } | { ok: false; reason: string };
 
@@ -307,24 +370,35 @@ type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element
 type LocatedRun = { ok: true; beforeXml: string; root: Element; run: Element } | { ok: false; reason: string };
 
 /**
- * 读部件、解析并按 `<p:cNvPr @id>` 定位形状元素——文字/字体/颜色/几何所有 op 共用的第一层（§3.2）。
+ * 读部件并解析成根元素——所有 op 共用的第一层（§3.2：`locateShape` 与新页粒度的 `addTextBox` 都要这一步）。
+ *
+ * @param file 读写器。
+ * @param partPath 幻灯片部件路径。
+ * @returns 成功带 `{ beforeXml, root }`（`beforeXml` 就是 op 的前像）；部件缺失或解析失败带 `{ ok:false, reason }`。
+ */
+async function loadSlidePart(file: PptxFile, partPath: string): Promise<LoadedSlidePart> {
+  const beforeXml = await file.partText(partPath);
+  if (beforeXml === undefined) return { ok: false, reason: `幻灯片部件不存在：${partPath}` };
+  try {
+    return { ok: true, beforeXml, root: parseDocument(beforeXml) };
+  } catch {
+    return { ok: false, reason: "幻灯片部件解析失败。" };
+  }
+}
+
+/**
+ * 读部件、解析并按 `<p:cNvPr @id>` 定位形状元素——文字/字体/颜色/几何/删形状所有 op 共用的第二层（§3.2）。
  *
  * @param file 读写器。
  * @param target 部件路径 + 形状号。
  * @returns 成功带 `{ beforeXml, root, shape }`；部件缺失、解析失败或找不到形状带 `{ ok:false, reason }`。
  */
 async function locateShape(file: PptxFile, target: ShapeGeometryTarget): Promise<LocatedShape> {
-  const beforeXml = await file.partText(target.partPath);
-  if (beforeXml === undefined) return { ok: false, reason: `幻灯片部件不存在：${target.partPath}` };
-  let root: Element;
-  try {
-    root = parseDocument(beforeXml);
-  } catch {
-    return { ok: false, reason: "幻灯片部件解析失败。" };
-  }
-  const shape = findShapeById(root, target.shapeId);
+  const loaded = await loadSlidePart(file, target.partPath);
+  if (!loaded.ok) return loaded;
+  const shape = findShapeById(loaded.root, target.shapeId);
   if (!shape) return { ok: false, reason: `找不到形状 id=${target.shapeId}` };
-  return { ok: true, beforeXml, root, shape };
+  return { ...loaded, shape };
 }
 
 /**
@@ -490,4 +564,78 @@ function rewriteShapeOrder(spTree: Element, order: Element[]): void {
   slots.forEach((slot, k) => {
     nodes[slot] = order[k]!;
   });
+}
+
+/**
+ * 这一页部件里已用的最大 `<p:cNvPr @id>`（新建形状时要在它上面 +1）。
+ *
+ * 单位/范围都照 python-pptx 的 `CT_GroupShape.max_shape_id`：扫**这一页 XML 里所有**数字 `@id`
+ * （不只形状那些——分区的 `p:section/@id` 是 GUID，非数字，正好被过滤掉），取最大值。
+ *
+ * @param root 幻灯片根（`<p:sld>`）。
+ * @returns 最大数字 id；一个都没有时 0（真实文件里 spTree 自己的 `cNvPr id="1"` 一定在）。
+ */
+function maxShapeIdInPart(root: Element): number {
+  let max = 0;
+  const walk = (node: XmlNode): void => {
+    if (!isElement(node)) return;
+    const raw = node.attributes["id"];
+    if (raw !== undefined && /^\d+$/.test(raw)) max = Math.max(max, Number(raw));
+    (node.children ?? []).forEach(walk);
+  };
+  walk(root);
+  return max;
+}
+
+/**
+ * 拼出一个 PowerPoint 插入文本框时那种 `<p:sp>` 片段（结构逐字取自 python-pptx 的 `_textbox_sp_tmpl()`）。
+ *
+ * 片段不带 `xmlns` 声明：解析器按前缀原样读写，命名空间由幻灯片根上那三条声明覆盖，
+ * 带上反而会在重序列化时多出重复属性。
+ *
+ * @param shapeId 分配给新形状的 `p:cNvPr @id`。
+ * @param box 位置/尺寸（CSS px @96DPI），写进 `a:xfrm` 时换成 EMU（§2.1 唯一换算点）。
+ * @param text 文本框文字；空串时保留模板里那个空的 `<a:p/>`，不造空 run。
+ * @returns 可直接交给 `parseFragmentElement` 的包装片段。
+ */
+function textBoxXml(shapeId: number, box: ShapeBoxPx, text: string): string {
+  const para = text === "" ? "<a:p/>" : `<a:p><a:r><a:t>${escapeText(text)}</a:t></a:r></a:p>`;
+  return (
+    "<root>" +
+    `<p:sp><p:nvSpPr><p:cNvPr id="${shapeId}" name="TextBox ${shapeId - 1}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>` +
+    `<p:spPr><a:xfrm><a:off x="${pxToEmu(box.leftPx)}" y="${pxToEmu(box.topPx)}"/>` +
+    `<a:ext cx="${pxToEmu(box.widthPx)}" cy="${pxToEmu(box.heightPx)}"/></a:xfrm>` +
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>' +
+    `<p:txBody><a:bodyPr wrap="none"><a:spAutoFit/></a:bodyPr><a:lstStyle/>${para}</p:txBody></p:sp>` +
+    "</root>"
+  );
+}
+
+/**
+ * 把新建的形状元素挂到 `<p:spTree>` 末尾（= 最顶层，叠放语义见 `moveShapeLayer`）。
+ *
+ * 只碰形状那些槽位：`p:nvGrpSpPr`/`p:grpSpPr` 与节点间空白原地不动；这一页还没有形状时挂到子列表末尾。
+ *
+ * @param spTree 形状树元素。
+ * @param shape 新建的形状元素。
+ */
+function appendShapeToTree(spTree: Element, shape: Element): void {
+  const nodes = (spTree.children ??= []);
+  let lastShapeIndex = -1;
+  nodes.forEach((node, index) => {
+    if (isElement(node) && SHAPE_HOST_TAGS.includes(node.name)) lastShapeIndex = index;
+  });
+  nodes.splice(lastShapeIndex + 1, 0, shape);
+}
+
+/**
+ * 把一个形状元素从 `<p:spTree>` 里摘掉（节点间的空白留着，多一个空行不影响合法性）。
+ *
+ * @param spTree 形状树元素。
+ * @param shape 由 `locateShape` 定位到的形状元素（同一棵树里的同一个对象，按引用比较）。
+ */
+function removeShapeFromTree(spTree: Element, shape: Element): void {
+  const nodes = spTree.children ?? [];
+  const at = nodes.indexOf(shape);
+  if (at >= 0) nodes.splice(at, 1);
 }

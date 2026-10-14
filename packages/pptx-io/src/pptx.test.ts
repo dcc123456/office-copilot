@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, moveShapeLayer, readPresentation, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
+import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -271,6 +271,134 @@ describe("pptx-io：叠放次序 op（结构 op，§2.5）", () => {
     expect(badShape.ok).toBe(false);
     if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
     const badPart = await moveShapeLayer(file, { partPath: "ppt/slides/slide9.xml", shapeId: 2 }, "up");
+    expect(badPart.ok).toBe(false);
+    if (!badPart.ok) expect(badPart.reason).toContain("部件不存在");
+  });
+});
+
+describe("pptx-io：增删形状 op（结构 op，新建要分配形状号）", () => {
+  /** 按文档顺序取出这一页的形状号（spTree 自己的 `id="1"` 不算形状）。 */
+  function shapeIds(xml: string): number[] {
+    return [...xml.matchAll(/<p:cNvPr id="(\d+)" name="([^"]*)"/g)]
+      .map((m) => Number(m[1]))
+      .filter((id) => id > 1);
+  }
+
+  /** 第一个 `<p:sp>` 的原文，用来证明加/删都只碰自己那一个节点。 */
+  function firstShapeXml(xml: string): string {
+    const from = xml.indexOf("<p:sp>");
+    return xml.slice(from, xml.indexOf("</p:sp>", from) + "</p:sp>".length);
+  }
+
+  it("加文本框：形状号是这一页已有 @id 的最大值 +1，新形状挂在形状子序列末尾（= 最顶层）", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await addTextBox(file, { partPath }, { leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144 }, "新文本框");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(shapeIds(result.op.afterXml)).toEqual([2, 3, 4, 5]);
+    expect(result.op.afterXml).toContain(firstShapeXml(original)); // 已有形状逐字不动（§2.3）
+
+    applySlideEdit(file, result.op);
+    const reread = await readPresentation(await file.toBytes());
+    const added = reread.model.slides[0]!.shapes[3]!;
+    expect(added.shapeId).toBe(5);
+    expect(added.name).toBe("TextBox 4");
+    expect(added.paragraphTexts).toEqual(["新文本框"]);
+    expect(added.paragraphRunCounts).toEqual([1]); // 一条 run：视图允许整段改
+    expect(added.hasOwnGeometry).toBe(true);
+    expect(added.boxPx).toEqual({ leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144 }); // px 交出什么读回什么（§2.1）
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("加文本框：px→EMU 只在 units.ts 那一处，形状骨架照抄 PowerPoint 插入文本框的那一段", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await addTextBox(file, { partPath }, { leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144 }, "字");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // 96px = 914400 EMU，480px = 4572000 EMU，144px = 1371600 EMU
+    expect(result.op.afterXml).toContain('<a:off x="914400" y="914400"/><a:ext cx="4572000" cy="1371600"/>');
+    expect(result.op.afterXml).toContain('<p:cNvSpPr txBox="1"/>');
+    expect(result.op.afterXml).toContain('<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/>');
+    expect(result.op.afterXml).toContain('<a:bodyPr wrap="none"><a:spAutoFit/></a:bodyPr><a:lstStyle/>');
+  });
+
+  it("加文本框：文字里的尖括号与 & 按 XML 文本转义，读回来是原样那几个字", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await addTextBox(file, { partPath }, { leftPx: 0, topPx: 0, widthPx: 100, heightPx: 50 }, "a<b>&c");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.op.afterXml).toContain("<a:t>a&lt;b&gt;&amp;c</a:t>");
+    applySlideEdit(file, result.op);
+    const reread = await readPresentation(await file.toBytes());
+    expect(reread.model.slides[0]!.shapes[3]!.paragraphTexts).toEqual(["a<b>&c"]);
+  });
+
+  it("加文本框：空串文字保留模板里那个空的 <a:p/>，不造空 run", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const empty = await addTextBox(file, { partPath }, { leftPx: 0, topPx: 0, widthPx: 100, heightPx: 50 }, "");
+    expect(empty.ok).toBe(true);
+    if (!empty.ok) return;
+    expect(empty.op.afterXml).toContain("<a:p/>");
+    expect(empty.op.afterXml.slice(empty.op.afterXml.lastIndexOf("<p:sp>"))).not.toContain("<a:t>");
+  });
+
+  it("加文本框：宽高非正与部件缺失各回一条理由，被拒的提案一个字都不落", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const badWidth = await addTextBox(file, { partPath }, { leftPx: 0, topPx: 0, widthPx: 0, heightPx: 50 }, "字");
+    expect(badWidth.ok).toBe(false);
+    if (!badWidth.ok) expect(badWidth.reason).toContain("宽度");
+    const badHeight = await addTextBox(file, { partPath }, { leftPx: 0, topPx: 0, widthPx: 10, heightPx: -1 }, "字");
+    expect(badHeight.ok).toBe(false);
+    if (!badHeight.ok) expect(badHeight.reason).toContain("高度");
+    const badPart = await addTextBox(file, { partPath: "ppt/slides/slide9.xml" }, { leftPx: 0, topPx: 0, widthPx: 10, heightPx: 10 }, "字");
+    expect(badPart.ok).toBe(false);
+    if (!badPart.ok) expect(badPart.reason).toContain("部件不存在");
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("删形状：只摘掉那一个 <p:sp>，其余形状逐字不动，撤销逐字回原样", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await removeShape(file, { partPath, shapeId: 3 });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(shapeIds(result.op.afterXml)).toEqual([2, 4]);
+    expect(result.op.afterXml).not.toContain("副标题乙");
+    expect(result.op.afterXml).toContain(firstShapeXml(original));
+    expect(result.op.afterXml).toContain("正文丙");
+
+    applySlideEdit(file, result.op);
+    const reread = await readPresentation(await file.toBytes());
+    expect(reread.model.slides[0]!.shapes.map((s) => s.name)).toEqual(["Title 1", "TextBox 3"]);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("删掉这一页最后一个形状是合法操作（页面变空白，读侧不炸），越界与部件缺失回理由不抛异常", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    for (const shapeId of [2, 3, 4]) {
+      const removed = await removeShape(file, { partPath, shapeId });
+      expect(removed.ok).toBe(true);
+      if (!removed.ok) return;
+      applySlideEdit(file, removed.op);
+    }
+    const reread = await readPresentation(await file.toBytes());
+    expect(reread.model.slides[0]!.shapes).toEqual([]);
+
+    const badShape = await removeShape(file, { partPath, shapeId: 999 });
+    expect(badShape.ok).toBe(false);
+    if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
+    const badPart = await removeShape(file, { partPath: "ppt/slides/slide9.xml", shapeId: 2 });
     expect(badPart.ok).toBe(false);
     if (!badPart.ok) expect(badPart.reason).toContain("部件不存在");
   });

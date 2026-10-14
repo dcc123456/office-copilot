@@ -11,6 +11,9 @@ import { parseXml, XmlCdata, XmlComment, type XmlElement, type XmlNode, type Xml
 export type Element = XmlElement;
 export type TextNode = XmlText;
 
+/** XML 节点的 union（元素 / 文本 / CDATA / 注释）：自己走子树时要按它接 `isElement` 收窄。 */
+export type { XmlNode };
+
 /** OOXML 各部件统一的 XML 声明；实测所有部件都带 `standalone="yes"` 且声明后不接换行。 */
 export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 
