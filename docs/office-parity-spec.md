@@ -238,10 +238,10 @@ python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `co
 D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字、改字号颜色、拖拽尺寸）。
 **完成判定**：起真实 app 走"改标题→存盘→Keynote 导出 PNG→肉眼比对文字与位置"，并把 PNG 里的实际文字写进收尾报告（§7.2）。
 
-### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
+### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字/字体/颜色编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
-**实测（run 级文字 + 字体编辑这两条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建并插到 `<a:t>` 前），邻居 run 的 `rPr` 与文字逐字不动（§2.3）；两者共用一套定位（`locateRun`）与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` 在 python-pptx 生成的两 run 文本框上，把 run0 改成非粗体 20pt、run1 加粗，读回确认 run0 `bold=False size=20.0`、run1 `bold=True` 且原 11.0pt 未受牵连，仅 `slide1.xml` 一个部件变化。**仍缺**：改颜色/位置/增删形状等其它 op、modlog 落盘、渲染层提案卡装配。
+**实测（run 级文字 + 字体 + 颜色这三条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充），三者共用一套定位（`locateRun`）与 get-or-create rPr 与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 的 `rPr`/文字/颜色逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` 把两 run 文本框的 run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 `bold=True` 且原 11.0pt 未受牵连；`setRunColor` 给 run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动，三种 op 都只让 `slide1.xml` 一个部件变化。**仍缺**：改位置/尺寸/增删形状等其它 op、modlog 落盘、渲染层提案卡装配。
 
 ### 阶段 5 · AI 工具面 + `slideAgent` — `[ ]`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, readPresentation, revertSlideEdit, setRunFont, setShapeRunText } from "./index.js";
+import { applySlideEdit, readPresentation, revertSlideEdit, setRunColor, setRunFont, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -184,5 +184,49 @@ describe("pptx-io：字体编辑 op（粗体 / 字号）", () => {
     const badSize = await setRunFont(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, { sizePt: 0 });
     expect(badSize.ok).toBe(false);
     if (!badSize.ok) expect(badSize.reason).toContain("字号");
+  });
+});
+
+describe("pptx-io：字体颜色 op", () => {
+  it("给已有 rPr 的 run 上色，solidFill 落进 rPr，b 属性与邻居 run 都不动（§2.2/§2.3）", async () => {
+    const file = await PptxFile.open(await twoRunDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "#ff8800");
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const after = (await file.partText(partPath))!;
+    expect(after).toContain("<a:rPr b=\"1\"><a:solidFill><a:srgbClr val=\"FF8800\"/></a:solidFill></a:rPr><a:t>标题甲</a:t>");
+    expect(after).toContain("<a:rPr sz=\"1800\"/><a:t>副</a:t>"); // 邻居 run 一点没动
+  });
+
+  it("重复上色只留一个 solidFill，不叠加第二个填充", async () => {
+    const file = await PptxFile.open(await twoRunDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const first = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "#000000");
+    if (!first.ok) throw new Error(first.reason);
+    applySlideEdit(file, first.op);
+    const second = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "#ffffff");
+    if (!second.ok) throw new Error(second.reason);
+    applySlideEdit(file, second.op);
+    const after = (await file.partText(partPath))!;
+    expect(after.match(/<a:solidFill>/g)?.length).toBe(1); // 只有一个填充
+    expect(after).toContain("<a:srgbClr val=\"FFFFFF\"/>");
+  });
+
+  it("run 没有 rPr 时新建 rPr 再放 solidFill", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 标题 run 无 rPr
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "AABBCC");
+    if (!result.ok) throw new Error(result.reason); // 不带 # 也接受
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toContain("<a:rPr><a:solidFill><a:srgbClr val=\"AABBCC\"/></a:solidFill></a:rPr><a:t>标题甲</a:t>");
+  });
+
+  it("非法颜色串带原因拒绝而不是抛异常", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const bad = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "红色");
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason).toContain("颜色");
   });
 });
