@@ -46,8 +46,31 @@ export interface RunFontFormat {
 
 const SHAPE_HOST_TAGS = ["p:sp", "p:pic", "p:graphicFrame", "p:grpSp"];
 
+/** 目标形状的定位坐标（几何 op 只到形状粒度，不需要段/run）。 */
+export interface ShapeGeometryTarget {
+  /** 幻灯片部件路径。 */
+  partPath: string;
+  /** 形状 `<p:cNvPr @id>`。 */
+  shapeId: number;
+}
+
+/** 目标形状的位置/尺寸（CSS px @96DPI，非 EMU、非 pt）；给了哪个改哪个。 */
+export interface ShapeBoxPx {
+  /** 左偏移（px，可为负表示挪出幻灯片）。 */
+  leftPx?: number;
+  /** 上偏移（px，可为负）。 */
+  topPx?: number;
+  /** 宽（px，须为正）。 */
+  widthPx?: number;
+  /** 高（px，须为正）。 */
+  heightPx?: number;
+}
+
 /** `<a:rPr>` 的填充组（ECMA-376 Part 1 §21.1.2.x）：同一 run 只能有一个，改色时先把旧填充删净再放新的。 */
 const FILL_GROUP_TAGS = ["a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill"];
+
+/** CSS px @96DPI → EMU 的换算系数（914400 EMU/inch ÷ 96 px/inch）；几何 op 是唯一的换算点（§2.1）。 */
+const EMU_PER_PX = 9525;
 
 /**
  * 产出一条"把指定 run 的文字改成 newText"的编辑提案，**不落地**。
@@ -118,10 +141,43 @@ export async function setRunColor(file: PptxFile, target: ShapeRunTarget, hex: s
 }
 
 /**
+ * 产出一条"移动 / 缩放指定形状"的编辑提案，**不落地**。
+ *
+ * @param file 已打开的读写器。
+ * @param target 形状定位坐标（部件路径 + 形状号）。
+ * @param box 位置/尺寸（CSS px @96DPI）；给了哪个改哪个，left/top 允许负值，width/height 须为正。
+ * @returns `{ ok, op }`：无属性、尺寸非法、定位失败或形状是组合（子偏移语义不同，暂不支持）时 `{ ok:false, reason }`。
+ *   px→EMU 换算只在这一处发生（§2.1）。对占位符写显式 `<a:xfrm>` 是用户明示的覆盖，不是读侧烘焙（D3 只禁止读侧把继承几何固化）。
+ */
+export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarget, box: ShapeBoxPx): Promise<SlideEditResult> {
+  if (box.leftPx === undefined && box.topPx === undefined && box.widthPx === undefined && box.heightPx === undefined) {
+    return { ok: false, reason: "没有要改的几何属性（left / top / width / height 至少给一个）。" };
+  }
+  if (box.widthPx !== undefined && !(box.widthPx > 0)) return { ok: false, reason: `宽度必须是正数 px：${box.widthPx}` };
+  if (box.heightPx !== undefined && !(box.heightPx > 0)) return { ok: false, reason: `高度必须是正数 px：${box.heightPx}` };
+  const located = await locateShape(file, target);
+  if (!located.ok) return located;
+  if (located.shape.name === "p:grpSp") return { ok: false, reason: "组合形状的几何暂不支持（子偏移语义不同）。" };
+  const spPr = getOrCreateSpPr(located.shape);
+  const xfrm = getOrCreateChild(spPr, "a:xfrm", true); // CT_ShapeProperties：xfrm 是第一个子元素
+  if (box.leftPx !== undefined || box.topPx !== undefined) {
+    const off = getOrCreateChild(xfrm, "a:off", false);
+    if (box.leftPx !== undefined) off.attributes["x"] = String(Math.round(box.leftPx * EMU_PER_PX));
+    if (box.topPx !== undefined) off.attributes["y"] = String(Math.round(box.topPx * EMU_PER_PX));
+  }
+  if (box.widthPx !== undefined || box.heightPx !== undefined) {
+    const ext = getOrCreateChild(xfrm, "a:ext", false);
+    if (box.widthPx !== undefined) ext.attributes["cx"] = String(Math.round(box.widthPx * EMU_PER_PX));
+    if (box.heightPx !== undefined) ext.attributes["cy"] = String(Math.round(box.heightPx * EMU_PER_PX));
+  }
+  return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
+}
+
+/**
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由 `setShapeRunText`/`setRunFont` 产出的 op。
+ * @param op 由 `setShapeRunText`/`setRunFont`/`setRunColor`/`setShapeGeometry` 产出的 op。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -137,17 +193,20 @@ export function revertSlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.beforeXml);
 }
 
-/** `locateRun` 的成功结果：部件原文、解析好的根与目标 run 元素。 */
+/** `locateShape` 的成功结果：部件原文、解析好的根与目标形状元素。 */
+type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element } | { ok: false; reason: string };
+
+/** `locateRun` 的成功结果：在形状之上再给出目标 run 元素。 */
 type LocatedRun = { ok: true; beforeXml: string; root: Element; run: Element } | { ok: false; reason: string };
 
 /**
- * 把文字与字体 op 共用的定位逻辑收成一份：读部件、解析、按 形状→文本体→段→run 逐层定位。
+ * 读部件、解析并按 `<p:cNvPr @id>` 定位形状元素——文字/字体/颜色/几何所有 op 共用的第一层（§3.2）。
  *
  * @param file 读写器。
- * @param target run 定位坐标。
- * @returns 成功带 `{ beforeXml, root, run }`；任一层缺失或越界带 `{ ok:false, reason }`（图片/图形框无文本体也走这里）。
+ * @param target 部件路径 + 形状号。
+ * @returns 成功带 `{ beforeXml, root, shape }`；部件缺失、解析失败或找不到形状带 `{ ok:false, reason }`。
  */
-async function locateRun(file: PptxFile, target: ShapeRunTarget): Promise<LocatedRun> {
+async function locateShape(file: PptxFile, target: ShapeGeometryTarget): Promise<LocatedShape> {
   const beforeXml = await file.partText(target.partPath);
   if (beforeXml === undefined) return { ok: false, reason: `幻灯片部件不存在：${target.partPath}` };
   let root: Element;
@@ -158,7 +217,20 @@ async function locateRun(file: PptxFile, target: ShapeRunTarget): Promise<Locate
   }
   const shape = findShapeById(root, target.shapeId);
   if (!shape) return { ok: false, reason: `找不到形状 id=${target.shapeId}` };
-  const txBody = firstChild(shape, "p:txBody");
+  return { ok: true, beforeXml, root, shape };
+}
+
+/**
+ * 在 `locateShape` 之上再定位到具体 run：形状→文本体→段→run 逐层深入。
+ *
+ * @param file 读写器。
+ * @param target run 定位坐标。
+ * @returns 成功带 `{ beforeXml, root, run }`；任一层缺失或越界带 `{ ok:false, reason }`（图片/图形框无文本体也走这里）。
+ */
+async function locateRun(file: PptxFile, target: ShapeRunTarget): Promise<LocatedRun> {
+  const located = await locateShape(file, { partPath: target.partPath, shapeId: target.shapeId });
+  if (!located.ok) return located;
+  const txBody = firstChild(located.shape, "p:txBody");
   if (!txBody) return { ok: false, reason: `形状 id=${target.shapeId} 没有文本体（图片/图形框不可改文字）` };
   const paras = findChildren(txBody, "a:p");
   const para = paras[target.paraIndex];
@@ -166,7 +238,7 @@ async function locateRun(file: PptxFile, target: ShapeRunTarget): Promise<Locate
   const runs = findChildren(para, "a:r");
   const run = runs[target.runIndex];
   if (!run) return { ok: false, reason: `run 序号越界：${target.runIndex}（该段有 ${runs.length} 个 run）` };
-  return { ok: true, beforeXml, root, run };
+  return { ok: true, beforeXml: located.beforeXml, root: located.root, run };
 }
 
 /**
@@ -205,6 +277,40 @@ function getOrCreateRunPr(run: Element): Element {
  */
 function newSolidFillElement(val: string): Element {
   return parseFragmentElement(`<root><a:solidFill><a:srgbClr val="${val}"/></a:solidFill></root>`);
+}
+
+/**
+ * 取父元素下指定名字的子元素，没有就新建一个。
+ *
+ * @param parent 父元素。
+ * @param name 带前缀的标签名原值（如 `a:xfrm`、`a:off`）。
+ * @param asFirst true 插到子列表首位，false 追加到末尾（`a:off` 先于 `a:ext` 创建，顺序天然满足 OOXML）。
+ * @returns 现有或新建的子元素。
+ */
+function getOrCreateChild(parent: Element, name: string, asFirst: boolean): Element {
+  const existing = firstChild(parent, name);
+  if (existing) return existing;
+  const el = parseFragmentElement(`<root><${name}/></root>`);
+  const kids = (parent.children ??= []);
+  if (asFirst) kids.unshift(el);
+  else kids.push(el);
+  return el;
+}
+
+/**
+ * 取形状的 `<p:spPr>`，没有就新建并插到 OOXML 规定的位置（紧跟 `<p:nv*Pr>` 之后）。
+ *
+ * @param shape 形状元素（`p:sp`/`p:pic`/`p:graphicFrame`）。
+ * @returns 现有或新建的 `<p:spPr>`。
+ */
+function getOrCreateSpPr(shape: Element): Element {
+  const existing = firstChild(shape, "p:spPr");
+  if (existing) return existing;
+  const spPr = parseFragmentElement("<root><p:spPr/></root>");
+  const kids = (shape.children ??= []);
+  const hostIndex = kids.findIndex((c) => isElement(c) && c.name.startsWith("p:nv"));
+  kids.splice(hostIndex + 1, 0, spPr);
+  return spPr;
 }
 
 /**

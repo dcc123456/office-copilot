@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, readPresentation, revertSlideEdit, setRunColor, setRunFont, setShapeRunText } from "./index.js";
+import { applySlideEdit, readPresentation, revertSlideEdit, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -228,5 +228,49 @@ describe("pptx-io：字体颜色 op", () => {
     const bad = await setRunColor(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "红色");
     expect(bad.ok).toBe(false);
     if (!bad.ok) expect(bad.reason).toContain("颜色");
+  });
+});
+
+describe("pptx-io：形状几何 op（移动 / 缩放）", () => {
+  it("只改宽：目标形状的 off 与 cy 原样留住，只有 cx 按 px×9525 换成 EMU（§2.1）", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 文本框 shapeId=4，已有 xfrm
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setShapeGeometry(file, { partPath, shapeId: 4 }, { widthPx: 100 });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const after = (await file.partText(partPath))!;
+    expect(after).toContain("<a:off x=\"914400\" y=\"3657600\"/><a:ext cx=\"952500\" cy=\"914400\"/>"); // 100px→952500 EMU，off/cy 没动
+  });
+
+  it("占位符空 spPr 上新建 xfrm，off 先于 ext（D3：用户明示覆盖才写几何）", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 标题 shapeId=2，spPr 是空的
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setShapeGeometry(file, { partPath, shapeId: 2 }, { leftPx: 100, topPx: 100, widthPx: 200, heightPx: 200 });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const after = (await file.partText(partPath))!;
+    expect(after).toContain("<p:spPr><a:xfrm><a:off x=\"952500\" y=\"952500\"/><a:ext cx=\"1905000\" cy=\"1905000\"/></a:xfrm></p:spPr>");
+  });
+
+  it("apply 后部件变、revert 逐字回到原样", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await setShapeGeometry(file, { partPath, shapeId: 4 }, { leftPx: 50, heightPx: 150 });
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).not.toBe(original);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("没给几何属性或宽/高非正数时带原因拒绝", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const empty = await setShapeGeometry(file, { partPath, shapeId: 4 }, {});
+    expect(empty.ok).toBe(false);
+    const badW = await setShapeGeometry(file, { partPath, shapeId: 4 }, { widthPx: 0 });
+    expect(badW.ok).toBe(false);
+    if (!badW.ok) expect(badW.reason).toContain("宽度");
   });
 });
