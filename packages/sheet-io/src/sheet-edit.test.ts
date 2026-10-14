@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp, sortRowsOp, type SortRowsOp, type SortRowsResult } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, numberFormatColumnOps, revertSheetOps, runSheetOps, setCellFormulaOp, setCellNumberFormatOp, setCellTextOp, setColumnWidthOp, sortRowsOp, type SortRowsOp, type SortRowsResult } from "./sheet-edit.js";
+import { numberFormatFromCode } from "./cell-text.js";
 import { parseRange } from "./address.js";
 import type { SheetCell, SheetColumn, SheetLike as SheetPayload, SheetRowMeta } from "./model.js";
 
@@ -759,6 +760,47 @@ describe("一条外部引用不再否决全表插删（spec 决策 D9 第 1 条�
     const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "row", 2)!]);
     expect(applied.ok).toBe(false);
     expect(applied.skipped[0]?.reason).toContain("#REF!");
+  });
+});
+
+describe("整列统一数字格式（spec 决策 D10）", () => {
+  it("按列展开只出数字格的 op，值与样式索引一个字不动，撤销逐格回到批前", () => {
+    const sheet = sheetOf([cellOf(2, 1, 0.125, 7), cellOf(2, 2, 0.5, 8), cellOf(2, 3, "文本", 9)]);
+    const format = numberFormatFromCode("0.0%")!;
+    const made = numberFormatColumnOps(sheet, 2, format);
+    expect(made.ops.map((op) => op.before.address)).toEqual(["C2", "C3"]);
+    expect(made.untouched).toBe(1);
+    const applied = runSheetOps(sheet, made.ops);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["C2"]?.value).toBe(0.125);
+    expect(applied.after.cells["C2"]?.styleIndex).toBe(7);
+    expect(applied.after.cells["C2"]?.numberFormat).toEqual(format);
+    expect(applied.after.cells["C4"]?.numberFormat).toBeUndefined();
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("格式已经是对的就不出 op（改了也看不出来，不算漏改），原样保留的格与文本格也不动", () => {
+    const formatted: SheetCell = { ...cellOf(0, 0, 1.5), numberFormat: { numFmtId: 2, isDateLike: false } };
+    const kept: SheetCell = { ...cellOf(0, 1, 2), rawXml: '<c r="A2" s="3"><v>2</v></c>' };
+    const sheet = sheetOf([formatted, kept, cellOf(0, 2, 3)]);
+    expect(setCellNumberFormatOp(sheet, "A1", numberFormatFromCode("0.00")!)).toBeNull();
+    const made = numberFormatColumnOps(sheet, 0, numberFormatFromCode("0.00")!);
+    expect(made.ops.map((op) => op.before.address)).toEqual(["A3"]);
+    expect(made.untouched).toBe(2);
+  });
+
+  it("改数字格式不追加公式缓存刷新：内容没动，D8 不该插手", () => {
+    const sheet = sheetOf([cellOf(0, 0, 2), formulaCell("B1", 1, 0, "A1*2"), cellOf(0, 1, 3), formulaCell("B2", 1, 1, "A2*2")]);
+    const made = numberFormatColumnOps(sheet, 1, numberFormatFromCode("#,##0")!);
+    expect(made.ops).toHaveLength(2);
+    const applied = runSheetOps(sheet, made.ops);
+    expect(applied.ops).toHaveLength(2);
+    expect(applied.skipped).toEqual([]);
+    expect(applied.after.cells["B1"]?.value).toBe(sheet.cells["B1"]?.value);
+    expect(applied.after.cells["B1"]?.formula).toBe("A1*2");
+    expect(applied.after.cells["B1"]?.numberFormat).toEqual({ numFmtId: 3, isDateLike: false });
   });
 });
 

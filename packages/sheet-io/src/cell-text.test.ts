@@ -1,11 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { cellDisplayText, formatNumberForDisplay, parseUserCellText } from "./cell-text.js";
+import { cellDisplayText, formatNumberForDisplay, numberFormatFromCode, parseUserCellText } from "./cell-text.js";
 import type { SheetCell } from "./model.js";
 
 /** 造一个测试用的格；只填被测函数会读的字段。 */
 function cell(parts: Partial<SheetCell>): SheetCell {
   return { address: "A1", colIndex: 0, rowIndex: 0, kind: "number", value: null, ...parts };
 }
+
+describe("格式码准入（spec 决策 D10 第 3 条：认不出的一律拒）", () => {
+  it("内建码按 ECMA-376 的 id 落，日期那条带 isDateLike，大小写与首尾空格不参与判定", () => {
+    expect(numberFormatFromCode("General")).toEqual({ numFmtId: 0, isDateLike: false });
+    expect(numberFormatFromCode("0")).toEqual({ numFmtId: 1, isDateLike: false });
+    expect(numberFormatFromCode("0.00")).toEqual({ numFmtId: 2, isDateLike: false });
+    expect(numberFormatFromCode("#,##0")).toEqual({ numFmtId: 3, isDateLike: false });
+    expect(numberFormatFromCode(" 0% ")).toEqual({ numFmtId: 9, isDateLike: false });
+    expect(numberFormatFromCode("0.00%")).toEqual({ numFmtId: 10, isDateLike: false });
+    expect(numberFormatFromCode(" M/D/YYYY ")).toEqual({ numFmtId: 14, isDateLike: true });
+    expect(numberFormatFromCode("@")).toEqual({ numFmtId: 49, isDateLike: false });
+  });
+
+  it("内建表盖不住的小数位走自定义码，与键入时产的是同一套形状", () => {
+    expect(numberFormatFromCode("0.0")).toEqual({ numFmtId: 0, formatCode: "0.0", isDateLike: false });
+    expect(numberFormatFromCode("0.000")).toEqual({ numFmtId: 0, formatCode: "0.000", isDateLike: false });
+    expect(numberFormatFromCode("0.0%")).toEqual({ numFmtId: 0, formatCode: "0.0%", isDateLike: false });
+    expect(numberFormatFromCode("0.000%")).toEqual({ numFmtId: 0, formatCode: "0.000%", isDateLike: false });
+  });
+
+  it("日期与时间的自定义写法收下，带引号字面量的那种不收", () => {
+    expect(numberFormatFromCode("yyyy-mm-dd")).toEqual({ numFmtId: 0, formatCode: "yyyy-mm-dd", isDateLike: true });
+    expect(numberFormatFromCode('yyyy"年"m"月"')).toBeNull();
+    expect(numberFormatFromCode("yyyy年mm月")).toBeNull();
+  });
+
+  it("认不出的码回 null，调用方必须把这句原样报给用户", () => {
+    for (const code of ["", "$#,##0.00", "0.0000%", "0.0000", "??"]) expect(numberFormatFromCode(code)).toBeNull();
+  });
+});
 
 describe("数字格式投影（spec 验收 A3/A4 的显示侧，换算只发生在 sheet-io）", () => {
   it("内建日期 id 与自定义格式码各按自己的写法显示同一个序列号", () => {

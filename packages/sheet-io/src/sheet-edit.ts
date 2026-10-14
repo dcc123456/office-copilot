@@ -12,7 +12,7 @@ import { parseUserCellText } from "./cell-text.js";
 import { evaluateFormula, formulaReferencedRanges } from "./formula-eval.js";
 import { shiftFormula } from "./formula-refs.js";
 import { columnWidthPxToChars } from "./geometry.js";
-import type { CellScalarValue, SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
+import type { CellScalarValue, ResolvedNumberFormat, SheetCell, SheetColumn, SheetLike as SheetPayload, SheetMerge, SheetRowMeta } from "./model.js";
 import { isIdentityPermutation, sortKeyOf, sortPermutation, type SortKey } from "./sheet-sort.js";
 import { colFingerprints, recalculateSheetExtent, rowFingerprints } from "./xlsx-sheet.js";
 
@@ -109,8 +109,24 @@ export interface SortRowsOp {
   after: SheetTrackBand;
 }
 
+/**
+ * 改一格的**显示意图**（数字格式），值与公式一个字不动（spec 决策 D10）。
+ *
+ * `before`/`after` 仍旧是整格前像/后像，逆操作就是把 `before` 写回——与 `setCellValue` 共用同一条
+ * 落地与内容寻址逻辑（`applyCellOp`），因为差别只在"改的是 `numberFormat` 而非内容"。
+ * 写盘时走的是既有的 `cellXfs` 只追加通路（`sheet-file.ts` 里"只凭 `cell.numberFormat` 落样式"那一支），
+ * 不新建第二套格式模型。
+ */
+export interface SetCellNumberFormatOp {
+  kind: "setCellNumberFormat";
+  partPath: string;
+  target: SheetCellTarget;
+  before: SheetCell;
+  after: SheetCell;
+}
+
 /** 表格的 op 全集（合并区的编辑还没落地，届时再加一种 op）。 */
-export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp | ShiftTracksOp | SortRowsOp;
+export type SheetCoreOp = SetCellValueOp | SetColumnWidthOp | ShiftTracksOp | SortRowsOp | SetCellNumberFormatOp;
 
 /** 一条 op 没落地时的记录，UI 据此报"部分撤销（x/y）"。 */
 export interface SheetSkippedOp {
@@ -246,6 +262,64 @@ export function setCellFormulaOp(sheet: SheetPayload, address: string, formula: 
     },
     recalcNeeded: !evaluated.ok,
   };
+}
+
+/**
+ * 由"把这格的数字格式改成这样"造一条显示意图 op（spec 决策 D10）。
+ *
+ * 只动 `numberFormat`，值/公式/样式索引一概不碰（§2.3 不许拍平局部格式，写盘走 `cellXfs` 只追加那条通路）。
+ * **不动**的三种情形一律返回 `null`（不是失败，是"改了也看不出来"）：地址解析不出来、
+ * 那一格是文本或原样保留的 `rawXml` 格（把文本"格式化"成数字是改值，得由 `setCellValue` 明说），
+ * 以及格式本来就已经是这个。
+ *
+ * @param sheet 当前表的载荷。
+ * @param address 大写 A1 地址。
+ * @param format 目标显示意图（`numberFormatFromCode` 认得的那几种）。
+ * @returns 可直接交给 `runSheetOps` 的 op；上面三种情形返回 null。
+ */
+export function setCellNumberFormatOp(sheet: SheetPayload, address: string, format: ResolvedNumberFormat): SetCellNumberFormatOp | null {
+  const key = address.trim().toUpperCase();
+  const parsedAddress = parseA1(key);
+  if (!parsedAddress) return null;
+  const cell = sheet.cells[key];
+  if (!cell || cell.kind !== "number" || cell.rawXml) return null;
+  if (sameNumberFormat(cell.numberFormat, format)) return null;
+  return {
+    kind: "setCellNumberFormat",
+    partPath: sheet.partPath,
+    target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
+    before: cell,
+    after: { ...cell, numberFormat: format },
+  };
+}
+
+/**
+ * 把"这一列统一成某个数字格式"展开成一批单格 op（spec 决策 D10 第 2 条）。
+ *
+ * 展开在引擎做（§3.3、§2.11）：模型只给列与格式码，逐格的现场判定在这里完成，
+ * 文本格、原样保留的格与格式已相同的格都不出 op。
+ *
+ * @param sheet 当前表的载荷。
+ * @param colIndex 目标列号（0 基）。
+ * @param format 目标显示意图。
+ * @returns `{ops, untouched}`：`ops` 按行号升序；`untouched` 是这一列里没出 op 的格数，调用方要如实报出来。
+ */
+export function numberFormatColumnOps(sheet: SheetPayload, colIndex: number, format: ResolvedNumberFormat): { ops: SetCellNumberFormatOp[]; untouched: number } {
+  const rows = Object.values(sheet.cells)
+    .filter((cell) => cell.colIndex === colIndex)
+    .sort((left, right) => left.rowIndex - right.rowIndex);
+  const ops: SetCellNumberFormatOp[] = [];
+  for (const cell of rows) {
+    const op = setCellNumberFormatOp(sheet, cell.address, format);
+    if (op) ops.push(op);
+  }
+  return { ops, untouched: rows.length - ops.length };
+}
+
+/** 两个显示意图是否等价（内建 id 不带 `formatCode`，比较时把 undefined 当"没有"）。 */
+function sameNumberFormat(left: ResolvedNumberFormat | undefined, right: ResolvedNumberFormat): boolean {
+  if (!left) return false;
+  return left.numFmtId === right.numFmtId && (left.formatCode ?? "") === (right.formatCode ?? "");
 }
 
 /**
@@ -582,7 +656,7 @@ function sameAttributes(left: Record<string, string> | undefined, right: Record<
  * @param op 改值 op（逆操作形状相同，`before`/`after` 已交换）。
  * @returns 新载荷与逆操作，或跳过理由。
  */
-function applyCellOp(sheet: SheetPayload, op: SetCellValueOp): ApplyOutcome {
+function applyCellOp(sheet: SheetPayload, op: SetCellValueOp | SetCellNumberFormatOp): ApplyOutcome {
   const rowIndex = resolveTrack(sheet, op.target.row);
   if (rowIndex === null) return { reason: "认不出这一行：内容已被改动，或它被插入/删除的行挪走了" };
   const address = formatA1({ colIndex: op.target.colIndex, rowIndex });
@@ -600,7 +674,11 @@ function applyCellOp(sheet: SheetPayload, op: SetCellValueOp): ApplyOutcome {
   const inverseTarget: SheetCellTarget = { row: trackAddress(next, "row", rowIndex), colIndex: op.target.colIndex };
   return {
     sheet: next,
-    inverse: { ...op, target: inverseTarget, before: op.after, after: op.before },
+    // 两个分支分开写：`setCellValue` 的前像可以是 null（清空），`setCellNumberFormat` 的两侧都必须有格（不改内容）。
+    inverse:
+      op.kind === "setCellValue"
+        ? { ...op, target: inverseTarget, before: op.after, after: op.before }
+        : { ...op, target: inverseTarget, before: op.after, after: op.before },
   };
 }
 
@@ -1188,6 +1266,7 @@ function rectMismatchReason(sheet: SheetPayload, image: SheetTrackBand, range: A
 function applyOne(sheet: SheetPayload, op: SheetCoreOp): ApplyOutcome {
   if (op.partPath !== sheet.partPath) return { reason: "这条 op 指向的是另一张表" };
   if (op.kind === "setCellValue") return applyCellOp(sheet, op);
+  if (op.kind === "setCellNumberFormat") return applyCellOp(sheet, op);
   if (op.kind === "setColumnWidth") return applyColumnWidthOp(sheet, op);
   if (op.kind === "sortRows") return applySortRowsOp(sheet, op);
   return applyShiftOp(sheet, op);
@@ -1310,12 +1389,21 @@ function trackKey(track: SheetTrackAddress): string {
 function reanchorOp(op: SheetCoreOp, reanchors: Map<string, SheetTrackAddress>): SheetCoreOp {
   if (reanchors.size === 0) return op;
   if (op.kind === "insertTracks" || op.kind === "deleteTracks") return op;
-  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  const track = rowTrackOf(op);
   const reanchored = reanchorTrack(track, reanchors);
   if (reanchored === track) return op;
-  return op.kind === "setCellValue"
-    ? { ...op, target: { ...op.target, row: reanchored } }
-    : { ...op, target: reanchored };
+  if (op.kind === "setCellValue" || op.kind === "setCellNumberFormat") return { ...op, target: { ...op.target, row: reanchored } };
+  return { ...op, target: reanchored };
+}
+
+/**
+ * 这条 op 的**行锚点**在哪：改一格（内容或显示意图）的 op 把它装在 `target.row` 里，其余 op 的 `target` 本身就是条地址。
+ *
+ * @param op 批里的一条 op。
+ * @returns 用于批内重新锚定的行地址。
+ */
+function rowTrackOf(op: SheetCoreOp): SheetTrackAddress {
+  return op.kind === "setCellValue" || op.kind === "setCellNumberFormat" ? op.target.row : op.target;
 }
 
 /**
@@ -1348,7 +1436,7 @@ function trackLandedOn(sheet: SheetPayload, op: SheetCoreOp): { axis: SheetAxis;
   // 插删与排序都是"把记录整体挪走"，不是"把某一条改成新内容"：给它们记锚点会把后面的 op 领到错的行上，
   // 而按内容寻址本来就能在新区位认出那条记录（§2.5 要的就是这个）。
   if (op.kind === "insertTracks" || op.kind === "deleteTracks" || op.kind === "sortRows") return null;
-  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  const track = rowTrackOf(op);
   if (track.fingerprint === EMPTY_TRACK) return null;
   const index = resolveTrack(sheet, track);
   return index === null ? null : { axis: track.axis, index };
@@ -1368,7 +1456,7 @@ function rememberReanchor(
   op: SheetCoreOp,
   landedOn: { axis: SheetAxis; index: number },
 ): void {
-  const track = op.kind === "setCellValue" ? op.target.row : op.target;
+  const track = rowTrackOf(op);
   const fresh = trackAddress(after, landedOn.axis, landedOn.index);
   if (fresh.fingerprint !== track.fingerprint || fresh.nth !== track.nth) reanchors.set(trackKey(track), fresh);
 }

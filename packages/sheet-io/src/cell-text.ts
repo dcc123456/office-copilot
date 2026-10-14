@@ -247,6 +247,44 @@ export interface ParsedCellInput {
 }
 
 /** 内建"短日期"格式 id（ECMA-376 18.8.30），也是新输入日期采用的显示格式。 */
+/**
+ * 把给人看的格式码解析成写进格子的显示意图（spec 决策 D10 第 3 条）。
+ *
+ * 只认两张表：`BUILTIN_FORMAT_CODES` 里的内建码，以及投影层盖得住的"固定小数位"形状
+ * （`0.0`、`0.000`、`0.0%`、`0.000%` 这类，键入时 `percentFormatWithDecimals` 产的就是同一套）。
+ * 表外一律回 null——调用方必须把这句话报给人，不许把认不出的串原样塞进 `<numFmt>`。
+ *
+ * @param formatCode 格式码原文（大小写不敏感，去首尾空格）。
+ * @returns 写进 `SheetCell.numberFormat` 的显示意图；认不出时 `null`。
+ */
+export function numberFormatFromCode(formatCode: string): ResolvedNumberFormat | null {
+  const code = formatCode.trim();
+  for (const [rawId, builtin] of Object.entries(BUILTIN_FORMAT_CODES)) {
+    if (builtin.toLowerCase() !== code.toLowerCase()) continue;
+    const numFmtId = Number(rawId);
+    return { numFmtId, isDateLike: BUILTIN_DATE_NUMFMT_IDS.has(numFmtId) };
+  }
+  const percent = /^0(?:\.(0+))?%$/.exec(code);
+  if (percent) {
+    const decimals = percent[1]?.length ?? 0;
+    // 四位以上小数位不是我们要给的习惯写法，且 Excel 里也不常见，按认不出处理。
+    return decimals > 3 ? null : percentFormatWithDecimals(decimals);
+  }
+  const fixed = /^0\.(0+)$/.exec(code);
+  if (fixed) {
+    const decimals = fixed[1]!.length;
+    if (decimals > 3) return null;
+    if (decimals === 2) return { numFmtId: 2, isDateLike: false };
+    return { numFmtId: 0, formatCode: code, isDateLike: false };
+  }
+  // 日期/时间的自定义写法（`yyyy-mm-dd` 这类）：显示由上面的投影层按 formatCode 算，所以认得。
+  if (/^[ymdhs][ymdhs/\-.:, ]*$/i.test(code) && /[ymd]/i.test(code)) return { numFmtId: 0, formatCode: code, isDateLike: true };
+  return null;
+}
+
+/** ECMA-376 18.8.30 里属日期/时间的那几个内建 id（`BUILTIN_FORMAT_CODES` 表中的 14–22、45、46）。 */
+const BUILTIN_DATE_NUMFMT_IDS = new Set([14, 15, 16, 17, 18, 19, 20, 21, 22, 45, 46]);
+
 const BUILTIN_DATE_FORMAT_NUMFMT_ID = 14;
 
 /** 只有 ISO 风格的完整日期才当日期吃：`1-2` 在 Excel 里是 jan-02，在本工具里宁可当文本。 */

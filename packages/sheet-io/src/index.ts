@@ -92,6 +92,8 @@ export {
   type SortRowsOp,
   type SortRowsResult,
 } from "./sheet-edit.js";
+export { numberFormatColumnOps, setCellNumberFormatOp, type SetCellNumberFormatOp } from "./sheet-edit.js";
+export { numberFormatFromCode } from "./cell-text.js";
 export { isIdentityPermutation, sortKeyOf, sortPermutation, type SortKey } from "./sheet-sort.js";
 export {
   aggregateSheet,
