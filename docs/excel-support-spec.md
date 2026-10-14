@@ -370,6 +370,15 @@ D6 的写面原本列了 `sheet_sort_rows`，提交 13（`1f5ec47`）把它收�
 `[ ]` 撤销回到批前的 `@s`；同批里已有的 `setCellValue` 不受牵连。
 `[ ]` openpyxl 独立读回 `number_format` 字符串与我们写入的 `formatCode` 一致（替代"Excel 目视"那条 BLOCKED）。
 
+**落地状态**（引擎侧与提案面已起，`c9d1130` 之后的 `feat(sheet-io)` + `feat(sheet-tools)` 两个提交）：
+新 kind `SetCellNumberFormatOp` 与 `applyCellOp` 共用落地/逆操作那条通路（两类 op 分开写 inverse，
+因为 `setCellValue` 的前像可以是 null）；格式码准入在 `cell-text.ts:numberFormatFromCode`
+（内建表 + 内建表盖不住的小数位 + 自定义日期写法，带引号字面量的那种与四位小数的都回 null）；
+按列展开是 `sheet-edit.ts:numberFormatColumnOps`，工具面条目 `set_number_format`，装配在 `sheetAgent.ts` 的 switch。
+`[~]` 撤销回到批前的 `@s`、同批里已有的 `setCellValue` 不受牵连 —— 单测钉住（`sheet-edit.test.ts` 三条 + `cell-text.test.ts` 准入四条）。
+**仍缺**：下面这条落盘/openpyxl 的往返、装配面那层的单测（`sheetAgent.test.ts` 里补一条 `set_number_format` 提案→op）、
+以及 §7.2 的真实 app 走一遍。
+
 **落点清单**（D10 动工前把这一轮读代码的取证一次交清，照这条走不必重查）：
 
 - **写盘侧一行都不用动**：`sheet-file.ts:422-426` 已经只凭 `cell.numberFormat` 走 `styles.withNumberFormat`，
