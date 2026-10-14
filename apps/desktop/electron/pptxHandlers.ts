@@ -13,7 +13,7 @@ import {
   PptxFile,
   applySlideEdit,
   auditPptxPackage,
-  revertSlideEdit,
+  revertSlideEdits,
   setRunColor,
   setRunFont,
   setShapeGeometry,
@@ -47,6 +47,11 @@ export type PptxEditResult =
        * op 只在主进程现做，渲染层拿不到，所以成功时不送回来就等于没有撤销（§2.5）。
        */
       ops: SlideEditOp[];
+      /**
+       * 撤销时没落地的条目理由（正向保存不会有：那批是一条不落地就整批放弃）。
+       * 非空代表"部分撤销"，渲染层据此回用户 x/y 而不是假装全回去了（§2.5）。
+       */
+      skipped?: string[];
       presentation: PresentationModel;
     }
   | { ok: false; canceled: true }
@@ -136,7 +141,8 @@ export async function editPptxDoc(
  * @param targetPath 要写的路径。
  * @param basePath 底包路径（未建模部件的来源；原地保存时与 `targetPath` 相同）。
  * @param verb 回给人听的那个动作名（"保存" / "撤销"），失败文案要跟着当时的动作走（§5.7）。
- * @param run 在一个刚打开的读写器上完成本次改动，返回这批改动的 op（失败时给引擎的理由）。
+ * @param run 在一个刚打开的读写器上完成本次改动，返回这批改动的 op（失败时给引擎的理由）；
+ *   撤销那条路还会带回没落地的条目理由（`skipped`），正向保存没有这一项。
  * @returns ok:true + 落盘路径、本次真正动过的部件清单（去重）与刷新后的模型；
  *   `run` 失败、底包不存在、或写出会新引入结构问题时整批不写并回一句中文（§2.4）。
  */
@@ -144,7 +150,9 @@ async function applyBatch(
   targetPath: string,
   basePath: string,
   verb: string,
-  run: (file: PptxFile) => Promise<{ ok: true; ops: SlideEditOp[] } | { ok: false; reason: string }>,
+  run: (
+    file: PptxFile,
+  ) => Promise<{ ok: true; ops: SlideEditOp[]; skipped?: string[] } | { ok: false; reason: string }>,
 ): Promise<PptxEditResult> {
   try {
     if (!(await fileExists(basePath))) {
@@ -176,6 +184,7 @@ async function applyBatch(
       path: targetPath,
       changedParts: [...new Set(made.ops.map((op) => op.partPath))].sort(),
       ops: made.ops,
+      ...(made.skipped?.length ? { skipped: made.skipped } : {}),
       presentation: refreshed.model,
     };
   } catch (err) {
@@ -209,18 +218,14 @@ async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: tr
  * @param targetPath 要写的路径。
  * @param basePath 底包路径（撤销总是对着磁盘上当前那份重做，所以两者相同）。
  * @param ops 之前那批改动落地的 op，**按逆序**传入即可撤销整批。
- * @returns 与 {@link editPptxDoc} 同形；op 指向的部件已经不在包里时整批不写。
+ * @returns 与 {@link editPptxDoc} 同形，另带没落地的条目理由（`skipped`）；一条都落不了时整批不写，
+ *   op 指向的部件已不在包里或那页后来又被改过都算落不了（§2.5 不许牵连用户后来的编辑）。
  */
 export async function revertPptxDoc(targetPath: string, basePath: string, ops: SlideEditOp[]): Promise<PptxEditResult> {
   return await applyBatch(targetPath, basePath, "撤销", async (file) => {
-    for (const op of ops) {
-      // 撤销按内容寻址：前像要写回的那个部件必须还在包里，否则宁可不动磁盘（§2.5 不许猜）。
-      if ((await file.partText(op.partPath)) === undefined) {
-        return { ok: false, reason: `幻灯片 ${op.partPath} 在文件里已经找不到了。` };
-      }
-      revertSlideEdit(file, op);
-    }
-    return { ok: true, ops };
+    const { applied, skipped } = await revertSlideEdits(file, ops);
+    if (!applied.length) return { ok: false, reason: skipped.map((item) => item.reason).join("；") };
+    return { ok: true, ops: applied, skipped: skipped.map((item) => item.reason) };
   });
 }
 

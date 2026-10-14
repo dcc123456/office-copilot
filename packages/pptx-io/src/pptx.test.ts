@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, readPresentation, revertSlideEdit, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
+import { applySlideEdit, readPresentation, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -156,6 +156,64 @@ describe("pptx-io：结构化文字编辑 op + 撤销", () => {
     const badShape = await setShapeRunText(file, { partPath, shapeId: 999, paraIndex: 0, runIndex: 0 }, "x");
     expect(badShape.ok).toBe(false);
     if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
+  });
+});
+
+describe("pptx-io：撤销的现场核对（内容寻址，§2.5）", () => {
+  it("现场正是改完后的那个样子时，前像写回、这一页逐字回到改前", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const made = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "新标题");
+    if (!made.ok) throw new Error(made.reason);
+    applySlideEdit(file, made.op);
+
+    const outcome = await revertSlideEdits(file, [made.op]);
+    expect(outcome.applied).toEqual([made.op]);
+    expect(outcome.skipped).toEqual([]);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("同批两条改同一页：倒序送回时逐条现场对得上，整页一路回到改前", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const first = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "第一次");
+    if (!first.ok) throw new Error(first.reason);
+    applySlideEdit(file, first.op);
+    const second = await setShapeRunText(file, { partPath, shapeId: 3, paraIndex: 0, runIndex: 0 }, "第二次");
+    if (!second.ok) throw new Error(second.reason);
+    applySlideEdit(file, second.op);
+
+    const outcome = await revertSlideEdits(file, [second.op, first.op]);
+    expect(outcome.applied).toEqual([second.op, first.op]);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("这一页后来又被手工改过：那一条跳过并给理由，旧前像绝不覆盖后来的编辑", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const made = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "AI 改的");
+    if (!made.ok) throw new Error(made.reason);
+    applySlideEdit(file, made.op);
+    const manual = await setShapeRunText(file, { partPath, shapeId: 3, paraIndex: 0, runIndex: 0 }, "用户自己改的");
+    if (!manual.ok) throw new Error(manual.reason);
+    applySlideEdit(file, manual.op);
+    const beforeRevertAttempt = (await file.partText(partPath))!;
+
+    const outcome = await revertSlideEdits(file, [made.op]);
+    expect(outcome.applied).toEqual([]);
+    expect(outcome.skipped[0]!.reason).toContain("后来又被改过");
+    // op 记的是整页后像，而这一页后来又被改过，所以整条撤不动，用户那句"自己改的"一个字没丢。
+    expect((await file.partText(partPath))!).toBe(beforeRevertAttempt);
+  });
+
+  it("部件已经不在包里时给理由而不是抛异常", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const ghost = { partPath: "ppt/slides/slide9.xml", beforeXml: "<p:sld/>", afterXml: "<p:sld>x</p:sld>" };
+    const outcome = await revertSlideEdits(file, [ghost]);
+    expect(outcome.applied).toEqual([]);
+    expect(outcome.skipped[0]!.reason).toContain("已经找不到");
   });
 });
 

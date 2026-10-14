@@ -130,6 +130,8 @@ export interface PptxEditOutcome {
   /** 本次真正动过的幻灯片部件路径。 */
   changedParts?: string[];
   ops?: SlideEditOp[];
+  /** 撤销时没落地的条目理由（正向保存没有）：非空就是"部分撤销"，UI 得说实话（§2.5）。 */
+  skipped?: string[];
   presentation?: PresentationModel;
 }
 

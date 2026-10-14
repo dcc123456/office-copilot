@@ -596,9 +596,10 @@ export interface SlidePanelBridge {
    * 落地这一批改动（引擎坐标：部件路径 + shapeId + 段/run 序号）。
    *
    * @param edits 提案里能变成改动的条目，顺序即落地顺序。
+   * @param summary 一句中文说明这次改了什么，与这批 op 的前像一起进修改历史（`AGENTS.md` §2.5）。
    * @returns 主进程的回包（含刷新后的模型与 `changedParts`）；当前没有打开的文稿时 null。
    */
-  onCommit: (edits: PptxEditRequest[]) => Promise<PptxEditOutcome | null>;
+  onCommit: (edits: PptxEditRequest[], summary: string) => Promise<PptxEditOutcome | null>;
 }
 
 export function AIPanel({
@@ -1017,7 +1018,7 @@ export function AIPanel({
         return;
       }
       if (card.land.kind === "slide") {
-        const result = await slides?.onCommit(card.land.requests);
+        const result = await slides?.onCommit(card.land.requests, card.summary);
         if (!result || !result.ok || !result.presentation) {
           patchToolCard(id, (c) => ({
             ...c,

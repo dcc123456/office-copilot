@@ -73,6 +73,27 @@ describe("幻灯片出入口的落地与撤销", () => {
     expect(await titleOnDisk(file)).toBe("标题甲");
   });
 
+  it("撤销的凭据以现场为准：那一页后来又被改过时整条撤不动，磁盘一个字不动（§2.5）", async () => {
+    const file = await writeDeck("撤不动.pptx");
+    const first = await editPptxDoc(file, file, [{ kind: "text", target: TITLE_RUN, text: "第一批" }]);
+    expect(first.ok && first.ops).toHaveLength(1);
+    // 又落了第二批（同一页）：拿第一批的前像去撤，写回去就会把第二批的编辑一起抹掉。
+    const second = await editPptxDoc(file, file, [{ kind: "text", target: TITLE_RUN, text: "第二批" }]);
+    expect(second.ok).toBe(true);
+    expect(await titleOnDisk(file)).toBe("第二批");
+
+    const stale = await revertPptxDoc(file, file, first.ok ? first.ops : []);
+    expect(stale.ok).toBe(false);
+    if (stale.ok) return;
+    expect(stale.message).toContain("后来又被改过");
+    expect(await titleOnDisk(file)).toBe("第二批");
+
+    // 而最新那批的凭据照样能撤，撤完回到第一批的样子。
+    const fresh = await revertPptxDoc(file, file, second.ok ? second.ops : []);
+    expect(fresh.ok && titleOf(fresh.presentation)).toBe("第一批");
+    expect(await titleOnDisk(file)).toBe("第一批");
+  });
+
   it("同批里后面的改动看得到前面已落地的结果；任一条定位失败就整批不写盘", async () => {
     const file = await writeDeck("两批.pptx");
     const twice = await editPptxDoc(file, file, [

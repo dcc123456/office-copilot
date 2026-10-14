@@ -20,7 +20,7 @@ export interface SlideDeckProps {
   /** 上一次落地的那批改动还属于当前这份文件，撤销按钮才给点（前像只对那份文件有效）。 */
   canRevert: boolean;
   /** 落地这一批改动：与 AI 提案共用 `App.tsx` 那一个写盘口，主进程回包里带刷新后的模型。 */
-  onCommit: (edits: PptxEditRequest[]) => Promise<PptxEditOutcome | null>;
+  onCommit: (edits: PptxEditRequest[], summary: string) => Promise<PptxEditOutcome | null>;
   /** 撤销上一次落地的那批改动（逆序送回前像），回包同样带刷新后的模型。 */
   onRevert: () => Promise<PptxEditOutcome | null>;
 }
@@ -98,7 +98,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
   const saveEdits = useCallback(async () => {
     if (edits.length === 0) return;
     setIsBusy(true);
-    const saved = await onCommit(edits);
+    const saved = await onCommit(edits, `手工改了 ${edits.length} 处`);
     setIsBusy(false);
     if (!saved || !saved.ok || !saved.presentation) {
       if (saved?.message) toast(saved.message, "error");

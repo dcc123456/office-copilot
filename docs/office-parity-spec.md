@@ -343,13 +343,32 @@ pptx-io 原 26 条未改未减。
   但"部件清单逐条一致"这条保真标准不该靠它打折：根因是 `zip.file(path, content)` 会顺手合成父目录对象，
   三个 IO 包各写一次（`docx.ts:823`、`sheet-file.ts:414`、`pptx-file.ts:67`）→ 该把序列化收进 `@office-copilot/opc` 一份并带
   `createFolders: false`。
-**仍缺**：画布式选中与拖拽尺寸（本批是列表里的数字输入框，不是 WYSIWYG 拖拽）、notes/母版继承链解析（阶段 2 那条）、
-modlog 落盘。
+**仍缺**：画布式选中与拖拽尺寸（本批是列表里的数字输入框，不是 WYSIWYG 拖拽）、notes/母版继承链解析（阶段 2 那条）。
 
-### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字/字体/颜色 + 形状几何编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
+### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级四类编辑 op + 内容寻址撤销 + modlog 落盘已落（真 app 实测跨进程撤销）；结构 op（增删形状/层级）与历史面板的幻灯片渲染仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
-**实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op、modlog 落盘（渲染层与代理的提案卡装配已在阶段 5 落，真 app 实测）。
+**实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op，以及历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下）。
+**实测（modlog 落盘 + 内容寻址撤销这条已达标，本批新落）**：撤销的凭据不再只活在渲染层的内存批次里。
+`apps/desktop/src/slides/slideHistory.ts` 把每次落地那批 op（整页前/后像）连同 label/summary 写成一条 `幻灯片改动` 记录，
+存进**同一份** `userData/modlog/<文档名>.json`（复用 `electron/modlog.ts` 那四个通道，无第二套历史栈 = C5）；
+撤销走 `revertSlideEdits`→**从历史里取最新一条没撤销的记录**，`pickLatestSlideEdit` 与表格那条 `pickLatestSheetEdit` 同构。
+记录形状靠"每条 op 都带 `beforeXml`/`afterXml`"这个签名识别——文档的 `CoreOp` 与表格的 `SheetCoreOp` 都没有这两个字段，
+所以三类记录混在同一个文件里也不会互相认错。
+**现场核对下沉到引擎**：`pptx-io/edit.ts` 新增 `revertSlideEdits(file, ops)`，倒序逐条问"这一页现在是不是正是改完后的那个样子"
+（与 `op.afterXml` 逐字一致才写回前像），对不上就跳过并给中文理由；`pptxHandlers` 的成功回包因此多出 `skipped`，
+渲染层据此报"部分撤销（x/y）"而不是假装全回去了（§2.5）。
+**真 app 实跑**（`--user-data-dir=tmp/slide-modlog/profile`、这一批不涉及 LLM、CDP 驱动 dist）：
+第一轮在幻灯片面板改标题→点保存，toast「已保存，动了 1 张幻灯片」，磁盘标题变「重启后还能撤」，
+modlog 里出现 `{label:"幻灯片改动", summary:"手工改了 1 处", opCount:1, beforeXml 含"标题甲", undone:false}`；
+**把整个进程杀掉再重开同一份文件**，「撤销上一次保存」不再是禁用态（凭据在磁盘上，不在内存里），
+点下去 toast「已撤销上一次保存的那批改动」、磁盘回到「标题甲」、那条记录变 `undone:true`，按钮随即回到禁用（一条记录不许撤第二次）。
+单测：4 条引擎用例钉现场核对（一致才写回 / 同批两条改同一页能一路链回原样 / 那一页后来又被手工改过则整条撤不动且"用户自己改的"一个字不丢 /
+部件已不在包里给理由不抛异常），1 条出入口用例钉"拿旧批次撤不动、最新那批照旧能撤"，6 条记录层用例钉三类记录互不认错与按 ts 取最新。
+**没有新增第二条撤销通道**：手工保存与 AI 提案仍共用 `App.tsx` 那一个落地口，历史里也只有那一个来源。
+**历史面板这一批故意没动**：`HistoryPanel` 现在把所有记录都按文档记录渲染（`describeCoreOp` 对幻灯片 op 返回 undefined，
+逐条改动列表是空的，且那个「撤销这次修改」按钮接的是 Tiptap 那条撤销），幻灯片记录要进面板得先按格式分派——
+而该文件正带着 dcc 未提交的改动，改它会撞车，所以本批只把记录与撤销做扎实，AI 提案卡上的幻灯片那张仍不给「查看修改历史」入口。
 **"改完的 `.pptx` 会不会被办公软件判损坏"现在有机检面**（与 sheet 侧 `oc sheet check` 同源）：与格式无关的五条判定（内容类型覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、部件里 `r:id` 查得到）从 `sheet-io/compat-audit.ts` 上抽到 `@office-copilot/opc` 的 `auditOpcPackage`（`AGENTS.md` §3.2：`.xlsx`/`.pptx` 共用，不许长第二套；`localName` 同时抽进 `opc/xml.ts`），`auditXlsxPackage` 只留 `<worksheet>` 顺序与 `<c:chart>` 两条专属判定——**sheet-io 245 条单测一条没改、一条没减**，证明这次抽取是行为等价的。`.pptx` 专属两条落 `pptx-io/audit.ts` 的 `auditPptxPackage`：`<p:sld>` 里必须有 `cSld > spTree`（cSld 是 Part 1 §19.3.1.16，"最小一张幻灯片"要 `CommonSlideData` 里套 `ShapeTree` 出自 Learn "Working with presentation slides"）、幻灯片必须有一条指向 slideLayout 的内部关系（同页原话把 SlideLayout 关联列为必须，**ISO 正文里没有对应 MUST**；Target 是否存在由通用那条覆盖）。条款号初稿凭记忆写过 §19.3.1.9/.10/.2，已按官方一手页复核改过（见 D10 的复核记录）。7 条新单测（合规包 0 条 / 未登记部件 / 空 `cSld` / 无关系表 / 版式关系指向缺失部件 / 夹具与改后产物各自 0 条）。**本机实测**：python-pptx 1.0.2 生成的真实 **40 部件** deck 审计返回 `[]`（对第三方产物零误报），`setShapeRunText` 改标题后的写回同样 `[]` 且 `changedParts` 只有 `ppt/slides/slide1.xml`，python-pptx 读回标题为"改过的标题"、页数 2 未变。
 
 ### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 pptx-tools + slideAgent（含 12 条单测）+ 桌面提案卡装配已落；真端点模型行为探针仍缺`
@@ -362,7 +381,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 页号/形状号/段号/run 号对不上现场模型的**逐条不交出并给中文理由**（"没有第 9 页""没有 shapeId=99""越界（只有 1 段）""没有文字体""文字来自字段"），而不是整批静默不落；上送首条消息带结构画像并说清单位与截断规则（25 页只描述前 20 页，§2.9）；暂停留在两轮之间、`messages` 原样攒着供「继续」复用；8 轮封顶。
 **真 app 实跑（`tmp/slide-ai-app-probe.mjs`，端点是本机 8899 桩 + 假 Key，验装配面不是模型行为）**：打开 `tmp/slide-ai/probe.pptx` → 幻灯片视图 + 那条幻灯片引导语 + 幻灯片专属 placeholder，文档的快捷指令入口不出现（`chips:0`）；发一句"把第 1 页标题改成 Q3 复盘，正文里『粗』那一截标红" → 卡片头写 **2 处改动**（只算能落的两条）、清单里三条都念出来、越界那条后面跟 `· 没有第 9 页（这份文稿共 2 页），这条跳过。`；点「应用到幻灯片」→ 卡上出现"已写入 1 张幻灯片。要回退请在幻灯片面板点「撤销上一次保存」。"，磁盘 `slide1.xml` 的标题 run 变 `Q3 复盘`、`srgbClr val="C00000"` 只出现在第 1 截 run 上（`正文丙`/`细` 两截原样，§2.3 没被拍平），标题栏脏点**不出现**（落地当场写盘，内存没有待存改动），幻灯片面板的「撤销上一次保存」由禁用变可点；点它 → toast"已撤销上一次保存的那批改动"，磁盘回到 `标题甲` 且 `colors: []`。
 **表格那半边没被这次泛化改坏（`tmp/sheet-ai-app-probe.mjs`，同一只桩）**：表格引导语/placeholder/无快捷指令都在；`sheet_create_chart` 回来的图表卡显示"1 张图表 + 引用与数值都由引擎从现场表读"、`ChartPreview` 的 canvas 在、点「插入图表」只排进待写清单并置脏（dirty=true），文案如实说"撤销栈管不到图表"；`sheet_submit_proposal` 回来的改动卡"2 处改动 · C2 ← 999 · B5 ← 华南"，点「应用到表格」后网格当场是 `999`/`华南`，且 `D3` 的 `SUM(C2:C5)` 缓存值跟着重算成 2269（§2.11），卡上给「查看修改历史」。
-**仍缺**：真端点探针看模型会不会点对 `ppt_*` 工具名与形状 id（B5）、pptx 的 modlog 落盘（阶段 4）。
+**仍缺**：真端点探针看模型会不会点对 `ppt_*` 工具名与形状 id（B5）。pptx 的 modlog 落盘已在阶段 4 收掉。
 
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
@@ -386,7 +405,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | 1 | 新包 `packages/opc`；`packages/sheet-io/src/opc.ts`（删）、`packages/docx-io/src/docx.ts`（改依赖） | 见 D2 的顺序红线 |
 | 2 | `packages/pptx-io/src/{pptx-file,pptx-model,placeholder-inherit,units,color,compat-audit}.ts` | 单位换算单点：D4 |
 | 3 | `apps/desktop/src/App.tsx`（模式枚举，已落）、`apps/desktop/src/slides/**`（视图 + `slideDeckModel.ts`，已落）、`electron/pptxHandlers.ts`（照 `sheetHandlers.ts` 的 `.bak` + 存前审计，已落） | §5.2 preload 白名单同步；落点与初稿写的 `src/slide/**`+`slideHandlers.ts` 的差别见 D7 的"已落" |
-| 4 | `packages/pptx-io/src/slide-edit.ts`（op + 逆操作）、`apps/desktop/src/slide/slideHistory.ts` | 复用 modlog，不新建历史栈 |
+| 4 | `packages/pptx-io/src/edit.ts`（op + 逆操作 + 现场核对）、`apps/desktop/src/slides/slideHistory.ts` | 复用 modlog，不新建历史栈；落点与初稿写的 `slide-edit.ts`/`src/slide/` 的差别同 D7 的"已落" |
 | 5 | `packages/agent-tools`（新，D6）、`packages/ppt-tools`、`apps/desktop/src/ai/slideAgent.ts` | 工具循环复用 `ai:tool-turn` |
 | 6 | `packages/pptx-io/src/chart-spec.ts` + 复用 `packages/sheet-io` 公开入口 | D9 |
 | 7 | `packages/pdf-io/src/{pdf-file,content-stream,xref,text-map}.ts`、`apps/electron/printHandlers.ts` | D8 甲档 |
@@ -422,8 +441,12 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 ### C. 可撤销性与历史（对应 §2.5）
 - `[x]` C1 每类 op 有逆操作单测（文字/字体/颜色/几何四条：`pptx-io` 的 `apply`/`revert` 用例 + `pptxHandlers.test.ts` 的「撤销回到标题甲」）；
 - `[ ]` C2 内容寻址用 `creationId`，位置漂移不失效（现在仍按 `cNvPr @id` 定位，D5 的 GUID 那条未做）；
-- `[ ]` C3 撤销不牵连用户后来的手工编辑；C4 做不到时如实报"部分撤销"。
-- `[ ]` C5 复用同一份 modlog，无第二套历史栈。
+- `[x]` C3 撤销不牵连用户后来的手工编辑；C4 做不到时如实报"部分撤销"。**实测（本批）**：`revertSlideEdits` 逐条比现场与 `op.afterXml` 逐字一致才写回前像，
+  那一页后来又被改过就整条跳过并给理由（引擎单测钉住"用户自己改的"一个字不丢），出入口用例钉"拿旧批次撤不动、磁盘一个字不动、最新那批照旧能撤"；
+  `pptxHandlers` 成功回包带 `skipped`，`App.tsx` 据此 toast「部分撤销（x/y）：理由」。撤不动时宁可整条不落，绝不猜位置。
+- `[x]` C5 复用同一份 modlog，无第二套历史栈。**实测（本批）**：幻灯片记录经 `slideHistory.ts` 写进 `electron/modlog.ts` 那四个通道（同一份 `userData/modlog/<文档名>.json`），
+  记录判定靠 op 的 `beforeXml`/`afterXml` 签名，与文档、表格两类记录混放互不认错（`slideHistory.test.ts` 6 条）；
+  真 app 里杀掉进程重开后撤销按钮仍可点、撤销成功、记录转 `undone:true`（阶段 4 的实测段）。
 
 ### D. UI 与工程（对应 §3/§4/§5）
 - `[x]` D1 `App.tsx` 的 `isSheet` 已换成模式枚举（`EditorMode`：九处文档门控与 `isSheet || isDeck` 全改），无新增布尔门控；三种模式在真 app 里各跑一遍确认没改坏表格与文档视图（阶段 3 的实测段）。
@@ -437,6 +460,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 - `[x]` E1 每条写入路径有单测（本批：`slideDeckModel.test.ts` 4 条钉住「哪些段落会被写进文件」，视图本身不装配落地逻辑），**逐包核对通过数**（`packages/shared` 无测试是已知假绿源）。
 - `[x]` E2 `pnpm build`（含 `tsc --noEmit`）+ `pnpm test` 重定向后读退出码，不许管道 tail。本批两次都是 `EXIT=0`，且 build 真抓到一处联合类型窄化缺陷（`slideDeckModel.test.ts` 里 `edit.target.paraIndex`）。
   阶段 5 这批的门禁：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包通过数 `opc 15 / sheet-tools 12 / pptx-tools 15 / pptx-io 37 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / desktop 478`（合计 1119；`packages/shared` 仍无测试文件，是已知假绿源）。
+  阶段 4 的 modlog 落盘这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 15 / **pptx-io 41**（+4 条现场核对）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 485**（+6 条记录层 +1 条出入口）`，合计 **1130**。
 - `[x]` E3 视觉验收走 Keynote PNG 导出通道并报告看到的文字内容：`keynote-out.001.png` 第一页居中黑字「Keynote 要看到的第一页标题」+ 下方灰色「正文一行」，`002.png` 第二页「第二页标题」原样（阶段 3 实测段）。
 - `[ ]` E4 探针与夹具产物只进 `tmp/` 并清理；禁止 `git add -A`。
 

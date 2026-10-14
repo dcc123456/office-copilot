@@ -210,6 +210,48 @@ export function revertSlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.beforeXml);
 }
 
+/** 一条逆操作没能落地的记录，UI 据此报"部分撤销（x/y）"（与 sheet 侧 `SheetSkippedOp` 同形）。 */
+export interface SlideSkippedRevert {
+  op: SlideEditOp;
+  reason: string;
+}
+
+/** 一批撤销的结果。`applied` 为空表示磁盘上不该动（要么全对不上，要么批是空的）。 */
+export interface SlideRevertOutcome {
+  /** 真正写回前像的那些 op，顺序与传入的一致（调用方按逆序传入）。 */
+  applied: SlideEditOp[];
+  skipped: SlideSkippedRevert[];
+}
+
+/**
+ * 一批撤销的现场核对 + 落地：只把"这一页现在正是改完后的那个样子"的那些 op 的前像写回。
+ *
+ * 内容寻址在这里落到**逐页**判定（`AGENTS.md` §2.5）：一页后来又被手工改过，那一条就跳过并给理由，
+ * 绝不能拿旧前像覆盖用户后来的编辑。整批 abort 只发生在"一条都落不了"时——那时磁盘一个字都不动。
+ *
+ * @param file 读写器（对着磁盘当前那份打开的）。
+ * @param ops 之前落地时带回来的那批 op，**按逆序**传入（最后改的先回）。
+ * @returns `{ applied, skipped }`：部件已不在包里、或现场与后像逐字不一致的条目进 `skipped`。
+ */
+export async function revertSlideEdits(file: PptxFile, ops: SlideEditOp[]): Promise<SlideRevertOutcome> {
+  const applied: SlideEditOp[] = [];
+  const skipped: SlideSkippedRevert[] = [];
+  for (const op of ops) {
+    const current = await file.partText(op.partPath);
+    if (current === undefined) {
+      skipped.push({ op, reason: `幻灯片 ${op.partPath} 在文件里已经找不到了。` });
+      continue;
+    }
+    if (current !== op.afterXml) {
+      skipped.push({ op, reason: `这一页（${op.partPath}）后来又被改过，回滚会牵连那些编辑。` });
+      continue;
+    }
+    revertSlideEdit(file, op);
+    applied.push(op);
+  }
+  return { applied, skipped };
+}
+
 /** `locateShape` 的成功结果：部件原文、解析好的根与目标形状元素。 */
 type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element } | { ok: false; reason: string };
 

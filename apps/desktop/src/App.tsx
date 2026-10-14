@@ -50,9 +50,10 @@ import { HistoryPanel } from "./components/HistoryPanel.js";
 import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
-import type { PptxEditRequest, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel } from "@office-copilot/pptx-io";
 import { SlideDeck } from "./slides/SlideDeck.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
+import { pickLatestSlideEdit, slideEditRecordOf } from "./slides/slideHistory.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
 import { ToastHost, toast } from "./components/ui/Toast.js";
 import { usePanelResize } from "./hooks/usePanelResize.js";
@@ -143,12 +144,12 @@ export function App() {
    */
   const [deck, setDeck] = useState<PresentationModel | null>(null);
   /**
-   * 上一次幻灯片落地那批 op 的前像，连同它属于哪个文件（`path`）。
+   * 幻灯片面板「撤销上一次保存」的可用态：当前这份 `.pptx` 的修改历史里还有没撤销的批次才给点。
    *
-   * 记住文件是因为前像只对那份文件有效：换一份 `.pptx` 后还拿旧批次去撤销，会把上一份的 XML 写进当前文件。
-   * 手工视图与 AI 提案共用这一个批次（spec 阶段 3、5）。
+   * 批次的前像不再留在内存里——它已经落进 `userData/modlog/<文档名>.json`（spec 阶段 4 的 modlog 落盘），
+   * 所以关掉重开这份文件也还能撤销，按钮可用态同样是从历史里问出来的。
    */
-  const [lastSlideBatch, setLastSlideBatch] = useState<{ path: string; ops: SlideEditOp[] } | null>(null);
+  const [hasSlideUndo, setHasSlideUndo] = useState(false);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -194,10 +195,29 @@ export function App() {
     setCanRevert(plan.runs.length > 0);
   }, []);
 
+  /**
+   * 重读修改历史，刷新幻灯片面板「撤销上一次保存」的可用态：还有没撤销的幻灯片批次才给点。
+   *
+   * 与上面那条 `refreshCanRevert` 同一个套路（`AGENTS.md` §3.1 按能力复用）：可用态从 modlog 问出来，
+   * 不在渲染层另攒一份内存批次，所以重开这份 `.pptx` 也还能接着撤销（spec 阶段 4 的 modlog 落盘）。
+   *
+   * @param docKey 当前文档键（打开的 `.pptx` 路径）。
+   */
+  const refreshSlideUndo = useCallback(async (docKey: string) => {
+    setHasSlideUndo(Boolean(pickLatestSlideEdit(await window.officeCopilot.listModifications(docKey))));
+  }, []);
+
   // 打开/另存/新建都会换 docKey，历史记录跟着文档走，所以按 docKey 重查一次。
   useEffect(() => {
     void refreshCanRevert(filePath ?? "未命名文档");
   }, [filePath, refreshCanRevert]);
+
+  // 幻灯片那条只在换文件时重查：`deck` 不进依赖数组，因为每次落地都会换 deck，
+  // 而历史记录是异步追加的——落地后立刻重查会抢在写入前读到空，把撤销按钮错禁用（可用态改由 commit/revert 自己更新）。
+  useEffect(() => {
+    if (!deck) return;
+    void refreshSlideUndo(filePath ?? "未命名文档");
+  }, [filePath, refreshSlideUndo]);
 
   useEffect(() => {
     const open = () => setSettingsOpen(true);
@@ -559,22 +579,29 @@ export function App() {
   );
 
   /**
-   * 幻灯片改动的唯一落地口（spec 阶段 3、4）：把手工草稿与 AI 提案这两路合成的同一条请求交给主进程。
+   * 幻灯片改动的唯一落地口（spec 阶段 3、4、5）：把手工草稿与 AI 提案这两路合成的同一条请求交给主进程。
    *
    * 主进程按数组顺序逐条现做 op（同一部件上后一条能看到前一条的结果）、过结构审计、原子写盘，
    * 并把这批 op 的前像带回来当作下一次撤销的凭据（§2.5 内容寻址）。
    * 视图与代理都不自己攒 op、也不各开第二条写盘通道（§3.2）。
    *
    * @param edits 要落地的一批改动，坐标已是引擎侧的部件路径 + shapeId + 段/run 序号。
+   * @param summary 一句中文说明这次改了什么，随前像一起进 `userData/modlog/<文档名>.json`（§2.5 留痕）。
    * @returns 主进程的回包（含刷新后的模型与 `changedParts`）；当前没有打开的演示文稿时 null，调用方据此报"没写入"。
    */
   const commitSlideEdits = useCallback(
-    async (edits: PptxEditRequest[]) => {
+    async (edits: PptxEditRequest[], summary: string) => {
       if (!filePath || !deck || edits.length === 0) return null;
       const saved = await window.officeCopilot.editPptx({ path: filePath, edits });
       if (saved.ok && saved.presentation) {
         setDeck(saved.presentation);
-        setLastSlideBatch({ path: filePath, ops: saved.ops ?? [] });
+        setHasSlideUndo(true);
+        void window.officeCopilot
+          .appendModification({ docKey: filePath, record: slideEditRecordOf(saved.ops ?? [], summary) })
+          .then((recorded) => {
+            // 历史没写进去不回滚用户已经落盘的改动，只说一声——与表格那条同口径。
+            if (!recorded.ok) toast(`改动已落盘，但历史记录保存失败：${recorded.message ?? "未知错误"}`, "error");
+          });
       }
       return saved;
     },
@@ -582,19 +609,27 @@ export function App() {
   );
 
   /**
-   * 撤销上一次幻灯片保存的那批改动：把带回来的 op **逆序**送回，后落地的先写回前像（§2.5）。
+   * 撤销最近一次幻灯片落地的那批改动：从修改历史里取最新一条没撤销的幻灯片记录，把 op **逆序**送回主进程（§2.5）。
    *
-   * @returns 主进程的回包；当前文件没有对应的待撤销批次时 null（换过文件就不算，别把上一份的前像写进现在这份）。
+   * 撤销凭据以磁盘上的历史为准，不是内存批次——所以关掉重开这份 `.pptx` 也还能回退（spec 阶段 4 的 modlog 落盘）。
+   * 逐页现场核对在主进程做：那一页后来又被改过就跳过并给理由，绝不拿旧前像覆盖用户后来的编辑。
+   *
+   * @returns 主进程的回包（`skipped` 非空即"部分撤销"，这里补一条中文）；历史里没有可撤销的幻灯片批次时回 ok:false + 一句理由。
    */
   const revertSlideEdits = useCallback(async () => {
-    if (!filePath || lastSlideBatch?.path !== filePath || !lastSlideBatch.ops.length) return null;
-    const reverted = await window.officeCopilot.revertPptx({ path: filePath, ops: [...lastSlideBatch.ops].reverse() });
-    if (reverted.ok && reverted.presentation) {
-      setDeck(reverted.presentation);
-      setLastSlideBatch(null);
+    if (!filePath || !deck) return { ok: false, message: "当前没有打开的演示文稿，没有可撤销的幻灯片改动。" };
+    const record = pickLatestSlideEdit(await window.officeCopilot.listModifications(filePath));
+    if (!record) return { ok: false, message: "这份文稿还没有可撤销的改动。" };
+    const reverted = await window.officeCopilot.revertPptx({ path: filePath, ops: [...record.ops].reverse() });
+    if (!reverted.ok || !reverted.presentation) return reverted;
+    setDeck(reverted.presentation);
+    await window.officeCopilot.patchModification({ docKey: filePath, id: record.id, patch: { undone: true, undoneAt: Date.now() } });
+    await refreshSlideUndo(filePath);
+    if (reverted.skipped?.length) {
+      toast(`部分撤销（${(reverted.ops ?? []).length}/${record.ops.length}）：${reverted.skipped.join("；")}`, "error");
     }
     return reverted;
-  }, [filePath, lastSlideBatch]);
+  }, [deck, filePath, refreshSlideUndo]);
 
   const handleSave = useCallback(async () => {
     // 幻灯片那条路自己带「保存」：待保存的草稿在 SlideDeck 里，不走这两个全局入口（spec 阶段 3）。
@@ -1216,7 +1251,7 @@ export function App() {
   const slideBridge = deck
     ? {
         deck,
-        canRevert: Boolean(filePath && lastSlideBatch?.path === filePath && lastSlideBatch.ops.length),
+        canRevert: hasSlideUndo,
         onCommit: commitSlideEdits,
         onRevert: revertSlideEdits,
       }
