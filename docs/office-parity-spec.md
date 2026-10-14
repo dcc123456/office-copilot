@@ -243,10 +243,12 @@ D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
 **实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op、modlog 落盘、渲染层提案卡装配。
 
-### 阶段 5 · AI 工具面 + `slideAgent` — `[ ]`
+### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 packages/pptx-tools 已落（schema + JSON Schema + 永不抛异常校验）；slideAgent 装配与真端点探针仍缺`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。
+**D6 落定**：不新建 `packages/agent-tools`、也不塞进 `packages/shared`，而是**照 `word-tools`/`sheet-tools` 的先例每格式一个工具面包** → 新建 `packages/pptx-tools`（纯 `zod`，不 import `pptx-io`，与既有两包同构）。工具面含 `ppt_describe`/`ppt_read_slide_text`（读，页/形状/段/run 由引擎从现场文件列）与 `ppt_submit_proposal`（写，四类：`set_run_text`/`set_run_font`/`set_run_color`/`set_shape_geometry`，一一对应 `pptx-io/edit.ts` 的四个带逆操作 op）。坐标是模型视角：页号 1 基、shapeId 取自 describe、段/run 0 基；单位说在描述里（字号 pt、几何 px，换算留在引擎边 §2.1）；跨字段"至少给一项"约束放外层 `superRefine`（`discriminatedUnion` 不接受被 `.refine` 包的成员）。
 **完成判定**：单测（mock fetch）覆盖"模型给数字/给原始 XML/给越界索引都要回中文理由"；真端点探针实测模型会不会点对工具、
 落地后 Keynote PNG 里文字真的变了。
+**实测（工具面校验这条已达标）**：`packages/pptx-tools` 15 条单测覆盖坏 JSON / 缺字段 / 多字段(strict) / 越界(页号 0、字号 401、宽 0、文 2001 字) / 未知 type / font-与-geometry 不给任何属性 → 全部回中文理由、绝不抛异常；并断言每个 `PPTX_TOOLS` 定义都能在同名 schema 表里找到（不给模型一个校验不了的口子）。**仍缺**：桌面 `slideAgent` 把 `slideNumber`→部件路径、把校验过的入参调四个引擎 op 的装配；真端点探针看模型行为。
 
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
@@ -335,7 +337,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
    这三条各配一条单测与一条"如实拒绝"的文案，不许用"看起来改了"糊过去。
 5. **我们自产的 PDF 中文已经是坏的**（D8 首段，实测 FreeType 拒绝字体程序、Apple 渲染成原始字形）——
    这是既有缺陷，不是新线引入的，**排在 pdf 编辑之前修**（验收 A10）。
-6. **未决**：`packages/agent-tools` 与落到 `packages/shared` 二选一（D6），阶段 5 前定。
+6. **已决**：D6 工具面每格式一个包（照 `word-tools`/`sheet-tools` 先例）→ 新建 `packages/pptx-tools`，不合并成 `packages/agent-tools`、不塞进 `packages/shared`（见阶段 5）。
 
 ---
 
