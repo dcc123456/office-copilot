@@ -177,15 +177,35 @@ const SortRowsEdit = z
   })
   .strict();
 
-/** 提案里的一条改动。刻意只留这五类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
+/**
+ * 一条把整列数字格式统一成某个格式的请求（spec 决策 D10）。
+ *
+ * 逐格的展开由引擎的 `numberFormatColumnOps` 完成，这里只交列与格式码；模型不许逐格报"这格该显示成什么"（§2.11）。
+ */
+const SetNumberFormatEdit = z
+  .object({
+    type: z.literal("set_number_format"),
+    column: ColumnRef,
+    format: z
+      .string()
+      .min(1)
+      .max(30)
+      .describe(
+        "目标数字格式码，只能是我们认得的这些：General、0、0.00、#,##0、#,##0.00、0%、0.00%、m/d/yyyy，" +
+          "小一位数的 0.0 与 0.0%，以及日期时间的自定义写法（如 yyyy-mm-dd）。表外的码引擎会整条拒掉并说明原因。",
+      ),
+  })
+  .strict();
+
+/** 提案里的一条改动。刻意只留这六类：它们各自有安全的逆操作（AGENTS.md §2.5）。 */
 export const SheetEdit = z
-  .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit, SortRowsEdit]);
+  .discriminatedUnion("type", [SetCellEdit, SetColumnWidthEdit, InsertRowsEdit, DeleteRowsEdit, SortRowsEdit, SetNumberFormatEdit]);
 
 /**
  * `sheet_submit_proposal` 的入参。
  *
- * 排序后来按 spec 决策 D7 单独立项补成了 `sort_rows`；**仍不在这里**的是拆合列与统一数字格式
- * （见 spec §七"整理写侧缺 op"），模型只能提这五项。
+ * 排序后来按 spec 决策 D7 单独立项补成了 `sort_rows`，统一数字格式按 **D10** 补成了 `set_number_format`；
+ * **仍不在这里**的是拆合列（D9 第 3 条要求它展开成既有 op 的复合批，代码未起），模型只能提这六项。
  */
 export const SubmitProposalArgs = z
   .object({
@@ -394,7 +414,7 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
     function: {
       name: "sheet_submit_proposal",
       description:
-        "把你打算对表格做的修改打包成提案返回。用户会看到逐条改动与跳过原因并确认后才落地。一次回答只提交一份提案。改格用 set_cell（文本以 = 开头当公式），列宽用 set_column_width（px），整行用 insert_rows / delete_rows，按一列重排整行用 sort_rows（只交区域与键列，行序由引擎算）；拆合列、统一数字格式现在提不了。",
+        "把你打算对表格做的修改打包成提案返回。用户会看到逐条改动与跳过原因并确认后才落地。一次回答只提交一份提案。改格用 set_cell（文本以 = 开头当公式），列宽用 set_column_width（px），整行用 insert_rows / delete_rows，按一列重排整行用 sort_rows（只交区域与键列，行序由引擎算），整列统一数字格式用 set_number_format（只交列与格式码，逐格由引擎按现场判定展开）；拆合列现在提不了。",
       parameters: {
         type: "object",
         properties: {
@@ -439,6 +459,12 @@ export const SHEET_TOOLS: SheetToolDefinition[] = [
                     order: { type: "string", enum: ["asc", "desc"], default: "asc" },
                   },
                   required: ["type", "range", "column"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: { type: { const: "set_number_format" }, column: { type: "string" }, format: { type: "string" } },
+                  required: ["type", "column", "format"],
                   additionalProperties: false,
                 },
               ],

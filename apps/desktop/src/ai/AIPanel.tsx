@@ -179,6 +179,8 @@ function sheetEditLines(edits: readonly SheetEditT[]): string[] {
         return `删掉第 ${[...edit.rows].sort((left, right) => left - right).join("、")} 行`;
       case "sort_rows":
         return `把 ${edit.range.toUpperCase()} 这些行按 ${edit.column} 列${edit.order === "desc" ? "从大到小" : "从小到大"}重排`;
+      case "set_number_format":
+        return `把 ${edit.column} 列的数字格式统一成 ${edit.format}`;
     }
   });
 }

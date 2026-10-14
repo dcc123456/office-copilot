@@ -17,6 +17,8 @@ import {
   findRows,
   formatA1,
   insertTracksOp,
+  numberFormatColumnOps,
+  numberFormatFromCode,
   readRange,
   resolveChartSpec,
   resolveColumnRef,
@@ -42,13 +44,15 @@ const MAX_TOOL_TURNS = 8;
 
 const SHEET_SYSTEM = `你是 Excel 表格代理，看得见的是当前工作表的结构摘要与前若干行样本，不是整张表。
 - 要数字就先调工具：sheet_describe / sheet_read_range / sheet_aggregate / sheet_find / sheet_duplicates。不许凭样本心算整表结论。
-- 要改表只能调 sheet_submit_proposal，条目只有 set_cell、set_column_width、insert_rows、delete_rows、sort_rows 五种；
+- 要改表只能调 sheet_submit_proposal，条目只有 set_cell、set_column_width、insert_rows、delete_rows、sort_rows、set_number_format 六种；
   行号与列引用必须来自前面工具的回包，不许自己数行号。提案经用户确认才会落地。
 - 要出图调 sheet_create_chart，只报区域（类别轴 + 每条系列的数值区域 + 落点那一格），数字一律由引擎读表得到；
   一张表只能挂一个图表，区域取不到数时引擎会回一句理由，改区域再调。经用户确认后才会随文件保存。
 - 排序用 sort_rows：只交数据行区域（不含表头那一行）与键列，新的行序由引擎算，不许自己报次序。
   区域必须盖住一条记录的全部格子；带里有公式、或这些行在区域外还有内容时引擎会拒绝，照它给的理由改区域或直说做不了。
-- 拆合列、统一数字格式这些这里做不了，遇到就直说做不了，别绕着改坏用户的表。
+- 整列统一数字格式用 set_number_format：只交列与格式码（如 0.00%），逐格怎么改由引擎按现场判定，文本格与格式已对的格不会动。
+  格式码不在我们认得的表里会被拒，照它给的理由换码。
+- 拆合列这些这里做不了，遇到就直说做不了，别绕着改坏用户的表。
 - 纯分析的问题直接回答，不要为了回答去提提案。回答用中文，带上你实际查到的数字。`;
 
 /** `runSheetAgent` 的输入。 */
@@ -230,6 +234,23 @@ export function sheetOpsOfProposal(
         const made = sortRowsOp(sheet, { range: edit.range, column: edit.column, order: edit.order, hasHeader });
         if (made.ok) ops.push(made.op);
         else notes.push(`这条排序没落地：${made.reason}`);
+        break;
+      }
+      case "set_number_format": {
+        // 逐格的展开在引擎（§3.3、§2.11）：这里只把列与格式码交过去，认不出的码整条拒。
+        const colIndex = resolveColumnRef(sheet, edit.column, hasHeader);
+        if (colIndex === null) {
+          notes.push(`认不出列「${edit.column}」，那条数字格式跳过。`);
+          break;
+        }
+        const format = numberFormatFromCode(edit.format);
+        if (!format) {
+          notes.push(`格式码「${edit.format}」我们不认得，这条数字格式跳过（只认 General、0、0.00、#,##0、#,##0.00、0%、0.00%、m/d/yyyy、yyyy-mm-dd 这些写法）。`);
+          break;
+        }
+        const made = numberFormatColumnOps(sheet, colIndex, format);
+        if (!made.ops.length) notes.push(`${edit.column} 列没有需要改数字格式的格子（文本格与格式已对的格都不动）。`);
+        ops.push(...made.ops);
         break;
       }
     }
