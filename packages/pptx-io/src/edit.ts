@@ -1,5 +1,5 @@
 /**
- * `.pptx` 结构化编辑 op：改某个形状某段某 run 的文字、字体或颜色，产出可撤销的前/后像。
+ * `.pptx` 结构化编辑 op：改某个形状某段某 run 的文字、字体、颜色，改形状的位置/尺寸与叠放次序，产出可撤销的前/后像。
  *
  * 与 `sheet-io` 的 `runSheetOps`/`revertSheetOps` 同一套契约（`AGENTS.md` §2.8、§3 不许第二套撤销栈）：
  * 引擎只**产出提案**（带 `beforeXml`/`afterXml` 的 op），落地与撤销由上层在用户确认后调用 `apply`/`revert`。
@@ -47,7 +47,7 @@ export interface RunFontFormat {
 
 const SHAPE_HOST_TAGS = ["p:sp", "p:pic", "p:graphicFrame", "p:grpSp"];
 
-/** 目标形状的定位坐标（几何 op 只到形状粒度，不需要段/run）。 */
+/** 目标形状的定位坐标（几何与叠放两条 op 只到形状粒度，不需要段/run）。 */
 export interface ShapeGeometryTarget {
   /** 幻灯片部件路径。 */
   partPath: string;
@@ -55,8 +55,11 @@ export interface ShapeGeometryTarget {
   shapeId: number;
 }
 
+/** 叠放方向：`up`/`down` 相邻挪一层，`top`/`bottom` 直接到两端（PowerPoint 功能区的那四个按钮）。 */
+export type SlideLayerDirection = "up" | "down" | "top" | "bottom";
+
 /**
- * 一条要落地的幻灯片改动：`kind` 与本文件那四个 op 生产者一一对应，坐标原样交给它们。
+ * 一条要落地的幻灯片改动：`kind` 与本文件那五个 op 生产者一一对应，坐标原样交给它们。
  *
  * 这是**跨界契约**（渲染层 → 主进程）放在引擎侧的理由：两边都按它构造与解析，
  * 写第二份就会有人改一边忘一边（`AGENTS.md` §3.2）。里面只有坐标与值，没有幻灯片原文，
@@ -66,7 +69,8 @@ export type PptxEditRequest =
   | { kind: "text"; target: ShapeRunTarget; text: string }
   | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
   | { kind: "color"; target: ShapeRunTarget; hex: string }
-  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch };
+  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch }
+  | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection };
 
 /** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
 export interface PptxEditPayload {
@@ -191,10 +195,54 @@ export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarg
 }
 
 /**
+ * 产出一条"沿叠放次序移动指定形状"的编辑提案，**不落地**。
+ *
+ * 叠放次序就是 `<p:cSld><p:spTree>` 里形状子元素的文档顺序：第一个画在最底下、最后一个画在最顶上。
+ * 依据（spec 阶段 4 记的一手来源）：ECMA-376 Part 1 §19.3.5 `CT_GroupShape` 规定 spTree 的子元素序列
+ * 为 `p:nvGrpSpPr`、`p:grpSpPr`，其后是 `p:sp`/`p:grpSp`/`p:graphicFrame`/`p:cxnSp` 的 choice；
+ * 遮挡语义由 python-pptx 的 `src/pptx/shapes/shapetree.py` 写明——
+ * "The first shape in the sequence is the backmost in z-order and the last shape is topmost."
+ * 所以这里**只重排子元素、不写任何属性**，那两个非形状子元素与节点间的空白留在原位。
+ *
+ * @param file 已打开的读写器。
+ * @param target 形状定位坐标（部件路径 + 形状号）。
+ * @param direction `up`/`down` 挪一层，`top`/`bottom` 直接到两端。
+ * @returns `{ ok, op }`：这一页没有形状树、找不到形状，或**已经在那一端**（再挪是一次空改动，不值得落盘）时 `{ ok:false, reason }`。
+ */
+export async function moveShapeLayer(file: PptxFile, target: ShapeGeometryTarget, direction: SlideLayerDirection): Promise<SlideEditResult> {
+  const located = await locateShape(file, target);
+  if (!located.ok) return located;
+  const spTree = shapeTreeOf(located.root);
+  if (!spTree) return { ok: false, reason: `这一页没有形状树（<p:spTree>）：${target.partPath}` };
+  const hosts = children(spTree).filter((el) => SHAPE_HOST_TAGS.includes(el.name));
+  const at = hosts.indexOf(located.shape);
+  const order = [...hosts];
+  if (direction === "up") {
+    if (at === hosts.length - 1) return { ok: false, reason: "这个形状已经在最顶层。" };
+    order.splice(at, 1);
+    order.splice(at + 1, 0, located.shape);
+  } else if (direction === "down") {
+    if (at === 0) return { ok: false, reason: "这个形状已经在最底层。" };
+    order.splice(at, 1);
+    order.splice(at - 1, 0, located.shape);
+  } else if (direction === "top") {
+    if (at === hosts.length - 1) return { ok: false, reason: "这个形状已经在最顶层。" };
+    order.splice(at, 1);
+    order.push(located.shape);
+  } else {
+    if (at === 0) return { ok: false, reason: "这个形状已经在最底层。" };
+    order.splice(at, 1);
+    order.unshift(located.shape);
+  }
+  rewriteShapeOrder(spTree, order);
+  return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
+}
+
+/**
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由 `setShapeRunText`/`setRunFont`/`setRunColor`/`setShapeGeometry` 产出的 op。
+ * @param op 由 `setShapeRunText`/`setRunFont`/`setRunColor`/`setShapeGeometry`/`moveShapeLayer` 产出的 op。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -394,6 +442,17 @@ function normalizeHexColor(hex: string): string | undefined {
 }
 
 /**
+ * 取这一页的形状树 `<p:cSld><p:spTree>`：叠放次序 op 要在它身上重排子元素。
+ *
+ * @param root 幻灯片根（`<p:sld>`）。
+ * @returns 形状树元素；这一页没有 cSld/spTree 时 undefined。
+ */
+function shapeTreeOf(root: Element): Element | undefined {
+  const cSld = firstChild(root, "p:cSld");
+  return cSld ? firstChild(cSld, "p:spTree") : undefined;
+}
+
+/**
  * 在幻灯片根元素里按 `<p:cNvPr @id>` 找形状元素。
  *
  * @param root 幻灯片根（`<p:sld>`）。
@@ -401,8 +460,7 @@ function normalizeHexColor(hex: string): string | undefined {
  * @returns 形状元素；找不到返回 undefined。
  */
 function findShapeById(root: Element, shapeId: number): Element | undefined {
-  const cSld = firstChild(root, "p:cSld");
-  const spTree = cSld ? firstChild(cSld, "p:spTree") : undefined;
+  const spTree = shapeTreeOf(root);
   if (!spTree) return undefined;
   for (const el of children(spTree)) {
     if (!SHAPE_HOST_TAGS.includes(el.name)) continue;
@@ -411,4 +469,25 @@ function findShapeById(root: Element, shapeId: number): Element | undefined {
     if (cNvPr && Number(cNvPr.attributes["id"]) === shapeId) return el;
   }
   return undefined;
+}
+
+/**
+ * 把 `<p:spTree>` 里的形状子元素换成给定的顺序。
+ *
+ * 只填形状那些槽位：`p:nvGrpSpPr`、`p:grpSpPr` 与元素之间的空白 / 注释节点原地不动，
+ * 这样重序列化后除叠放顺序外一个字都不差（§2.3 不许误伤别的内容）。
+ *
+ * @param spTree 形状树元素。
+ * @param order 新的形状顺序，长度必须等于现有形状子元素数。
+ */
+function rewriteShapeOrder(spTree: Element, order: Element[]): void {
+  const nodes = spTree.children;
+  if (!nodes) return;
+  const slots: number[] = [];
+  nodes.forEach((node, index) => {
+    if (isElement(node) && SHAPE_HOST_TAGS.includes(node.name)) slots.push(index);
+  });
+  slots.forEach((slot, k) => {
+    nodes[slot] = order[k]!;
+  });
 }

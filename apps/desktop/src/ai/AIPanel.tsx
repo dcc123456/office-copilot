@@ -62,7 +62,7 @@ import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayloa
 import type { SheetEditT } from "@office-copilot/sheet-tools";
 import type { PptxEditRequest, PresentationModel, ShapeBoxPx } from "@office-copilot/pptx-io";
 import type { PptxEditT } from "@office-copilot/pptx-tools";
-import { SHAPE_BOX_FIELD_LABEL } from "../slides/slideDeckModel.js";
+import { LAYER_DIRECTION_LABEL, SHAPE_BOX_FIELD_LABEL } from "../slides/slideDeckModel.js";
 import type {
   AppSettings,
   PptxEditOutcome,
@@ -246,9 +246,11 @@ function sheetChartLines(chart: ResolvedChart): string[] {
 function slideEditLines(edits: readonly PptxEditT[]): string[] {
   return edits.map((edit) => {
     const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
-    // 段号与 run 号只有 run 级改动才带：几何条目上没有这两项，取用之前先按类型分岔。
+    // 段号与 run 号只有 run 级改动才带：几何与叠放条目上没有这两项，取用之前先按类型分岔。
     const atRun =
-      edit.type === "set_shape_geometry" ? where : `${where} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
+      edit.type === "set_shape_geometry" || edit.type === "move_shape_layer"
+        ? where
+        : `${where} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
     switch (edit.type) {
       case "set_run_text": {
         const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
@@ -269,6 +271,8 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
           .map((field) => `${SHAPE_BOX_FIELD_LABEL[field]} ${Math.round(edit[field]!)}px`);
         return `${where} 的位置尺寸改为 ${given.join("，")}`;
       }
+      case "move_shape_layer":
+        return `${where} ${LAYER_DIRECTION_LABEL[edit.direction]}`;
     }
   });
 }

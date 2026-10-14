@@ -37,7 +37,7 @@ describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   });
 });
 
-describe("pptx-tools：提案的四类改动", () => {
+describe("pptx-tools：提案的五类改动", () => {
   const one = (edit: unknown) => parseToolArguments("ppt_submit_proposal", JSON.stringify({ summary: "改一处", edits: [edit] }));
 
   it("set_run_text 合法入参通过", () => {
@@ -70,6 +70,12 @@ describe("pptx-tools：提案的四类改动", () => {
 
   it("set_shape_geometry 宽度非正被拒", () => {
     expect(one({ type: "set_shape_geometry", slideNumber: 1, shapeId: 4, widthPx: 0 }).ok).toBe(false);
+  });
+
+  it("move_shape_layer 认四个方向；缺方向或方向拼错都被拒", () => {
+    expect(one({ type: "move_shape_layer", slideNumber: 1, shapeId: 4, direction: "top" }).ok).toBe(true);
+    expect(one({ type: "move_shape_layer", slideNumber: 1, shapeId: 4, direction: "front" }).ok).toBe(false);
+    expect(one({ type: "move_shape_layer", slideNumber: 1, shapeId: 4 }).ok).toBe(false);
   });
 
   it("改文字超过 2000 字被拒", () => {

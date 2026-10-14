@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { type PresentationModel } from "@office-copilot/pptx-io";
-import { buildDeckBytes } from "@office-copilot/pptx-io/testing";
+import { buildDeckBytes, minimalDeckParts, twoShapeDeckParts, type DeckParts } from "@office-copilot/pptx-io/testing";
 import { PPTX_EXT, editPptxDoc, openPptxDoc, revertPptxDoc } from "./pptxHandlers.js";
 
 vi.mock("electron", () => ({ dialog: {} }));
@@ -29,11 +29,11 @@ async function titleOnDisk(file: string): Promise<string> {
   return titleOf(reopened.presentation);
 }
 
-/** 把最小 deck 落到一个临时文件里，返回路径（测试自己负责清）。 */
-async function writeDeck(name: string): Promise<string> {
+/** 把 deck 落到一个临时文件里，返回路径（测试自己负责清）。 */
+async function writeDeck(name: string, parts: DeckParts = minimalDeckParts()): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oc-pptx-"));
   const file = path.join(dir, name);
-  await fs.writeFile(file, await buildDeckBytes());
+  await fs.writeFile(file, await buildDeckBytes(parts));
   return file;
 }
 
@@ -92,6 +92,23 @@ describe("幻灯片出入口的落地与撤销", () => {
     const fresh = await revertPptxDoc(file, file, second.ok ? second.ops : []);
     expect(fresh.ok && titleOf(fresh.presentation)).toBe("第一批");
     expect(await titleOnDisk(file)).toBe("第一批");
+  });
+
+  it("叠放次序那条 op 走同一条出入口：落地后重开的形状顺序真变了，撤销逐字回原", async () => {
+    const file = await writeDeck("叠放.pptx", twoShapeDeckParts());
+    /** 形状号按页内顺序拼成串——`<p:spTree>` 的文档顺序就是叠放次序。 */
+    const orderOf = (model: PresentationModel) => model.slides[0]!.shapes.map((item) => item.shapeId).join(">");
+    const edited = await editPptxDoc(file, file, [
+      { kind: "layer", target: { partPath: "ppt/slides/slide1.xml", shapeId: 2 }, direction: "top" },
+    ]);
+    expect(edited.ok).toBe(true);
+    if (!edited.ok) return;
+    expect(orderOf(edited.presentation)).toBe("3>2");
+    const reopened = await openPptxDoc(file);
+    expect(reopened.ok && orderOf(reopened.presentation)).toBe("3>2");
+
+    const reverted = await revertPptxDoc(file, file, edited.ops ?? []);
+    expect(reverted.ok && orderOf(reverted.presentation)).toBe("2>3");
   });
 
   it("同批里后面的改动看得到前面已落地的结果；任一条定位失败就整批不写盘", async () => {

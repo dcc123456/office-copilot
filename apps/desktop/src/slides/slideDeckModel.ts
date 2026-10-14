@@ -4,7 +4,7 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import type { PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideShape } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
 
 /**
  * 形状几何四个字段的中文标签（单位是 CSS px，非 pt、非 EMU）。
@@ -16,6 +16,18 @@ export const SHAPE_BOX_FIELD_LABEL: Record<keyof ShapeBoxPx, string> = {
   topPx: "上",
   widthPx: "宽",
   heightPx: "高",
+};
+
+/**
+ * 叠放方向四个值的中文标签（照 PowerPoint 功能区那四个按钮的叫法）。
+ *
+ * AI 提案卡的每一行与视图上的层级按钮说的是同一件事，所以只写一份（§3.2、§5.7）。
+ */
+export const LAYER_DIRECTION_LABEL: Record<SlideLayerDirection, string> = {
+  up: "上移一层",
+  down: "下移一层",
+  top: "置于顶层",
+  bottom: "置于底层",
 };
 
 /** 一处未保存的草稿：只带用户真改过的那几项（没改的字段留 undefined，不交出、也不覆盖）。 */

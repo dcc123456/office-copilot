@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { applySlideEdit, readPresentation, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
+import { applySlideEdit, moveShapeLayer, readPresentation, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -214,6 +214,65 @@ describe("pptx-io：撤销的现场核对（内容寻址，§2.5）", () => {
     const outcome = await revertSlideEdits(file, [ghost]);
     expect(outcome.applied).toEqual([]);
     expect(outcome.skipped[0]!.reason).toContain("已经找不到");
+  });
+});
+
+describe("pptx-io：叠放次序 op（结构 op，§2.5）", () => {
+  /** 从幻灯片 XML 里按文档顺序取出形状名——`<p:spTree>` 的文档顺序就是叠放次序（第一个最底）。 */
+  function shapeOrder(xml: string): string[] {
+    return [...xml.matchAll(/<p:cNvPr id="\d+" name="([^"]*)"/g)].map((m) => m[1]!).filter((name) => name !== "");
+  }
+
+  it("上移一层：目标与后一个形状交换位置，撤销逐字回原样", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await moveShapeLayer(file, { partPath, shapeId: 2 }, "up");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(shapeOrder(result.op.afterXml)).toEqual(["Content Placeholder 2", "Title 1", "TextBox 3"]);
+    // 形状之前的两个非形状子元素（nvGrpSpPr / grpSpPr）不许被卷进重排
+    // （op 的后像带 XML 声明、部件原文不带，所以只比第一个形状之前的那一段）
+    const head = (xml: string) => xml.slice(xml.indexOf("<p:cSld"), xml.indexOf("<p:sp>"));
+    expect(head(result.op.afterXml)).toBe(head(original));
+
+    applySlideEdit(file, result.op);
+    expect(shapeOrder((await file.partText(partPath))!)).toEqual(["Content Placeholder 2", "Title 1", "TextBox 3"]);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("置于底层：最后一个形状挪到最前，其它形状的相对顺序不变", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await moveShapeLayer(file, { partPath, shapeId: 4 }, "bottom");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(shapeOrder(result.op.afterXml)).toEqual(["TextBox 3", "Title 1", "Content Placeholder 2"]);
+  });
+
+  it("已经在要去的尽头时回带理由的空提案：不产出 before==after 的假改动", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const alreadyBottom = await moveShapeLayer(file, { partPath, shapeId: 2 }, "down");
+    expect(alreadyBottom.ok).toBe(false);
+    if (!alreadyBottom.ok) expect(alreadyBottom.reason).toContain("最底层");
+    const alreadyTop = await moveShapeLayer(file, { partPath, shapeId: 4 }, "top");
+    expect(alreadyTop.ok).toBe(false);
+    if (!alreadyTop.ok) expect(alreadyTop.reason).toContain("最顶层");
+    expect((await file.partText(partPath))!).toBe(original); // 被拒的提案一个字都不落
+  });
+
+  it("形状号越界与部件缺失各回一条理由，不抛异常", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const badShape = await moveShapeLayer(file, { partPath, shapeId: 999 }, "up");
+    expect(badShape.ok).toBe(false);
+    if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
+    const badPart = await moveShapeLayer(file, { partPath: "ppt/slides/slide9.xml", shapeId: 2 }, "up");
+    expect(badPart.ok).toBe(false);
+    if (!badPart.ok) expect(badPart.reason).toContain("部件不存在");
   });
 });
 

@@ -13,6 +13,7 @@ import {
   PptxFile,
   applySlideEdit,
   auditPptxPackage,
+  moveShapeLayer,
   revertSlideEdits,
   setRunColor,
   setRunFont,
@@ -209,6 +210,8 @@ async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: tr
       return await setRunColor(file, edit.target, edit.hex);
     case "geometry":
       return await setShapeGeometry(file, edit.target, edit.box);
+    case "layer":
+      return await moveShapeLayer(file, edit.target, edit.direction);
   }
 }
 

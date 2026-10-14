@@ -67,3 +67,25 @@ export function minimalDeckParts(): DeckParts {
       '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sldLayout>',
   };
 }
+
+/**
+ * 一页里放两个形状（`id=2` 标题在下、`id=3` 文本框在上）的 deck，给叠放次序的用例用。
+ *
+ * 最小夹具只有一形状，"最顶/最底"永远重合，看不出重排有没有落地，所以另开一份而不是改那份
+ * （改它会把字节级往返那几条用例一起牵动）。
+ *
+ * @returns 直接传给 {@link buildDeckBytes} 的部件表。
+ */
+export function twoShapeDeckParts(): DeckParts {
+  return {
+    ...minimalDeckParts(),
+    "ppt/slides/slide1.xml":
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="TextBox 2"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>正文乙</a:t></a:r></a:p></p:txBody></p:sp>" +
+      "</p:spTree></p:cSld></p:sld>",
+  };
+}

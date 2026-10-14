@@ -35,8 +35,8 @@ const CONTEXT_MAX_SHAPES_PER_SLIDE = 20;
 
 const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这份文稿的结构画像，不是整份原文。
 - 动手前先调 ppt_describe 拿页号与 shapeId；要改某段文字再调 ppt_read_slide_text 确认 paraIndex / runIndex，不许凭印象数，也不许自己编形状号。
-- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_run_font / set_run_color / set_shape_geometry 四种，
-  都指到"某一页某个形状的某段某 run"（几何指到形状）。增删形状、调整叠放次序、改版式与母式这里做不了，遇到就直说做不了。
+- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer 五种，
+  前三条指到"某一页某个形状的某段某 run"，后两条指到形状（叠放方向是 up/down/top/bottom）。增删形状、改版式与母式这里做不了，遇到就直说做不了。
 - 一段里如果有多条 run（read_slide_text 会标出来），必须逐 run 改，整段覆盖会拍平那一截的粗体与字号——这是禁止的。
 - 字号单位是 pt，几何单位是屏幕 px；EMU、半磅这些换算由引擎做，你不许换算数字往字段里塞。
 - 颜色只认 #rrggbb 六位十六进制。
@@ -129,6 +129,16 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
       });
       continue;
     }
+    if (edit.type === "move_shape_layer") {
+      // 已在某一端时引擎会整批拒绝（§2.4），所以按该页形状顺序先判一刀再决定交不交。
+      const edgeNote = layerEdgeNote(slide.shapes, shape, edit.direction);
+      if (edgeNote) {
+        notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那条改不了：${edgeNote}`);
+        continue;
+      }
+      requests.push({ kind: "layer", target: { partPath: slide.partPath, shapeId: shape.shapeId }, direction: edit.direction });
+      continue;
+    }
     const outOfRange = runRangeNote(shape, edit.paraIndex, edit.runIndex);
     if (outOfRange) {
       notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那条改不了：${outOfRange}`);
@@ -150,6 +160,29 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
  */
 function isGroupShape(shape: SlideShape): boolean {
   return shape.kind === "group";
+}
+
+/**
+ * 叠放方向是不是已经到头。
+ *
+ * `slide.shapes` 就是 `<p:spTree>` 里形状的文档顺序（读侧按它列），而那个顺序就是叠放次序：
+ * 第一个在最底、最后一个在最顶。所以只要比对首尾，不必再解析一次 XML。
+ *
+ * @param shapes 该页全部形状（文档顺序）。
+ * @param shape 本次要挪的那个。
+ * @param direction 模型给的方向。
+ * @returns 一句中文理由（该页只有一个形状、或已在要去的那一端）；能挪时返回 null。
+ */
+function layerEdgeNote(
+  shapes: SlideShape[],
+  shape: SlideShape,
+  direction: "up" | "down" | "top" | "bottom",
+): string | null {
+  const at = shapes.indexOf(shape);
+  if (shapes.length < 2) return "这一页只有这一个形状，没有可叠放的邻居";
+  if ((direction === "up" || direction === "top") && at === shapes.length - 1) return "它已经在最顶层";
+  if ((direction === "down" || direction === "bottom") && at === 0) return "它已经在最底层";
+  return null;
 }
 
 /**

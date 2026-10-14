@@ -91,7 +91,7 @@ function stubAsk(turns: ToolTurnResult[]) {
 }
 
 describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", () => {
-  it("四类改动都落到正确的部件路径与序号上", () => {
+  it("文字/字体/颜色/几何四条都落到正确的部件路径与序号上", () => {
     const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
       { type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "新标题" },
       { type: "set_run_font", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, sizePt: 28 },
@@ -105,6 +105,18 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
       { kind: "color", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4, paraIndex: 0, runIndex: 1 }, hex: "#C00000" },
       { kind: "geometry", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4 }, box: { leftPx: 120, heightPx: 200 } },
     ]);
+  });
+
+  it("叠放次序翻成 layer 请求；已在要去那一端的别交出（引擎会整批拒，§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "move_shape_layer", slideNumber: 1, shapeId: 4, direction: "up" },
+      { type: "move_shape_layer", slideNumber: 1, shapeId: 2, direction: "bottom" },
+      { type: "move_shape_layer", slideNumber: 1, shapeId: 7, direction: "top" },
+    ]);
+    // 第 1 页的形状顺序（= 叠放顺序）是 2 在最底、7 在最顶，所以只有中间那条能挪
+    expect(requests).toEqual([{ kind: "layer", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4 }, direction: "up" }]);
+    expect(notes.join("\n")).toContain("已经在最底层");
+    expect(notes.join("\n")).toContain("已经在最顶层");
   });
 
   it("多 run 的段落按模型指的 run 改，不整段覆盖（§2.3）", () => {
