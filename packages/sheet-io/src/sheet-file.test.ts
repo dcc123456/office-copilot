@@ -552,7 +552,7 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
 describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
   it("插一行写进文件后维度变大，撤销再存回去与插入前逐字一致", async () => {
     const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
-    // J 列的公式带外部引用，它让本表任何插删都被拒绝；先删掉 J 列，再在插入点上做来回
+    // 先删掉 J 列把基准维度定成 A1:I4，插入后才好断言它变大；J 列那条外部引用自 D9 起不再否决插删
     const dropped = runSheetOps(payload, [deleteTracksOp(payload, "col", 9)!]);
     expect(dropped.ok).toBe(true);
     const baseline = (await writeAndReopen(dropped.after)).partXml;
@@ -594,7 +594,7 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
 
   it("合并区跟着插列挪位：写进文件读回来是 I1:J2，撤销后回到 H1:I2", async () => {
     const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
-    // J 列的公式带外部引用，任何让它位移的插列都会被拒；先删掉 J 列再插
+    // 合并区在 H/I，插列后要看的是 I1:J2；先把 J 列删掉，读回的 `<cols>` 分段才是这条断言要的那份形状
     const dropped = runSheetOps(payload, [deleteTracksOp(payload, "col", 9)!]);
     expect(dropped.ok).toBe(true);
 
