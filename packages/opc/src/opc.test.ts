@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { loadPackage, parseRelationships, relativeTarget, relsPathFor, resolveTarget, unmodelledParts } from "./opc.js";
+import { contentTypesWith, nextPartIndex, nextRelIdFor, relsWith } from "./write.js";
 import * as xml from "./xml.js";
 
 /**
@@ -79,5 +80,35 @@ describe("xml：通用序列化（往返不许丢读不懂的东西）", () => {
     expect(xml.innerXml(b!)).toBe("");
     expect(xml.innerXml(c!)).toBe("<d>乙</d>");
     expect(xml.innerXml(e!)).toBe("");
+  });
+});
+
+describe("write：§2.10 新建部件的关系与内容类型登记原语", () => {
+  it("nextRelIdFor 在已有 rId1 的源部件上续到 rId2，不撞号", async () => {
+    const pkg = await loadPackage(await minimalPackage());
+    expect(nextRelIdFor(pkg, "ppt/presentation.xml")).toBe("rId2");
+    // 没有任何关系的源部件从 rId1 起。
+    expect(nextRelIdFor(pkg, "ppt/slideMasters/slideMaster1.xml")).toBe("rId1");
+  });
+
+  it("relsWith 保留原关系并把目标写成相对源部件目录", async () => {
+    const pkg = await loadPackage(await minimalPackage());
+    const rels = await relsWith(pkg, "ppt/presentation.xml", "rId2", "http://x/slideLayout", "ppt/slideLayouts/slideLayout1.xml");
+    expect(rels).toContain('Id="rId1"');
+    expect(rels).toContain('Id="rId2"');
+    expect(rels).toContain('Target="slideLayouts/slideLayout1.xml"');
+  });
+
+  it("contentTypesWith 追加 Override 且同名不重复", async () => {
+    const pkg = await loadPackage(await minimalPackage());
+    const once = await contentTypesWith(pkg, [["/ppt/slideMasters/slideMaster1.xml", "ct-master"]]);
+    expect(once).toContain('PartName="/ppt/slideMasters/slideMaster1.xml"');
+    const twice = await contentTypesWith(pkg, [["/ppt/presentation.xml", "ct-whatever"]]);
+    expect(twice.match(/PartName="\/ppt\/presentation\.xml"/g)).toHaveLength(1);
+  });
+
+  it("nextPartIndex 数已有的同类部件再 +1（1 基）", () => {
+    expect(nextPartIndex(["xl/charts/chart1.xml", "xl/charts/chart2.xml", "xl/styles.xml"], "xl/charts/chart", ".xml")).toBe(3);
+    expect(nextPartIndex(["ppt/presentation.xml"], "ppt/slides/slide", ".xml")).toBe(1);
   });
 });

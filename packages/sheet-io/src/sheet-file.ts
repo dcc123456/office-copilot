@@ -6,7 +6,7 @@
  * 2. 单位/颜色/序列号的解释只发生在本包（`AGENTS.md` §2.1 的同一条纪律，换成表格域）。
  * 3. 读不懂的东西记进 `warnings`/`unsupported` 一路带到 UI，不许静默丢弃。
  */
-import { loadPackage, readText, relativeTarget, relsPathFor, resolveTarget, type OpcPackage } from "@office-copilot/opc";
+import { loadPackage, readText, relsPathFor, resolveTarget, nextRelIdFor, relsWith, contentTypesWith, nextPartIndex, type OpcPackage } from "@office-copilot/opc";
 import { children, isElement, parseDocument, type Element } from "./xml.js";
 import type { SheetCell, SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
 import type { ResolvedChart } from "./chart-spec.js";
@@ -56,10 +56,6 @@ const WORKBOOK_PART = "xl/workbook.xml";
 /** 排在 `<drawing>` **之后**的 `CT_Worksheet` 元素（ECMA-376 Part 1 §18.3.1.100 的序列），插入点取第一个命中的。 */
 const AFTER_DRAWING_PATTERN =
   /<(?:legacyDrawing|legacyDrawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b/;
-
-/** 表里已经有画图部件时的兜底 content types 根（原文件连 `[Content_Types].xml` 都缺才用得到）。 */
-const TYPES_SKELETON =
-  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>';
 
 /**
  * 在表部件里放一个 `<drawing r:id>`，指向本次新建的画图部件。
@@ -293,14 +289,15 @@ export class SheetFile {
     if (index < 0) return { ok: false, code: "sheet-missing" };
     const sheet = await this.sheetAt(index);
     if (!sheet) return { ok: false, code: "sheet-missing" };
-    const relId = this.nextRelIdFor(sheetPartPath);
+    const relId = nextRelIdFor(this.pkg, sheetPartPath);
     if (/<drawing\b/.test(sheet.sourceXml)) return { ok: false, code: "drawing-exists" };
     const withDrawing = insertDrawingElement(sheet.sourceXml, relId);
     if (!withDrawing) return { ok: false, code: "no-worksheet-root" };
 
+    const takenPartNames = [...this.pkg.entryNames, ...this.addedParts.keys()];
     const parts = buildChartParts(chart, {
-      chart: this.nextPartIndex("xl/charts/chart", ".xml"),
-      drawing: this.nextPartIndex("xl/drawings/drawing", ".xml"),
+      chart: nextPartIndex(takenPartNames, "xl/charts/chart", ".xml"),
+      drawing: nextPartIndex(takenPartNames, "xl/drawings/drawing", ".xml"),
     });
     sheet.sourceXml = withDrawing;
     this.writeSheet(sheet);
@@ -309,71 +306,16 @@ export class SheetFile {
     this.stagePart(parts.drawingRelsPath, parts.drawingRelsXml);
     this.stagePart(
       relsPathFor(sheetPartPath),
-      await this.relsWith(sheetPartPath, relId, DRAWING_REL_TYPE, parts.drawingPartPath),
+      await relsWith(this.pkg, sheetPartPath, relId, DRAWING_REL_TYPE, parts.drawingPartPath),
     );
     this.stagePart(
       "[Content_Types].xml",
-      await this.contentTypesWith([
+      await contentTypesWith(this.pkg, [
         [`/${parts.chartPartPath}`, CHART_CONTENT_TYPE],
         [`/${parts.drawingPartPath}`, DRAWING_CONTENT_TYPE],
       ]),
     );
     return { ok: true, chartPartPath: parts.chartPartPath, drawingPartPath: parts.drawingPartPath, sheetPartPath };
-  }
-
-  /**
-   * 源部件下一个可用的关系编号。
-   *
-   * @param sourcePartPath 关系所属的源部件，如 `xl/worksheets/sheet1.xml`、`xl/workbook.xml`。
-   * @returns `rIdN` 形式的 id；已有的超链接/图表关系原样让位，不许撞号。
-   */
-  private nextRelIdFor(sourcePartPath: string): string {
-    const existing = this.pkg.relsBySourcePart.get(sourcePartPath) ?? [];
-    const highest = existing.reduce((max, rel) => Math.max(max, Number(/^rId(\d+)$/.exec(rel.id)?.[1] ?? 0)), 0);
-    return `rId${highest + 1}`;
-  }
-
-  /**
-   * 源部件的关系文件：保留原文，追加一条指向新部件的关系。
-   *
-   * @param sourcePartPath 关系所属的源部件。
-   * @param relId 新关系编号（来自 `nextRelIdFor`）。
-   * @param relType 关系类型 URI。
-   * @param targetPartPath 目标部件路径；写成**相对源部件目录**的形式（实测绝对写法 Excel 拒开）。
-   * @returns 可直接写回的 `.rels` 文本；原文件没有这个关系文件时整篇新建。
-   */
-  private async relsWith(sourcePartPath: string, relId: string, relType: string, targetPartPath: string): Promise<string> {
-    const relationship = `<Relationship Id="${relId}" Type="${relType}" Target="${relativeTarget(sourcePartPath, targetPartPath)}"/>`;
-    const original = await readText(this.pkg.zip, relsPathFor(sourcePartPath));
-    return original
-      ? original.replace("</Relationships>", `${relationship}</Relationships>`)
-      : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
-  }
-
-  /**
-   * 给 `[Content_Types].xml` 追加 Override 声明。
-   *
-   * @param entries `[部件路径, 内容类型]` 二元组，路径要带前导斜杠。
-   * @returns 新的部件文本；同名 Override 已存在时不重复追加。
-   */
-  private async contentTypesWith(entries: ReadonlyArray<readonly [string, string]>): Promise<string> {
-    const original = (await readText(this.pkg.zip, "[Content_Types].xml")) ?? TYPES_SKELETON;
-    return entries.reduce((xml, [partName, contentType]) => {
-      if (xml.includes(`PartName="${partName}"`)) return xml;
-      return xml.replace("</Types>", `<Override PartName="${partName}" ContentType="${contentType}"/></Types>`);
-    }, original);
-  }
-
-  /**
-   * 下一个可用的同名部件序号，避开文件里已有的图表/画图部件。
-   *
-   * @param prefix 部件路径前缀，如 `xl/charts/chart`。
-   * @param suffix 扩展名，如 `.xml`。
-   * @returns 已有数量 + 1（1 基）。
-   */
-  private nextPartIndex(prefix: string, suffix: string): number {
-    const taken = (names: string[]) => names.filter((name) => name.startsWith(prefix) && name.endsWith(suffix)).length;
-    return taken(this.pkg.entryNames) + taken([...this.addedParts.keys()]) + 1;
   }
 
   /**
@@ -486,14 +428,14 @@ export class SheetFile {
     this.pkg.zip.file(SHARED_STRINGS_PART, sstXml);
     // 表原本就有：关系与内容类型都在原文里，追加条目不改变包结构。
     if (this.originalParts.has(SHARED_STRINGS_PART)) return;
-    const relId = this.nextRelIdFor(WORKBOOK_PART);
+    const relId = nextRelIdFor(this.pkg, WORKBOOK_PART);
     this.pkg.zip.file(
       relsPathFor(WORKBOOK_PART),
-      await this.relsWith(WORKBOOK_PART, relId, SHARED_STRINGS_REL_TYPE, SHARED_STRINGS_PART),
+      await relsWith(this.pkg, WORKBOOK_PART, relId, SHARED_STRINGS_REL_TYPE, SHARED_STRINGS_PART),
     );
     this.pkg.zip.file(
       "[Content_Types].xml",
-      await this.contentTypesWith([[`/${SHARED_STRINGS_PART}`, SHARED_STRINGS_CONTENT_TYPE]]),
+      await contentTypesWith(this.pkg, [[`/${SHARED_STRINGS_PART}`, SHARED_STRINGS_CONTENT_TYPE]]),
     );
   }
 
