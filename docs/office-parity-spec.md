@@ -73,6 +73,7 @@
 | **P10** | **本机实测（2026-10-14，附录 A 有原命令与输出）** | — | ① `python3 3.14.2` + 新装 `python-pptx 1.0.2`（已 vendor 进 `tmp/pylibs`，与 openpyxl 3.1.5 同址）→ pptx 的**结构交叉读取器**成立。② **`Keynote.app` 14.2 能开我们生成的 `.pptx`**：`count of slides` = 2，`object text of text items` 读回"标题甲/第一行\n第二行/标题乙/文本框内容"。③ **Keynote 能 `export ... as slide images`**：拿到 `tmp/kn-export/kn-export.001.png`、`.002.png`，**PNG 里中文字形真的渲染出来了**（已用肉眼看过图）。④ Keynote 还能 `export ... as Microsoft PowerPoint`（26 909 字节，python-pptx 读回形状名与文字都对）与 `export ... as PDF`（13 915 字节）。→ **pptx 线第一次有了"第三方办公软件真读过这份文件 + 画面看得到"的双层证据通道**，不再是 xlsx/docx 那种目视 BLOCKED。⑤ 本机**没有** Microsoft Office、**没有** LibreOffice，WPS 无可视通道（不变）。 |
 | **P11** | **本机实测：PDF 正文为什么不是字符串替换**（附录 A） | — | Keynote 导出的那份 PDF：`%PDF-1.3`、12 个流、字体只有 `AAAAAB+PingFangSC-Regular` 与 `AAAAAC+ArialMT`（**子集字体**，前缀 `AAAAAB+` 是子集标记），编码 `Identity-H` + `MacRomanEncoding`，`/ToUnicode` 只有 **1** 个而嵌入字体有 **2** 个，`/FontFile` 2 个。第一页内容流里文字是 `q 1 0 0 1 294 457.735 cm BT 44 0 0 44 0 0 Tm /C1 1 Tf <0ebd1dcc12a8> Tj ET`——**CID 十六进制串，不是字符**，而且部分文字带 `/Span <</ActualText (...)>> BDC … EMC` 标记内容。结论：**"把正文里的 A 改成 B"在任意第三方 PDF 上 = 反查 CID→Unicode + 往子集字体里合并新字形**，子集里没有那个字形就根本写不出来。这条决定了 D8 必须分两档，不能对 dcc 承诺"任何 PDF 都能改正文"。 |
 | **P12** | `xuri/excelize`（Go, BSD-3）/ `yb2460/harness-anything`（AI 代理控 WPS/Office） | — | 前者语言不通（只作 xlsx 侧思路参考，已完成）；后者是"用自动化驱动真办公软件"路线，本机 WPS 无可视通道（§8 实测 `-1728`），**不作为产品依赖**，只作探针手法参考。 |
+| **P13** | **本机实测：Keynote 的 PNG 导出连图表与表格都能渲染**（附录 A2） | — | python-pptx 造的"1 页 + 柱状图(2 系列里的 1 条, Q1=1/Q2=2) + 2×2 表格"存成 `.pptx` → Keynote 打开（`count of slides`=1、文字"乙"读回）→ `export … as slide images` 出的 PNG **肉眼可见：柱子画出来了、坐标轴 0/1/2 与 Q1/Q2 在、表格首格 "x" 与表头底色在**。含义很大：**pptx 线是本仓第一条能拿到"图表画面"证据的线**（xlsx 线到死都是 BLOCKED，因为 Numbers 不画我们的图表部件）。三条使用约束（实测踩到的）：① `count of slides` 要先 `set d to front document` 再问，直接 `count of slides of front document` 在部分时机报 `-1708`；② `open` 会偶发 AppleEvent 超时 `-1712`（同一批夹具里 3 页带备注那份中过一次，拆开造都能开）→ 判据必须写"重试 + 如实报告"，不能写"必能开"；③ 每次问完 `close … saving no`，别把 Keynote 的重新解释写回用户文件。 |
 
 ---
 
@@ -181,11 +182,14 @@ pptx 里**每个 XML 部件都要自己的 `<Override>`**（`presentationml.slid
 
 ## 四、阶段目标（每段一句完成判定）
 
-### 阶段 0 · 取证与夹具（不写产品代码）— `[ ]`
-把 WPS 自带模板（`/Applications/wpsoffice.app/Contents/Resources/office6/…/newfile.pptx` 35 part /
-`new_wpp.pptx` 125 part 含 65 个 `tags`）与 python-pptx 生成的 4 页夹具（标题/项目符号/图表/表格/备注）收进
+### 阶段 0 · 取证与夹具（不写产品代码）— `[x] 已完成 2026-10-14（`13e62e2` 之后的实测，数字见附录 A2）`
+把 WPS 自带模板（`/Applications/wpsoffice.app/Contents/Resources/office6/addons/kfindermenu/res/templates/new_wpp.pptx`
+125 part 含 65 个 `tags`；`…/mui/zh_HK/templates/newfile.pptx` 35 part）与 python-pptx 生成的夹具收进
 `packages/pptx-io/scripts/` 的生成脚本，**并确认本机 `tmp/pylibs` 里有 python-pptx 1.0.2**（已 vendor）。
 **完成判定**：三类夹具（空模板 / 富模板 / 带图表备注）都能被 python-pptx 与 Keynote 各自读通，Keynote 能导出 PNG 且肉眼可见文字。
+→ **过了，而且比预期强**：PNG 里**柱状图与表格都真的渲染出来了**（不只是文字），见 P13。
+唯一没复现成功的那份（3 页 + 备注 + 图表 + 表格）是 AppleEvent 超时 `-1712`，同类夹具分开造都能开——
+所以判据要写成"通道可用但不稳，超时须重试并如实报告"，不许当成"能开"的普遍结论。
 
 ### 阶段 1 · 抽 `packages/opc`，两线不改行为 — `[ ]`
 按 D2 把 OPC 提到公共包，`sheet-io`/`docx-io` 改依赖它。
@@ -295,7 +299,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 
 | 提交 | 阶段 | 命令与输出（逐包通过数） | 视觉/第三方读回结论 | 状态 |
 | --- | --- | --- | --- | --- |
-| — | 0 | 待填 | 待填 | `[ ]` |
+| `13e62e2` + 本次实测 | 0 | 无产品代码改动（纯取证）；`pnpm build`/`pnpm test` 未跑（未动 `src`） | 三类夹具 python-pptx 1.0.2 全读通（35/125/49 part）；Keynote 14.2 打开并导出 PNG，**柱状图与表格肉眼可见**（附录 A2） | `[x]` |
 
 ---
 
@@ -335,6 +339,40 @@ PDF 内部结构（同一份 `tmp/kn-export.pdf`，纯 stdlib `zlib` + 正则，
 ```
 
 > 结论见 P11 与 D8：**PDF 正文是 CID 十六进制，不是字符**，所以"改正文"要先解决反查与子集字体合并。
+
+### A2 · 阶段 0 夹具与 Keynote 通道（2026-10-14 实测，命令可复现）
+
+WPS 自带模板（只读取，不入库）：
+
+```
+…/office6/mui/zh_HK/templates/newfile.pptx        → 35 part，slides=0，tags=0，masters=1，layouts=11
+…/addons/kfindermenu/res/templates/new_wpp.pptx   → 125 part，slides=1，tags=65，masters=1，layouts=11
+```
+
+> 第一行就是"只遍历 `ppt/slides/` 的编辑器会当场毁掉一份空模板"的证据（35 个 part 里 0 张幻灯片）。
+
+python-pptx 1.0.2 读回（`PYTHONPATH=tmp/pylibs python3 -c "from pptx import Presentation; …"`）：
+
+```
+bare.pptx  slides=0 masters=1 layouts=11     ← WPS 空模板原样读通
+rich.pptx  slides=1 masters=1 layouts=11     ← 125 part / 65 tags 那份也读通
+deck.pptx  slides=3 masters=1 layouts=11     ← 在 WPS 模板上加 3 页（标题/图表/表格）+ 1 页备注
+           parts=49  charts=1  embeddings=1  notesSlides=1
+```
+
+Keynote 14.2 通道（AppleScript，逐条实测）：
+
+```
+open tmp/p0/b-lib-chart.pptx（python-pptx 默认模板 + 柱状图 + 2×2 表格，1 页）
+  → count of slides = 1，object text = "乙"
+  → export … as slide images → tmp/p0/pngb/pngb.001.png
+  → 肉眼看过这张 PNG：柱子（Q1=1、Q2=2）、纵轴 0/1/2、横轴 Q1/Q2、表格首格 "x" 与表头底色全部渲染
+open tmp/p0/a-wps-text.pptx / b-lib-chart.pptx / c-wps-chart.pptx → 三份都返回文档引用（开成功）
+open tmp/p0/deck.pptx（3 页 + 备注 + 图表 + 表格，建在 WPS 模板上）
+  → 一次 AppleEvent 超时 -1712、documents=0（拆开造同类夹具都能开 → 判据写"重试 + 如实报告"）
+坑：`count of slides of front document` 在某些时机报 -1708，必须先 `set d to front document` 再 `count of slides of d`
+收尾：每次问完 `close front document saving no`；探针结束 `quit`
+```
 
 探针产物全部在 `tmp/`（`pptx-kn-check.pptx`、`kn-export/`、`kn-export.pptx`、`kn-export.pdf`、`pptx-pip.log`），
 按 §6.5/§7.3 由本次执行者清理，不入库。
