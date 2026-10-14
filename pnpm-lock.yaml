@@ -78,6 +78,9 @@ importers:
       '@office-copilot/pptx-io':
         specifier: workspace:*
         version: link:../../packages/pptx-io
+      '@office-copilot/pptx-tools':
+        specifier: workspace:*
+        version: link:../../packages/pptx-tools
       '@office-copilot/sheet-io':
         specifier: workspace:*
         version: link:../../packages/sheet-io
