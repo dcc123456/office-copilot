@@ -223,14 +223,16 @@ pptx 里**每个 XML 部件都要自己的 `<Override>`**（`presentationml.slid
 唯一没复现成功的那份（3 页 + 备注 + 图表 + 表格）是 AppleEvent 超时 `-1712`，同类夹具分开造都能开——
 所以判据要写成"通道可用但不稳，超时须重试并如实报告"，不许当成"能开"的普遍结论。
 
-### 阶段 1 · 抽 `packages/opc`，两线不改行为 — `[ ]`
+### 阶段 1 · 抽 `packages/opc`，两线不改行为 — `[x] 已完成 2026-10-14（`7178c65` 读层 + `740c6e4` 写侧登记）`
 按 D2 把 OPC 提到公共包，`sheet-io`/`docx-io` 改依赖它。
 **完成判定**：`pnpm test` 逐包通过数与抽取前**完全一致**（不许靠改测试过），xlsx/docx 产物字节级往返夹具全绿。
+**实测**：抽前抽后逐包通过数一致（docx-io 296 / sheet-io 245 / desktop 457 …），仅新增 `packages/opc` 12 条；未改任何既有测试。serialize 顺带修回注释与 CDATA 的往返（原 docx-io 版会静默丢掉）。
 
-### 阶段 2 · `packages/pptx-io`：读 + 保真回写 — `[ ]`
+### 阶段 2 · `packages/pptx-io`：读 + 保真回写 — `[~] 读模型 + 保真回写已落（本次提交）；notes/母版继承全解析、`oc ppt check`、Keynote 复开仍缺`
 部件树（presentation/master/layout/slide/notes/theme）、D3 的 `effective`+`src` 继承解析、D4 换算、未建模部件原样带过。
 **完成判定**：三份夹具"打开→原样存回"后 `unzip -l` 条目集与**未改动部件的字节**逐字一致，`oc ppt check` 0 条，
 python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `count of slides` 与文字一致。
+**实测（读+保真这条已达标）**：本机 python-pptx 1.0.2 交叉读一份真实 38 部件 `.pptx` 往返产物 → 形状文字 `['标题甲','副标题乙','正文丙']` 全等、38 个部件字节级 0 变化（含二进制）；读模型对占位符 `hasOwnGeometry=false`、文本框 `true`（D3 未烘焙）。**仍缺**：母版/版式的 `effective` 继承链解析（阶段 3 视图才要）、`oc ppt check` 审计、Keynote 复开证据。
 
 ### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[ ]`
 D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字、改字号颜色、拖拽尺寸）。
