@@ -239,7 +239,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | §2.4/2.5 op 逆操作与内容寻址撤销 | 单测 | **已落地** | `apps/desktop/src/ai/docEdit.test.ts`、`diff.test.ts`；表格侧 `packages/sheet-io/src/sheet-edit.test.ts`、`apps/desktop/src/sheet/sheetHistory.test.ts` |
 | §2.6 离线排版幂等、只改格式 | 单测 | **已落地** | `apps/desktop/src/editor/formatDocument.test.ts`、`templates.test.ts` |
 | §2.8 工具入参校验 | zod | **已落地** | `packages/word-tools`、`packages/sheet-tools`（12 条入参解析用例：坏 JSON / 缺字段 / 多字段 / 越界都回错误串，不抛异常） |
-| §2.10 新建 OPC 部件三处一起登记 | 单测（构造"原文件没有这个部件"的夹具）+ 结构审计 | **已落地** | `packages/sheet-io/src/sheet-file.test.ts`（inlineStr 来源新建 `sharedStrings`、原有表逐字节不动）、`xlsx-chart.test.ts`（图表五件登记）、`compat-audit.test.ts`（三种产物审计 0 条）、`apps/desktop/electron/sheetHandlers.test.ts`（保存前只拦新引入的问题） |
+| §2.10 新建 OPC 部件三处一起登记 | 单测（构造"原文件没有这个部件"的夹具）+ 结构审计 | **已落地** | `packages/sheet-io/src/sheet-file.test.ts`（inlineStr 来源新建 `sharedStrings`、原有表逐字节不动）、`xlsx-chart.test.ts`（图表五件登记）、`compat-audit.test.ts`（三种产物审计 0 条）、`packages/opc/src/opc.test.ts`（保存前只拦新引入的问题，`.xlsx`/`.pptx` 两条路共用这一份判定） |
 | §2.11 数值由引擎算，模型只交引用 | 单测 | **已落地** | `packages/sheet-io/src/xlsx-chart.test.ts`（`resolveChartSpec` 拒自填数字/二维引用）、`analysis/sheet-table.test.ts`、`apps/desktop/src/ai/sheetAgent.test.ts` |
 | §5.2 渲染层不碰 Node | contextBridge 白名单 + TS 类型 | **已落地** | `apps/desktop/electron/preload.ts` |
 | §5.5/5.6 弹层贴边、指针捕获 | 单测 | **已落地** | `hooks/useAnchoredMenu.test.ts`、`hooks/usePointerDrag.test.ts` |
