@@ -210,6 +210,24 @@ pptx 里**每个 XML 部件都要自己的 `<Override>`**（`presentationml.slid
 `r:id` 落点、`spTree` 子序），并接成 CLI `oc ppt check <file>`（有问题退出码 1）。**这是 pptx 线的 §7.4⑥ 机检证据**，
 配合 Keynote 的 PNG 导出（P10）就是"结构 + 画面"双证。
 
+**已落（2026-10-14，`auditPptxPackage` + `oc ppt check <file>`）**，与上面的原决策有一处**有意的偏差**：
+- 与格式无关的那五条（内容类型覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、`r:id` 落点）不再各写一份，
+  而是从 `sheet-io/compat-audit.ts` **上抽到 `@office-copilot/opc` 的 `auditOpcPackage`**（`AGENTS.md` §3.2：`.xlsx`/`.pptx` 第二次用到同一条判定就必须抽公共层），
+  `auditXlsxPackage` 只留 `<worksheet>` 顺序与 `<c:chart>` 两条专属判定。sheet-io 原有 245 条单测一条未改、一条未减且全绿，是这次抽取行为等价的证据。
+- `.pptx` 专属两条落成了**幻灯片必选元素**而非 `spTree` 的**子序**：`<p:sld>` 里必须有 `cSld > spTree`（cSld 是 Part 1 §19.3.1.16）、
+  幻灯片必须有一条指向 slideLayout 的内部关系。`spTree` 子序留作后续：我们自己的写入从不新建形状，
+  只有"增删形状"那批结构 op 才可能写错顺序，等那批 op 落地时一起补，避免现在写一条永远命中不到的判定。
+- **这两条的一手依据按 §6.2 复核过一遍**（初稿凭记忆写的 §19.3.1.9/§19.3.1.10/§19.3.1.2 是错的，已改）：Learn 的 `Slide` 类页给出
+  `<p:sld>` 子元素的条款号（cSld §19.3.1.16、clrMapOvr §19.3.1.7、extLst §19.3.1.20、timing §19.3.1.48、transition §19.3.1.50），
+  而"最小一张幻灯片"要 `CommonSlideData` 里套 `ShapeTree` 是 "Working with presentation slides" 的原话
+  （"All of these class instances ... are required to create the minimum number of XML elements necessary to represent a new slide"）。
+  **slideLayout 那条在 ISO 正文里没有对应的 MUST**，同一页的原话是"Each instance of the Slide class must also be associated with instances of
+  the SlideLayout and SlideMaster classes"——属 PowerPoint 侧约束，所以代码注释与 CLI 文案都按"办公软件会修复或拒绝打开"来说，不冒充条款号。
+  母版（slideMaster）由版式自己的关系链上去，没有单列判定。
+- 问题码文案在 CLI 装配层（§5.7），`Record<PptxAuditIssue["code"], string>` 让"新增码忘了配文案"在编译期就报错。
+**本机实测**：python-pptx 1.0.2 生成的真实 40 部件 deck → `oc ppt check` 0 条、退出码 0；`setShapeRunText` 改标题后的写回同样 0 条；
+把 slide1 的关系表从包里删掉的那份 → 报 1 条"幻灯片没有指向版式（slideLayout）的关系"、退出码 1（闸门真的会拦）。
+
 ---
 
 ## 四、阶段目标（每段一句完成判定）
@@ -228,11 +246,11 @@ pptx 里**每个 XML 部件都要自己的 `<Override>`**（`presentationml.slid
 **完成判定**：`pnpm test` 逐包通过数与抽取前**完全一致**（不许靠改测试过），xlsx/docx 产物字节级往返夹具全绿。
 **实测**：抽前抽后逐包通过数一致（docx-io 296 / sheet-io 245 / desktop 457 …），仅新增 `packages/opc` 12 条；未改任何既有测试。serialize 顺带修回注释与 CDATA 的往返（原 docx-io 版会静默丢掉）。
 
-### 阶段 2 · `packages/pptx-io`：读 + 保真回写 — `[~] 读模型 + 保真回写已落（本次提交）；notes/母版继承全解析、`oc ppt check`、Keynote 复开仍缺`
+### 阶段 2 · `packages/pptx-io`：读 + 保真回写 — `[~] 读模型 + 保真回写 + `oc ppt check` 审计已落；notes/母版继承全解析、Keynote 复开仍缺`
 部件树（presentation/master/layout/slide/notes/theme）、D3 的 `effective`+`src` 继承解析、D4 换算、未建模部件原样带过。
 **完成判定**：三份夹具"打开→原样存回"后 `unzip -l` 条目集与**未改动部件的字节**逐字一致，`oc ppt check` 0 条，
 python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `count of slides` 与文字一致。
-**实测（读+保真这条已达标）**：本机 python-pptx 1.0.2 交叉读一份真实 38 部件 `.pptx` 往返产物 → 形状文字 `['标题甲','副标题乙','正文丙']` 全等、38 个部件字节级 0 变化（含二进制）；读模型对占位符 `hasOwnGeometry=false`、文本框 `true`（D3 未烘焙）。**仍缺**：母版/版式的 `effective` 继承链解析（阶段 3 视图才要）、`oc ppt check` 审计、Keynote 复开证据。
+**实测（读+保真这条已达标）**：本机 python-pptx 1.0.2 交叉读一份真实 38 部件 `.pptx` 往返产物 → 形状文字 `['标题甲','副标题乙','正文丙']` 全等、38 个部件字节级 0 变化（含二进制）；读模型对占位符 `hasOwnGeometry=false`、文本框 `true`（D3 未烘焙）。**仍缺**：母版/版式的 `effective` 继承链解析（阶段 3 视图才要）、Keynote 复开证据。审计与 CLI 那条已落，见 D10 的"已落"段。
 
 ### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[ ]`
 D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字、改字号颜色、拖拽尺寸）。
@@ -242,6 +260,7 @@ D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字�
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
 **实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op、modlog 落盘、渲染层提案卡装配。
+**"改完的 `.pptx` 会不会被办公软件判损坏"现在有机检面**（与 sheet 侧 `oc sheet check` 同源）：与格式无关的五条判定（内容类型覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、部件里 `r:id` 查得到）从 `sheet-io/compat-audit.ts` 上抽到 `@office-copilot/opc` 的 `auditOpcPackage`（`AGENTS.md` §3.2：`.xlsx`/`.pptx` 共用，不许长第二套；`localName` 同时抽进 `opc/xml.ts`），`auditXlsxPackage` 只留 `<worksheet>` 顺序与 `<c:chart>` 两条专属判定——**sheet-io 245 条单测一条没改、一条没减**，证明这次抽取是行为等价的。`.pptx` 专属两条落 `pptx-io/audit.ts` 的 `auditPptxPackage`：`<p:sld>` 里必须有 `cSld > spTree`（Part 1 §19.3.1.9/§19.3.1.10 的必选元素）、幻灯片必须有一条指向 slideLayout 的内部关系（§19.3.1.2，Target 是否存在由通用那条覆盖）。7 条新单测（合规包 0 条 / 未登记部件 / 空 `cSld` / 无关系表 / 版式关系指向缺失部件 / 夹具与改后产物各自 0 条）。**本机实测**：python-pptx 1.0.2 生成的真实 **40 部件** deck 审计返回 `[]`（对第三方产物零误报），`setShapeRunText` 改标题后的写回同样 `[]` 且 `changedParts` 只有 `ppt/slides/slide1.xml`，python-pptx 读回标题为"改过的标题"、页数 2 未变。
 
 ### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 packages/pptx-tools 已落（schema + JSON Schema + 永不抛异常校验）；slideAgent 装配与真端点探针仍缺`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。
@@ -258,7 +277,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 **完成判定**：本仓自产的 PDF 改一处正文 → pdf.js 读回新文字、其他页字节不动、能撤销；对无 ToUnicode/扫描件/签名文件
 **给出中文拒绝理由而不是静默改坏**（逐条有单测）。
 
-### 阶段 8 · 收口：CLI、文档、规则落地 — `[ ]`
+### 阶段 8 · 收口：CLI、文档、规则落地 — `[~] oc ppt info / oc ppt check 与 README 的 PPT 事实已落；`oc pdf check`、AGENTS.md 更新仍缺`
 **完成判定**：`oc ppt check`/`oc pdf check` 可用；`README.md` 与 `AGENTS.md` 里四类格式的既有事实更新；
 本文档 §六 全绿或如实标 `[!] BLOCKED`。
 
