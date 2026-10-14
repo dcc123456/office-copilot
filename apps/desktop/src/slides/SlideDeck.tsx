@@ -1,5 +1,5 @@
 /**
- * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色与形状的位置尺寸。
+ * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色、形状的位置尺寸与叠放次序。
  *
  * 这里只做装配：草稿哪些能落地由 `slideDeckModel.ts` 说一不二，段落里有几条 run、形状有没有自己的
  * `<a:xfrm>` 都是 `@office-copilot/pptx-io` 读模型给的事实，改动一律收成 `PptxEditRequest` 交给主进程现做 op
@@ -8,10 +8,18 @@
  * 单位一律 CSS pt / px（读侧已按 `pptx-io/units.ts` 换好），视图里不再乘 100 或 9525（§2.1）。
  */
 import { useCallback, useMemo, useState } from "react";
-import type { PptxEditRequest, PresentationModel, ShapeBoxPx, SlideShape } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel, ShapeBoxPx, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
 import type { PptxEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
-import { boxDraftKeyOf, draftKeyOf, pendingEdits, SHAPE_BOX_FIELD_LABEL, type SlideDraft } from "./slideDeckModel.js";
+import {
+  boxDraftKeyOf,
+  draftKeyOf,
+  LAYER_DIRECTION_LABEL,
+  layerEdgeNote,
+  pendingEdits,
+  SHAPE_BOX_FIELD_LABEL,
+  type SlideDraft,
+} from "./slideDeckModel.js";
 import "../styles/slides.css";
 
 export interface SlideDeckProps {
@@ -65,6 +73,31 @@ function numberOrUndefined(raw: string): number | undefined {
   return trimmed === "" || !Number.isFinite(value) ? undefined : value;
 }
 
+/**
+ * 主进程的回包折成一句失败理由（三个写盘入口共用，§3.2 不写第三份）。
+ *
+ * @param outcome 跨界写盘的回包；`null` 表示那份演示文稿已经不在了。
+ * @param fallback 回包没带中文理由时用的那句。
+ * @returns 失败时要 toast 的那句；成功（回包带刷新后的模型）返回 null。
+ */
+function failureNote(outcome: PptxEditOutcome | null, fallback: string): string | null {
+  if (outcome?.ok && outcome.presentation) return null;
+  return outcome?.message ?? fallback;
+}
+
+/**
+ * 形状在列表与改动说明里的称呼。
+ *
+ * @param shape 一个形状快照。
+ * @returns `<p:cNvPr @name>`；名字是空串时用形状号兜底，别让改动说明里出现「」。
+ */
+function shapeTitle(shape: SlideShape): string {
+  return shape.name || `形状 ${shape.shapeId}`;
+}
+
+/** 叠放那四个按钮的排列顺序（照 `LAYER_DIRECTION_LABEL` 的键序：相邻两层先、两端后）。 */
+const LAYER_DIRECTIONS = Object.keys(LAYER_DIRECTION_LABEL) as SlideLayerDirection[];
+
 export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProps) {
   /** 未保存的草稿：run 级字段键见 `draftKeyOf`，几何键见 `boxDraftKeyOf`。 */
   const [drafts, setDrafts] = useState<Record<string, SlideDraft>>({});
@@ -100,27 +133,62 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
     setIsBusy(true);
     const saved = await onCommit(edits, `手工改了 ${edits.length} 处`);
     setIsBusy(false);
-    if (!saved || !saved.ok || !saved.presentation) {
-      if (saved?.message) toast(saved.message, "error");
-      else toast("这份演示文稿已经不在了，改动没有写入。", "error");
+    const note = failureNote(saved, "这份演示文稿已经不在了，改动没有写入。");
+    if (note) {
+      toast(note, "error");
       return;
     }
     setDrafts({});
-    toast(`已保存，动了 ${(saved.changedParts ?? []).length} 张幻灯片`);
+    toast(`已保存，动了 ${(saved?.changedParts ?? []).length} 张幻灯片`);
   }, [edits, onCommit]);
 
+  /**
+   * 撤销上一次落地的那批改动。
+   *
+   * **不清草稿**：撤销只回已落盘的那批，用户还没保存的输入是他的另一件事（点一次层级按钮就会
+   * 产生一个已落盘的批次，撤销是常事，牵连未保存的输入等于吞字）。草稿存的是绝对值，
+   * 回滚后 `pendingEdits` 会对着新现场重算，恰好等于现场值的那条自己就不交了。
+   */
   const revertLastBatch = useCallback(async () => {
     setIsBusy(true);
     const reverted = await onRevert();
     setIsBusy(false);
-    if (!reverted || !reverted.ok || !reverted.presentation) {
-      if (reverted?.message) toast(reverted.message, "error");
-      else toast("没有可撤销的批次，或这份文件已经换了。", "error");
+    const note = failureNote(reverted, "没有可撤销的批次，或这份文件已经换了。");
+    if (note) {
+      toast(note, "error");
       return;
     }
-    setDrafts({});
     toast("已撤销上一次保存的那批改动");
   }, [onRevert]);
+
+  /**
+   * 立刻落地一条叠放次序改动——这一条**不进草稿**。
+   *
+   * 理由是 `up` / `down` 相对的是当前顺序：攒进草稿再点第二次会退化成只挪一层，而这四个按钮的语义
+   * 就是点一次动一次（PowerPoint 功能区同样即点即动）。落地后主进程回包里带重读磁盘的模型，
+   * 形状列表按新的文档顺序重排；未保存的文字/几何草稿仍留在 `drafts` 里，不受牵连。
+   *
+   * @param partPath 该页的幻灯片部件路径。
+   * @param shape 要挪的那个形状。
+   * @param direction 四个方向之一；到头的那些按钮是禁用的，不会走到引擎整批拒绝那条路（§2.4）。
+   */
+  const commitLayer = useCallback(
+    async (partPath: string, shape: SlideShape, direction: SlideLayerDirection) => {
+      setIsBusy(true);
+      const moved = await onCommit(
+        [{ kind: "layer", target: { partPath, shapeId: shape.shapeId }, direction }],
+        `把「${shapeTitle(shape)}」${LAYER_DIRECTION_LABEL[direction]}`,
+      );
+      setIsBusy(false);
+      const note = failureNote(moved, "这份演示文稿已经不在了，叠放次序没有改动。");
+      if (note) {
+        toast(note, "error");
+        return;
+      }
+      toast(`已把「${shapeTitle(shape)}」${LAYER_DIRECTION_LABEL[direction]}`);
+    },
+    [onCommit],
+  );
 
   return (
     <div className="slide-deck">
@@ -153,8 +221,24 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
               return (
                 <div className="slide-shape" key={`${slide.partPath}#${shape.shapeId}`}>
                   <div className="slide-shape-meta">
-                    <strong>{shape.name || `形状 ${shape.shapeId}`}</strong>
+                    <strong>{shapeTitle(shape)}</strong>
                     <span className="slide-shape-kind">{shapeKindLabel(shape)}</span>
+                    <span className="slide-layer-buttons">
+                      {LAYER_DIRECTIONS.map((direction) => {
+                        const note = layerEdgeNote(slide.shapes, shape, direction);
+                        return (
+                          <button
+                            type="button"
+                            key={direction}
+                            onClick={() => void commitLayer(slide.partPath, shape, direction)}
+                            disabled={isBusy || note !== null}
+                            title={note ?? LAYER_DIRECTION_LABEL[direction]}
+                          >
+                            {LAYER_DIRECTION_LABEL[direction]}
+                          </button>
+                        );
+                      })}
+                    </span>
                   </div>
                   {shape.boxPx ? (
                     <div className="slide-box-fields">

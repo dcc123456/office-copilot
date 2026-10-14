@@ -98,6 +98,31 @@
   font-size: 12px;
 }
 
+/* 叠放那四个按钮靠右：点一次就落一次地（相对当前顺序挪一层，攒进草稿会丢掉次数）。 */
+.slide-layer-buttons {
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.slide-layer-buttons button {
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.slide-layer-buttons button:disabled {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
 .slide-para-input {
   flex: 1 1 auto;
   min-width: 0;

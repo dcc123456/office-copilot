@@ -345,12 +345,27 @@ pptx-io 原 26 条未改未减。
   `createFolders: false`。
 **仍缺**：画布式选中与拖拽尺寸（本批是列表里的数字输入框，不是 WYSIWYG 拖拽）、notes/母版继承链解析（阶段 2 那条）。
 
-### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级四类编辑 op + 叠放次序结构 op + 内容寻址撤销 + modlog 落盘已落（真 app 实测跨进程撤销）；增删形状那批结构 op 与历史面板的幻灯片渲染仍缺`
+### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级四类编辑 op + 叠放次序结构 op（含视图上那四个按钮）+ 内容寻址撤销 + modlog 落盘已落（真 app 实测跨进程撤销）；增删形状那批结构 op 与历史面板的幻灯片渲染仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
 **实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。
-**叠放次序这批（`moveShapeLayer`）**：一手依据是 ECMA-376 Part 1 §19.3.5 的 `CT_GroupShape`——spTree 的子元素序列是 `p:nvGrpSpPr`、`p:grpSpPr`，其后才是 `p:sp`/`p:grpSp`/`p:graphicFrame`/`p:cxnSp` 的 choice；标准正文**没有**写遮挡语义，那句由 python-pptx 的一手源码补上（`src/pptx/shapes/shapetree.py:541`："The first shape in the sequence is the backmost in z-order and the last shape is topmost."）。所以引擎只重排形状子元素、不写任何属性：`rewriteShapeOrder` 只填形状那些槽位，`p:nvGrpSpPr`/`p:grpSpPr` 与节点间空白原地不动；`up`/`top` 已在最顶、`down`/`bottom` 已在最底时回一句理由，不交 `before==after` 的空改动，装配端 `slideAgent.layerEdgeNote`（`slide.shapes` 本身就是文档顺序，不必再解析一次）先把这种条目逐条不交出，免得主进程整批拒（§2.4）。实测 `tmp/slide-layer-probe.mjs`：一页两形状的夹具（`twoShapeDeckParts`）里 `top` 之后自己的读侧与 python-pptx **都**读到 `3:TextBox 2 -> 2:Title 1`，`revert` 后两边都回到 `2:Title 1 -> 3:TextBox 2`，三份文件的 `auditPptxPackage` 各 **0 条**。
+**叠放次序这批（`moveShapeLayer`）**：一手依据是 ECMA-376 Part 1 §19.3.5 的 `CT_GroupShape`——spTree 的子元素序列是 `p:nvGrpSpPr`、`p:grpSpPr`，其后才是 `p:sp`/`p:grpSp`/`p:graphicFrame`/`p:cxnSp` 的 choice；标准正文**没有**写遮挡语义，那句由 python-pptx 的一手源码补上（`src/pptx/shapes/shapetree.py:541`："The first shape in the sequence is the backmost in z-order and the last shape is topmost."）。所以引擎只重排形状子元素、不写任何属性：`rewriteShapeOrder` 只填形状那些槽位，`p:nvGrpSpPr`/`p:grpSpPr` 与节点间空白原地不动；`up`/`top` 已在最顶、`down`/`bottom` 已在最底时回一句理由，不交 `before==after` 的空改动，装配端与视图共用 `slideDeckModel.ts` 的 `layerEdgeNote`（`slide.shapes` 本身就是文档顺序，不必再解析一次），
+先到端的条目逐条不交出，免得主进程整批拒（§2.4）。实测 `tmp/slide-layer-probe.mjs`：一页两形状的夹具（`twoShapeDeckParts`）里 `top` 之后自己的读侧与 python-pptx **都**读到 `3:TextBox 2 -> 2:Title 1`，`revert` 后两边都回到 `2:Title 1 -> 3:TextBox 2`，三份文件的 `auditPptxPackage` 各 **0 条**。
+
+**视图上那四个层级按钮这批**：`SlideDeck.tsx` 每个形状行的头部一排 `上移一层 / 下移一层 / 置于顶层 / 置于底层`，标签仍取 `LAYER_DIRECTION_LABEL`（与提案卡同一份，§3.2 / §5.7）。
+**这一条不进草稿、点一次落一次盘**：`up`/`down` 相对的是当前顺序，攒进草稿再点第二次会退化成只挪一层，而这四个按钮的语义就是点一次动一次（PowerPoint 功能区同样即点即动）；
+到头的那两头由 `layerEdgeNote` 直接置灰并在 `title` 里说理由，所以点出去的那条不会被引擎整批拒。
+落地后主进程回包带重读磁盘的模型，形状列表按新的文档顺序**当场重排**——这就是按钮的唯一可视反馈，视图不自己画缩略图。
+同一批改动顺带把**撤销不再清草稿**定死：撤销只回已落盘的那批，用户还没保存的输入是另一件事（草稿存的是绝对值，回滚后 `pendingEdits` 对着新现场重算，等于现场值的那条自己就不交了）。
+真 app 实跑（`tmp/probe/slide-layer-ui.mjs`，`--user-data-dir=tmp/slide-layer-ui/profile`，CDP 驱动 dist，一页三形状夹具）：
+初始禁用态如实——最底的 `Title 1` 是 `下移一层(禁用),置于底层(禁用)`、最顶的 `TextBox 3` 是 `上移一层(禁用),置于顶层(禁用)`、中间的 `TextBox 2` 四个都可点；
+在 `TextBox 2` 上留一条未保存的文字草稿后点 `Title 1` 的「上移一层」→ toast「已把「Title 1」上移一层」，磁盘当场变 `3:TextBox 2 -> 2:Title 1 -> 4:TextBox 3`，
+列表行序跟着变、那个形状的四个按钮同时全部解禁，草稿仍是 `1 处待保存` 且输入框值仍是「正文乙改过」；再点「置于底层」→ 磁盘回到 `2:Title 1 -> 3:TextBox 2 -> 4:TextBox 3`（草稿仍未保存）；
+点「撤销上一次保存」只回最后那一次点击（磁盘回到 `3:TextBox 2 -> 2:Title 1 -> 4:TextBox 3`），**草稿没被吞掉**（仍 1 处待保存、值仍是「正文乙改过」）；
+最后点「保存」→ 磁盘上 `<a:t>` 依次是 `正文乙改过 | 标题甲 | 正文丙`，与新的叠放顺序一致。事后 `auditPptxPackage` **0 条**，python-pptx 独立读到叠放 `[3, 2, 4]`、文字 `['正文乙改过', '标题甲', '正文丙']`。
+顺手实测出一条**读侧的宽容**：夹具的幻灯片 XML 少一个 `</a:p>` 时，`readSlideShapes` 不报错，面板如实显示「这张幻灯片没有可读出的形状」——解析失败现在被折成"没有形状"，见下面「仍缺」。
 **仍缺**：增删形状那批结构 op（新建 `p:sp` 要分配 `<p:cNvPr @id>`，而 ECMA 要求该 id 在**整份文档**内唯一——python-pptx 的 turbo-add 注释就明说撞号会让 PowerPoint 报修复错误，所以得先算全局最大号），以及历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下）。
+另有一条本批实测撞到的**读侧宽容**：幻灯片部件解析失败时 `readSlideShapes` 回空数组，面板于是只显示「这张幻灯片没有可读出的形状」，把"这一页读不懂"说成了"这一页是空的"——该如实分成两句（阶段 2 的读侧要补一条失败理由通道）。
 **实测（modlog 落盘 + 内容寻址撤销这条已达标，本批新落）**：撤销的凭据不再只活在渲染层的内存批次里。
 `apps/desktop/src/slides/slideHistory.ts` 把每次落地那批 op（整页前/后像）连同 label/summary 写成一条 `幻灯片改动` 记录，
 存进**同一份** `userData/modlog/<文档名>.json`（复用 `electron/modlog.ts` 那四个通道，无第二套历史栈 = C5）；
@@ -464,6 +479,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
   阶段 5 这批的门禁：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包通过数 `opc 15 / sheet-tools 12 / pptx-tools 15 / pptx-io 37 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / desktop 478`（合计 1119；`packages/shared` 仍无测试文件，是已知假绿源）。
   阶段 4 的 modlog 落盘这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 15 / **pptx-io 41**（+4 条现场核对）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 485**（+6 条记录层 +1 条出入口）`，合计 **1130**。
   叠放次序这批：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / **pptx-tools 16**（+1 条方向枚举）/ **pptx-io 45**（+4 条重排与逐字回原）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 487**（+1 条装配端判端 +1 条出入口）`，合计 **1137**。
+  视图上那四个层级按钮这批：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 16 / pptx-io 45 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 491**（`layerEdgeNote` 从 `slideAgent` 抽进 `slideDeckModel` 后补 4 条判端用例：中间四向都能挪、最顶只给向下两头、最底反向、单形状那页四向全到头）`，合计 **1141**。
 - `[x]` E3 视觉验收走 Keynote PNG 导出通道并报告看到的文字内容：`keynote-out.001.png` 第一页居中黑字「Keynote 要看到的第一页标题」+ 下方灰色「正文一行」，`002.png` 第二页「第二页标题」原样（阶段 3 实测段）。
 - `[ ]` E4 探针与夹具产物只进 `tmp/` 并清理；禁止 `git add -A`。
 

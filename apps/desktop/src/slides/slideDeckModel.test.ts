@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PptxEditRequest, PresentationModel, RunFormat, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, pendingEdits } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -141,5 +141,37 @@ describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
       "color:3",
       "ppt/slides/slide2.xml#2#0",
     ]);
+  });
+});
+
+describe("layerEdgeNote：到头的那个方向压根不许交出去", () => {
+  /** 三个形状按文档顺序（= 叠放顺序：第一个最底、最后一个最顶）排在同一页上。 */
+  const bottom = shapeOf(2, [["最底", 1]]);
+  const middle = shapeOf(4, [["中间", 1]]);
+  const top = shapeOf(7, [["最顶", 1]]);
+  const shapes = [bottom, middle, top];
+
+  it("中间的形状四个方向都能挪", () => {
+    for (const direction of ["up", "down", "top", "bottom"] as const) {
+      expect(layerEdgeNote(shapes, middle, direction), direction).toBeNull();
+    }
+  });
+
+  it("最顶的那个只给了向下那两头（交出去会被引擎整批拒，§2.4）", () => {
+    expect(layerEdgeNote(shapes, top, "up"), "up").toBe("它已经在最顶层");
+    expect(layerEdgeNote(shapes, top, "top"), "top").toBe("它已经在最顶层");
+    expect(layerEdgeNote(shapes, top, "down"), "down").toBeNull();
+  });
+
+  it("最底的那个反过来：向上的两头到头", () => {
+    expect(layerEdgeNote(shapes, bottom, "up"), "up").toBeNull();
+    expect(layerEdgeNote(shapes, bottom, "bottom"), "bottom").toBe("它已经在最底层");
+  });
+
+  it("这一页只有一个形状时四个按钮都不给点（挪了也是白挪）", () => {
+    const lonely = shapeOf(2, [["只有一个", 1]]);
+    for (const direction of ["up", "down", "top", "bottom"] as const) {
+      expect(layerEdgeNote([lonely], lonely, direction), direction).toBe("这一页只有这一个形状，没有可叠放的邻居");
+    }
   });
 });

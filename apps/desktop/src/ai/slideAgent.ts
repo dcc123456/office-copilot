@@ -25,6 +25,7 @@ import {
   type SubmitProposalArgsT,
 } from "@office-copilot/pptx-tools";
 import type { ToolCall, ToolTurnMessage, ToolTurnRequest, ToolTurnResult } from "../global.js";
+import { layerEdgeNote } from "../slides/slideDeckModel.js";
 
 /** 一次任务里最多转多少轮：模型无限要工具就该停下来问人，而不是无限烧 token。 */
 const MAX_TOOL_TURNS = 8;
@@ -160,29 +161,6 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
  */
 function isGroupShape(shape: SlideShape): boolean {
   return shape.kind === "group";
-}
-
-/**
- * 叠放方向是不是已经到头。
- *
- * `slide.shapes` 就是 `<p:spTree>` 里形状的文档顺序（读侧按它列），而那个顺序就是叠放次序：
- * 第一个在最底、最后一个在最顶。所以只要比对首尾，不必再解析一次 XML。
- *
- * @param shapes 该页全部形状（文档顺序）。
- * @param shape 本次要挪的那个。
- * @param direction 模型给的方向。
- * @returns 一句中文理由（该页只有一个形状、或已在要去的那一端）；能挪时返回 null。
- */
-function layerEdgeNote(
-  shapes: SlideShape[],
-  shape: SlideShape,
-  direction: "up" | "down" | "top" | "bottom",
-): string | null {
-  const at = shapes.indexOf(shape);
-  if (shapes.length < 2) return "这一页只有这一个形状，没有可叠放的邻居";
-  if ((direction === "up" || direction === "top") && at === shapes.length - 1) return "它已经在最顶层";
-  if ((direction === "down" || direction === "bottom") && at === 0) return "它已经在最底层";
-  return null;
 }
 
 /**

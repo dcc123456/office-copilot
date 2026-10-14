@@ -66,6 +66,30 @@ export function boxDraftKeyOf(partPath: string, shapeId: number): string {
 }
 
 /**
+ * 叠放方向是不是已经到头（AI 提案与视图上的层级按钮共用这一刀，§3.2 不写第二份）。
+ *
+ * `shapes` 就是 `<p:spTree>` 里形状的文档顺序（读侧按它列），而那个顺序就是叠放次序：
+ * 第一个在最底、最后一个在最顶（ECMA-376 §19.3.5 只钉子元素顺序，这层语义取自 python-pptx
+ * 的 `shapetree.py`）。所以只要比对首尾，不必再解析一次 XML。
+ *
+ * @param shapes 该页全部形状（文档顺序）。
+ * @param shape 本次要挪的那个。
+ * @param direction 要挪的方向。
+ * @returns 一句中文理由（该页只有一个形状、或已在要去的那一端）；能挪时返回 null。
+ */
+export function layerEdgeNote(
+  shapes: SlideShape[],
+  shape: SlideShape,
+  direction: SlideLayerDirection,
+): string | null {
+  const at = shapes.indexOf(shape);
+  if (shapes.length < 2) return "这一页只有这一个形状，没有可叠放的邻居";
+  if ((direction === "up" || direction === "top") && at === shapes.length - 1) return "它已经在最顶层";
+  if ((direction === "down" || direction === "bottom") && at === 0) return "它已经在最底层";
+  return null;
+}
+
+/**
  * 把草稿摊成一批待保存的改动。
  *
  * @param deck 主进程读出来的当前模型（草稿的对照基准）。
