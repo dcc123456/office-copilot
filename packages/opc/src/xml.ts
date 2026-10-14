@@ -134,19 +134,44 @@ export function text(el: Element): string {
 }
 
 /**
+ * 按标签名收集所有后代里的元素，文档顺序。
+ *
+ * @param el 起点元素（自身不计入）。
+ * @param matches 拿元素决定是否收进结果。
+ * @param acc 累加器，递归用；外部一般不传。
+ * @returns 匹配的元素数组。
+ */
+function collectWhere(el: Element, matches: (el: Element) => boolean, acc: Element[] = []): Element[] {
+  for (const c of children(el)) {
+    if (matches(c)) acc.push(c);
+    collectWhere(c, matches, acc);
+  }
+  return acc;
+}
+
+/**
  * 收集所有后代里指定标签名的元素，文档顺序。
  *
  * @param el 起点元素（自身不计入）。
  * @param name 带前缀的标签名原值。
- * @param acc 累加器，递归用；外部一般不传。
  * @returns 匹配的元素数组。
  */
-export function collectDescendants(el: Element, name: string, acc: Element[] = []): Element[] {
-  for (const c of children(el)) {
-    if (c.name === name) acc.push(c);
-    collectDescendants(c, name, acc);
-  }
-  return acc;
+export function collectDescendants(el: Element, name: string): Element[] {
+  return collectWhere(el, (c) => c.name === name);
+}
+
+/**
+ * 收集所有后代里指定**本地名**的元素，文档顺序。
+ *
+ * 与 `collectDescendants` 的差别只在比对方式：OOXML 允许各部件用不同的命名空间前缀，
+ * 按 `a:off` 这种原值比对会漏掉写成别的前缀的合法文件。
+ *
+ * @param el 起点元素（自身不计入）。
+ * @param tagName 不带前缀的标签名（如 `off`、`ext`）。
+ * @returns 匹配的元素数组。
+ */
+export function collectDescendantsByLocalName(el: Element, tagName: string): Element[] {
+  return collectWhere(el, (c) => localName(c.name) === tagName);
 }
 
 /**
