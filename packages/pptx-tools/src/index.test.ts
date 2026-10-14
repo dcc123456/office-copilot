@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PPTX_TOOL_SCHEMAS, PPTX_TOOLS, parseToolArguments } from "./index.js";
+import { PptxEdit, PPTX_TOOL_SCHEMAS, PPTX_TOOLS, parseToolArguments } from "./index.js";
 
 describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   it("合法 JSON 通过并套上默认值", () => {
@@ -37,7 +37,7 @@ describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   });
 });
 
-describe("pptx-tools：提案的五类改动", () => {
+describe("pptx-tools：提案的七类改动", () => {
   const one = (edit: unknown) => parseToolArguments("ppt_submit_proposal", JSON.stringify({ summary: "改一处", edits: [edit] }));
 
   it("set_run_text 合法入参通过", () => {
@@ -78,6 +78,28 @@ describe("pptx-tools：提案的五类改动", () => {
     expect(one({ type: "move_shape_layer", slideNumber: 1, shapeId: 4 }).ok).toBe(false);
   });
 
+  it("add_text_box 四个几何值与文字都要给：缺任一被拒，宽高非正被拒，空文字被拒", () => {
+    const box = { type: "add_text_box", slideNumber: 1, leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144, text: "谢谢观看" };
+    expect(one(box).ok).toBe(true);
+    expect(one({ ...box, text: "" }).ok).toBe(false);
+    expect(one({ ...box, widthPx: 0 }).ok).toBe(false);
+    expect(one({ ...box, heightPx: -1 }).ok).toBe(false);
+    for (const field of ["leftPx", "topPx", "widthPx", "heightPx", "text"] as const) {
+      const withoutField = Object.fromEntries(Object.entries(box).filter(([key]) => key !== field));
+      expect(one(withoutField).ok).toBe(false);
+    }
+  });
+
+  it("add_text_box 不许带 shapeId（新形状号由引擎落地时分配，模型引用不到）", () => {
+    expect(one({ type: "add_text_box", slideNumber: 1, leftPx: 0, topPx: 0, widthPx: 100, heightPx: 100, text: "甲", shapeId: 9 }).ok).toBe(false);
+  });
+
+  it("remove_shape 要页号与形状号；缺形状号或形状号越界被拒", () => {
+    expect(one({ type: "remove_shape", slideNumber: 2, shapeId: 4 }).ok).toBe(true);
+    expect(one({ type: "remove_shape", slideNumber: 2 }).ok).toBe(false);
+    expect(one({ type: "remove_shape", slideNumber: 2, shapeId: 0 }).ok).toBe(false);
+  });
+
   it("改文字超过 2000 字被拒", () => {
     const r = one({ type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "x".repeat(2001) });
     expect(r.ok).toBe(false);
@@ -97,5 +119,16 @@ describe("pptx-tools：导出一致性", () => {
       expect(tool.function.parameters.additionalProperties).toBe(false);
     }
     expect(PPTX_TOOLS.map((t) => t.function.name).sort()).toEqual(names.sort());
+  });
+
+  it("zod 联合里的每一类改动都在给模型的 JSON oneOf 里（只加校验忘了声明，模型就提不了那条）", () => {
+    const zodTypes = PptxEdit.options.map((option) => String(option.shape.type.value)).sort();
+    const submit = PPTX_TOOLS.find((tool) => tool.function.name === "ppt_submit_proposal");
+    if (!submit) throw new Error("没有 ppt_submit_proposal 这条工具定义");
+    const branches = (
+      submit.function.parameters.properties as { edits: { items: { oneOf: { properties: { type: { const: string } } }[] } } }
+    ).edits.items.oneOf;
+    expect(branches.map((branch) => branch.properties.type.const).sort()).toEqual(zodTypes);
+    expect(zodTypes).toEqual(["add_text_box", "move_shape_layer", "remove_shape", "set_run_color", "set_run_font", "set_run_text", "set_shape_geometry"]);
   });
 });

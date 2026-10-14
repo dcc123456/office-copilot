@@ -119,6 +119,46 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     expect(notes.join("\n")).toContain("已经在最顶层");
   });
 
+  it("加文本框只定位到整页（新形状号要引擎落地时才分配），删形状定位到形状", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "add_text_box", slideNumber: 2, leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144, text: "谢谢观看" },
+      { type: "remove_shape", slideNumber: 1, shapeId: 7 },
+    ]);
+    expect(notes).toEqual([]);
+    expect(requests).toEqual([
+      {
+        kind: "add_text_box",
+        target: { partPath: "ppt/slides/slide2.xml" },
+        box: { leftPx: 96, topPx: 96, widthPx: 480, heightPx: 144 },
+        text: "谢谢观看",
+      },
+      { kind: "remove_shape", target: { partPath: "ppt/slides/slide1.xml", shapeId: 7 } },
+    ]);
+
+    const pageMissing = slideRequestsOfProposal(sampleDeck(), [
+      { type: "add_text_box", slideNumber: 9, leftPx: 0, topPx: 0, widthPx: 100, heightPx: 100, text: "甲" },
+    ]);
+    expect(pageMissing.requests).toEqual([]);
+    expect(pageMissing.notes[0]).toContain("没有第 9 页");
+  });
+
+  it("同一批里先删掉的形状，后面那条改它的不交出（按顺序落地时那条必然失败，整批就不写了，§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "remove_shape", slideNumber: 1, shapeId: 4 },
+      { type: "set_run_text", slideNumber: 1, shapeId: 4, paraIndex: 0, runIndex: 0, text: "改不到了" },
+      { type: "remove_shape", slideNumber: 1, shapeId: 4 },
+      { type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "这条还能落" },
+    ]);
+    expect(requests).toEqual([
+      { kind: "remove_shape", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4 } },
+      { kind: "text", target: { partPath: "ppt/slides/slide1.xml", shapeId: 2, paraIndex: 0, runIndex: 0 }, text: "这条还能落" },
+    ]);
+    expect(notes).toHaveLength(2);
+    expect(notes.join("\n")).toContain("已经被删掉");
+    // 重复删同一个形状同理拦下：现场模型是提案前那一份，光查"这一页有没有它"拦不住第二次删
+    expect(notes[1]).toContain("「TextBox 3」在同一批里已经被删掉");
+  });
+
   it("多 run 的段落按模型指的 run 改，不整段覆盖（§2.3）", () => {
     const { requests } = slideRequestsOfProposal(sampleDeck(), [
       { type: "set_run_text", slideNumber: 1, shapeId: 4, paraIndex: 0, runIndex: 1, text: "只改第二截" },

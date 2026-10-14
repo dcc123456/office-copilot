@@ -3,13 +3,13 @@
  *
  * 与 `sheet-tools`/`word-tools` 同构，守同一条红线：模型只产出**入参与提案**，定位、落地、撤销全部由
  * `@office-copilot/pptx-io` 做（`AGENTS.md` §2.8、§2.11）。写面只有 `ppt_submit_proposal` 一个出口，
- * 它的五类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序）与 `pptx-io/edit.ts` 里
- * **自带逆操作**的五个 op 一一对应——表达不了的（增删形状、改版式）宁可不提供，
+ * 它的七类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状）与
+ * `pptx-io/edit.ts` 里**自带逆操作**的七个 op 一一对应——表达不了的（改版式与母版）宁可不提供，
  * 也不发一批没有逆操作的直写（§2.5）。
  * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `pptx-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 slideAgent）拿校验过的入参去调引擎函数：把 `slideNumber` 翻成部件路径、
  * 把 `{shapeId,paraIndex,runIndex}` 交给 `setShapeRunText`/`setRunFont`/`setRunColor`、
- * 把 `{shapeId}` 交给 `setShapeGeometry`/`moveShapeLayer`。
+ * 把 `{shapeId}` 交给 `setShapeGeometry`/`moveShapeLayer`/`removeShape`、把整页路径交给 `addTextBox`。
  * 坐标一律是"模型视角"：幻灯片 1 基（ppt_describe 报第几页）、形状号取自 ppt_describe 给的 shapeId、
  * 段/run 0 基（与 ppt_read_slide_text 列出的序号一致）。单位说在描述里：字号 pt、几何 px（§2.1 换算在引擎边）。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
@@ -116,13 +116,49 @@ const MoveShapeLayerEdit = z
   })
   .strict();
 
-/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类目前到叠放为止。 */
-export const PptxEdit = z.discriminatedUnion("type", [SetRunTextEdit, SetRunFontEdit, SetRunColorEdit, SetShapeGeometryEdit, MoveShapeLayerEdit]);
+/** 一条加文本框的请求：四个几何值都要给（新形状没有可"不改"的原值），单位同样是屏幕 px。 */
+const AddTextBoxEdit = z
+  .object({
+    type: z.literal("add_text_box"),
+    slideNumber: SlideNumber,
+    leftPx: z.number().min(-5000).max(20000).describe("新文本框左缘横坐标，单位屏幕像素（px）。"),
+    topPx: z.number().min(-5000).max(20000).describe("新文本框上缘纵坐标，单位 px。"),
+    widthPx: z.number().min(1).max(20000).describe("新文本框宽度，单位 px，须为正。"),
+    heightPx: z.number().min(1).max(20000).describe("新文本框高度，单位 px，须为正。"),
+    text: z
+      .string()
+      .min(1)
+      .max(2000)
+      .describe(
+        "文本框里的文字，必填。落地后它落在该页最上层，形状号由引擎当场分配，所以**这一份提案里不能引用它**（要再改字号颜色得等下一轮重新 describe）。",
+      ),
+  })
+  .strict();
+
+/** 一条删形状的请求：整个形状连同它的文字一起没，逆操作是这一页的完整前像（§2.5）。 */
+const RemoveShapeEdit = z
+  .object({
+    type: z.literal("remove_shape"),
+    slideNumber: SlideNumber,
+    shapeId: ShapeId,
+  })
+  .strict();
+
+/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状为止。 */
+export const PptxEdit = z.discriminatedUnion("type", [
+  SetRunTextEdit,
+  SetRunFontEdit,
+  SetRunColorEdit,
+  SetShapeGeometryEdit,
+  MoveShapeLayerEdit,
+  AddTextBoxEdit,
+  RemoveShapeEdit,
+]);
 
 /**
  * `ppt_submit_proposal` 的入参。
  *
- * **不在这里**的是增删形状、改版式/母版（还没建成带逆操作的 op，spec 阶段 4 的"结构 op"仍缺），模型只能提这五项。
+ * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这七项。
  * "字体/几何至少给一项"这种跨字段约束不能放进 `discriminatedUnion`（会把成员包成 ZodEffects 而非法），所以在外层校验。
  */
 export const SubmitProposalArgs = z
@@ -250,11 +286,13 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
       name: "ppt_submit_proposal",
       description:
         "把你打算对幻灯片做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
-        "五类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
+        "七类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
         "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px）；" +
-        "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）。" +
-        "增删形状、改版式现在提不了。",
+        "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
+        "add_text_box 在某页新加一个文本框（四个几何值都要给，文字必填，形状号由引擎在落地时分配，这一份提案里引用不到它）；" +
+        "remove_shape 删掉某个形状（连同它的文字一起没，可撤销）。" +
+        "改版式与母版、删整页现在提不了。",
       parameters: {
         type: "object",
         properties: {
@@ -312,6 +350,30 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                     direction: { enum: ["up", "down", "top", "bottom"] },
                   },
                   required: ["type", "slideNumber", "shapeId", "direction"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "add_text_box" },
+                    slideNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    leftPx: { type: "number", minimum: -5000, maximum: 20000 },
+                    topPx: { type: "number", minimum: -5000, maximum: 20000 },
+                    widthPx: { type: "number", minimum: 1, maximum: 20000 },
+                    heightPx: { type: "number", minimum: 1, maximum: 20000 },
+                    text: { type: "string", minLength: 1, maxLength: 2000 },
+                  },
+                  required: ["type", "slideNumber", "leftPx", "topPx", "widthPx", "heightPx", "text"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "remove_shape" },
+                    slideNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    shapeId: { type: "integer", minimum: 1, maximum: 1_000_000 },
+                  },
+                  required: ["type", "slideNumber", "shapeId"],
                   additionalProperties: false,
                 },
               ],

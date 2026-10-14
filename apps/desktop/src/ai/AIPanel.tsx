@@ -245,10 +245,15 @@ function sheetChartLines(chart: ResolvedChart): string[] {
  */
 function slideEditLines(edits: readonly PptxEditT[]): string[] {
   return edits.map((edit) => {
+    // 加文本框那条还没有形状号——是引擎落地时才按该页现有最大值 +1 分配的，所以只定位到页。
+    if (edit.type === "add_text_box") {
+      const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
+      return `第 ${edit.slideNumber} 页 加文本框「${value}」（${Math.round(edit.leftPx)},${Math.round(edit.topPx)}px 起 ${Math.round(edit.widthPx)}×${Math.round(edit.heightPx)}px）`;
+    }
     const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
-    // 段号与 run 号只有 run 级改动才带：几何与叠放条目上没有这两项，取用之前先按类型分岔。
+    // 段号与 run 号只有 run 级改动才带：几何、叠放与删形状条目上没有这两项，取用之前先按类型分岔。
     const atRun =
-      edit.type === "set_shape_geometry" || edit.type === "move_shape_layer"
+      edit.type === "set_shape_geometry" || edit.type === "move_shape_layer" || edit.type === "remove_shape"
         ? where
         : `${where} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
     switch (edit.type) {
@@ -273,6 +278,8 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
       }
       case "move_shape_layer":
         return `${where} ${LAYER_DIRECTION_LABEL[edit.direction]}`;
+      case "remove_shape":
+        return `${where} 删掉整个形状（连同它里面的文字）`;
     }
   });
 }
@@ -373,7 +380,7 @@ const SLIDE_WELCOME_ITEM: Item = {
   t: "msg",
   role: "assistant",
   text:
-    "直接说要改这份文稿的哪里，比如「把第 1 页标题改成 Q3 复盘」「第 2 页那个文本框往下挪 60 像素」「把标题那截字加粗改成 32 磅」。页号从 1 数起，形状号与段/run 号由幻灯片引擎从现场文件列出来，不是我估的；能改的只有某一截字的文字/粗体/字号/颜色，以及形状的位置与尺寸。增删形状、调层级、改版式现在做不了。每次改动都要你点「应用到幻灯片」才落地，落地会直接写文件，能在幻灯片面板点「撤销上一次保存」回退。",
+    "直接说要改这份文稿的哪里，比如「把第 1 页标题改成 Q3 复盘」「第 2 页那个文本框往下挪 60 像素」「把标题那截字加粗改成 32 磅」「在第 1 页加一个写着『谢谢观看』的文本框」。页号从 1 数起，形状号与段/run 号由幻灯片引擎从现场文件列出来，不是我估的；能改的是某一截字的文字/粗体/字号/颜色、形状的位置尺寸与叠放次序，也能加文本框和删形状（新文本框的形状号由引擎落地时分配，所以同一份提案里改不到它）。改版式与母版、删整页现在做不了。每次改动都要你点「应用到幻灯片」才落地，落地会直接写文件，能在幻灯片面板点「撤销上一次保存」回退。",
 };
 
 /**
