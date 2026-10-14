@@ -149,6 +149,9 @@ pptx 会是第三份（§3.2 说第二次就该抽）。
 一次性把 `!isSheet` 的门控改成按模式判定；扩展点同时落在扩展名路由（`:374,447` 的 `docx|json|xlsx` 正则）与
 拖拽门控（`:450`）。样式仍走 `src/styles/*.css` 那一套（§5.4），幻灯片编辑区自己写视图，
 **不引入第二套样式体系、也不把 Tiptap 的 `EDITOR_EXTENSIONS` 拉去渲染幻灯片**（幻灯片是绝对定位画布，不是流式文档）。
+**已落（2026-10-14）**：`EditorMode` 就在 `App.tsx` 里（`"doc" | "sheet" | "slide" | "pdf"`，pdf 是这条决策留的扩展点，
+现在还没有分支会赋到它），九处 `!isSheet` 门控与 `isSheet || isDeck` 都改成按 `mode` 判定；
+视图落在 `apps/desktop/src/slides/**`（不是 `src/slide/**`）、出入口落在既有的 `electron/pptxHandlers.ts`（不新建 `slideHandlers.ts`，§3.4 扩展现有模块）。
 
 ### D8 — PDF 的"真·正文改写"：走**增量更新**，并且先修我们自产 PDF 已经坏掉的中文子集
 
@@ -261,7 +264,7 @@ python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `co
 这条同时是 §7.4⑥ 的"第三方办公软件真读过"与 §7.2 的"画面看得到"两层证据，pptx 线到这里不再有目视 BLOCKED。
 **仍缺**：母版/版式的 `effective` 继承链解析（阶段 3 视图才要）。审计与 CLI 那条已落，见 D10 的"已落"段。
 
-### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[~] 主进程出入口已落（读 / 批量落地 / 撤销 / 另存为）；视图与打开分派仍缺`
+### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[~] 打开分派 + 列表式文字视图已落（改文字→保存→撤销，真 app 与 Keynote 双向实测）；字号/颜色/拖拽尺寸的画布编辑仍缺`
 D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字、改字号颜色、拖拽尺寸）。
 **完成判定**：起真实 app 走"改标题→存盘→Keynote 导出 PNG→肉眼比对文字与位置"，并把 PNG 里的实际文字写进收尾报告（§7.2）。
 **已落（2026-10-14，`apps/desktop/electron/pptxHandlers.ts` + preload 四条通道）**：跨界只送 `PresentationModel` 与
@@ -277,7 +280,35 @@ D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字�
 经 `@office-copilot/pptx-io/testing` 这个 `exports` 子路径共用一份，**不进 `index.ts`**——否则一份假幻灯片
 会被主进程打包带进 `dist-electron/main.js`（改前 vite 确实报过这条，改后产物里已查不到 `test-deck`），
 pptx-io 原 26 条未改未减。
-**仍缺**：`file:open` 对话框与 `App.tsx` 的扩展名分派、幻灯片列表与画布视图（现在这份出入口在 UI 上还无人调用）。
+
+**已落（2026-10-14 第二批：D7 的模式枚举 + 打开分派 + 列表式文字视图）**：
+- **D7 落地**：`apps/desktop/src/App.tsx` 加 `export type EditorMode = "doc" | "sheet" | "slide" | "pdf"`，
+  原来那 9 处 `!isSheet` 门控与 `isSheet || isDeck` 全部改成按模式判定（`mode` 一处算出来）。pdf 线进来时只多一个分支，
+  不再叠 `!isSheet && !isDeck && !isPdf` 这种布尔组合。
+- **打开分派**：`file:open` 对话框的 filter 与扩展名闸门带上 `pptx`（`electron/fileHandlers.ts`）、`main.ts` 的
+  `OPENABLE_EXT` 认 `.pptx`（argv / 拖到 Dock / 访达"打开方式"那条路）、`App.tsx` 的 `openPath` 加 `.pptx` 分支
+  （`readPptx` → 清掉表格状态 → `setDeck`），拖拽正则与两处提示文案同步。
+- **视图**：`src/slides/SlideDeck.tsx` + `src/styles/slides.css`（只用 `tokens.css` 那一套，§5.4）。按页列形状
+  （名字 + 占位符角色 / 大类），**单条 run 的段落给输入框，多条 run 的段落只读并写明理由**（§2.3）；
+  保存走 `ppt:edit`、撤销把上一次那批 op 逆序送回 `ppt:revert`，都只经 preload 白名单（§5.2）。
+- **落地范围抽成模型层**：`src/slides/slideDeckModel.ts`（`draftKeyOf` + `pendingTextEdits`）决定"哪些段落会被写进文件"，
+  视图只显示条数和送批——与表格侧 `sheet/sheetGridModel.ts` 同一个分工（§3.3）。4 条单测钉住：只有真改过的单 run 段落成一条、
+  多 run 段落一次都不交出、文字来自字段（0 条 run）的不交出、顺序跟着"页—形状—段"的显示顺序。
+- **读模型补一条事实**：`SlideShape.paragraphRunCounts`（每段 `<a:r>` 条数）——视图判断"能不能整段覆盖"要靠它，
+  不靠猜（pptx-io 26→27 条）。跨界载荷类型（`PptxEditRequest`/`PptxEditPayload`/`PptxRevertPayload`）收进
+  `pptx-io/edit.ts` 一份，主进程、preload、渲染层三处共用（§3.2）。
+- **真 app 实测**（`pnpm build` 后跑 `dist`，CDP 连上去看 DOM，§7.2）：argv 打开 → 视图给出"2 页 · 0 处待保存"与
+  4 个形状（`Title 1 占位符 ctrTitle` / `Subtitle 2 占位符 subTitle` ×2）→ 改第一页标题 → "1 处待保存" → 点保存 →
+  toast"已保存，动了 1 张幻灯片" → `oc ppt info` 读磁盘：第一页是"Keynote 要看到的第一页标题"、**第二页原样** →
+  `.bak` 在 → `oc ppt check` 退出码 0（"没有发现会让办公软件判损坏的结构问题。"）→ 点"撤销上一次保存" →
+  视图与磁盘都回到"第一页标题" → **Keynote 导出两页 PNG 肉眼看过**：第一页居中黑字"Keynote 要看到的第一页标题"、
+  下方灰色"正文一行"，第二页"第二页标题"（文字与位置都对，§7.4⑥ 的第三方真读过 + §7.2 的画面证据一并拿到）。
+- **§2.3 的目视证据**：`tmp/multi-run.pptx`（一段里两条不同格式 run）在视图里 **0 个输入框**，显示
+  "这段有 2 截不同格式的文字，整段覆盖会拍平粗体与字号，本视图只读"。
+- **三种模式回归**（同一份 `dist`，同一实例依次换文件）：`.docx` → 工具栏/大纲/状态栏/185 段都在；`.xlsx` → 文档面板全隐、
+  表格面板在；`.pptx` → deck 视图在、文档面板全隐。证明这次换枚举没改坏前两条路。
+**仍缺**：字号 / 颜色 / 形状几何的编辑入口（引擎侧四条 op 早就在，视图只装配了"改文字"这一条）、画布式选中与拖拽尺寸、
+modlog 落盘、notes/母版继承链（阶段 2 那条）。
 
 ### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字/字体/颜色 + 形状几何编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
@@ -313,7 +344,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | 0 | `packages/pptx-io/scripts/make-sample-deck.ts`、`tmp/pylibs`（不入库） | 夹具由脚本现生成，不提交二进制 |
 | 1 | 新包 `packages/opc`；`packages/sheet-io/src/opc.ts`（删）、`packages/docx-io/src/docx.ts`（改依赖） | 见 D2 的顺序红线 |
 | 2 | `packages/pptx-io/src/{pptx-file,pptx-model,placeholder-inherit,units,color,compat-audit}.ts` | 单位换算单点：D4 |
-| 3 | `apps/desktop/src/App.tsx`（模式枚举）、`apps/desktop/src/slide/**`（新视图）、`electron/slideHandlers.ts`（照 `sheetHandlers.ts` 的 `.bak` + 存前审计） | §5.2 preload 白名单同步 |
+| 3 | `apps/desktop/src/App.tsx`（模式枚举，已落）、`apps/desktop/src/slides/**`（视图 + `slideDeckModel.ts`，已落）、`electron/pptxHandlers.ts`（照 `sheetHandlers.ts` 的 `.bak` + 存前审计，已落） | §5.2 preload 白名单同步；落点与初稿写的 `src/slide/**`+`slideHandlers.ts` 的差别见 D7 的"已落" |
 | 4 | `packages/pptx-io/src/slide-edit.ts`（op + 逆操作）、`apps/desktop/src/slide/slideHistory.ts` | 复用 modlog，不新建历史栈 |
 | 5 | `packages/agent-tools`（新，D6）、`packages/ppt-tools`、`apps/desktop/src/ai/slideAgent.ts` | 工具循环复用 `ai:tool-turn` |
 | 6 | `packages/pptx-io/src/chart-spec.ts` + 复用 `packages/sheet-io` 公开入口 | D9 |
@@ -329,7 +360,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 - `[ ]` A2 母版/版式继承不被拍平：只改标题文字后 `slide1.xml` 的 `<p:spPr/>` 仍为空（D3）。
 - `[ ]` A3 单位换算单点：全仓 grep 不到第二处 `914400`/`9525`/百分点换算（D4）。
 - `[ ]` A4 颜色：schemeClr 解析成 hex 交 UI，且不烤回 slide；`#rrggbb` 一条不减（§2.2）。
-- `[ ]` A5 原子写：幻灯片存盘走 `writeFileAtomically` + `.bak`（照 `sheetHandlers.ts:159`）。
+- `[x]` A5 原子写：幻灯片存盘走 `writeFileAtomically` + `.bak`（照 `sheetHandlers.ts:159`）。**实测**：真 app 点保存后 `tmp/app-deck2.pptx.bak` 出现、磁盘重读是新文字，点撤销后磁盘回到原字。
 - `[ ]` A6 新建部件登记齐全（D10 的宽版五件），审计 0 条 + `oc ppt check` 退出码 0。
 - `[ ]` A7 图表 cache 与内嵌工作簿自洽（D9），openpyxl 独立读回为证。
 - `[ ]` A8 PDF：改一处正文后其他页字节不动；pdf.js 读回新文字。
@@ -346,20 +377,21 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 - `[ ]` B5 真端点探针：模型会点对 `ppt` 工具名与形状 id；结论与原始 tool_calls 记进文档（探针在 `tmp/`，不进主干）。
 
 ### C. 可撤销性与历史（对应 §2.5）
-- `[ ]` C1 每类 op 有逆操作单测；C2 内容寻址用 `creationId`，位置漂移不失效；
+- `[x]` C1 每类 op 有逆操作单测（文字/字体/颜色/几何四条：`pptx-io` 的 `apply`/`revert` 用例 + `pptxHandlers.test.ts` 的「撤销回到标题甲」）；
+- `[ ]` C2 内容寻址用 `creationId`，位置漂移不失效（现在仍按 `cNvPr @id` 定位，D5 的 GUID 那条未做）；
 - `[ ]` C3 撤销不牵连用户后来的手工编辑；C4 做不到时如实报"部分撤销"。
 - `[ ]` C5 复用同一份 modlog，无第二套历史栈。
 
 ### D. UI 与工程（对应 §3/§4/§5）
-- `[ ]` D1 `App.tsx` 的 `isSheet` 已换成模式枚举，无新增布尔门控。
+- `[x]` D1 `App.tsx` 的 `isSheet` 已换成模式枚举（`EditorMode`：九处文档门控与 `isSheet || isDeck` 全改），无新增布尔门控；三种模式在真 app 里各跑一遍确认没改坏表格与文档视图（阶段 3 的实测段）。
 - `[ ]` D2 无第二套 OPC / 解析 / 撤销 / 工具 schema / 样式体系（§3 红线）。
-- `[ ]` D3 新函数全部有中文 JSDoc（含单位与失败语义）；命名有含义。
-- `[ ]` D4 渲染层不碰 Node，跨界只走 preload 白名单。
+- `[x]` D3 新函数全部有中文 JSDoc（含单位与失败语义）；命名有含义（本批：`pendingTextEdits`/`draftKeyOf`/`lockedParagraphHint`/`paragraphRunCounts`）。
+- `[x]` D4 渲染层不碰 Node，跨界只走 preload 白名单（`SlideDeck` 只调 `window.officeCopilot.editPptx/revertPptx`；幻灯片原文从不过进程边界）。
 
 ### E. 测试与门禁（对应 §7）
-- `[ ]` E1 每条写入路径有单测（mock fetch），**逐包核对通过数**（`packages/shared` 无测试是已知假绿源）。
-- `[ ]` E2 `pnpm build`（含 `tsc --noEmit`）+ `pnpm test` 重定向后读退出码，不许管道 tail。
-- `[ ]` E3 视觉验收走 Keynote PNG 导出通道并报告看到的文字内容；跑不通就标 `[!] BLOCKED` 并写原因。
+- `[x]` E1 每条写入路径有单测（本批：`slideDeckModel.test.ts` 4 条钉住「哪些段落会被写进文件」，视图本身不装配落地逻辑），**逐包核对通过数**（`packages/shared` 无测试是已知假绿源）。
+- `[x]` E2 `pnpm build`（含 `tsc --noEmit`）+ `pnpm test` 重定向后读退出码，不许管道 tail。本批两次都是 `EXIT=0`，且 build 真抓到一处联合类型窄化缺陷（`slideDeckModel.test.ts` 里 `edit.target.paraIndex`）。
+- `[x]` E3 视觉验收走 Keynote PNG 导出通道并报告看到的文字内容：`keynote-out.001.png` 第一页居中黑字「Keynote 要看到的第一页标题」+ 下方灰色「正文一行」，`002.png` 第二页「第二页标题」原样（阶段 3 实测段）。
 - `[ ]` E4 探针与夹具产物只进 `tmp/` 并清理；禁止 `git add -A`。
 
 ---
@@ -388,6 +420,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | 提交 | 阶段 | 命令与输出（逐包通过数） | 视觉/第三方读回结论 | 状态 |
 | --- | --- | --- | --- | --- |
 | `13e62e2` + 本次实测 | 0 | 无产品代码改动（纯取证）；`pnpm build`/`pnpm test` 未跑（未动 `src`） | 三类夹具 python-pptx 1.0.2 全读通（35/125/49 part）；Keynote 14.2 打开并导出 PNG，**柱状图与表格肉眼可见**（附录 A2） | `[x]` |
+| `7e271ff` | 3（视图 + 打开分派） | `pnpm build` EXIT=0（含 `tsc --noEmit`，抓到一处联合类型窄化缺陷）；`pnpm test` EXIT=0，逐包：pptx-io 27 / opc 15 / desktop 462 / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1093 条 / 76 个文件**（`packages/shared` 仍无测试文件，已知假绿源） | `oc ppt info` 读磁盘：第一页是新标题、第二页原样；`oc ppt check` 退出码 0；`.bak` 生成；撤销后磁盘回原字。**Keynote 导出两页 PNG 肉眼看过**：第一页居中黑字「Keynote 要看到的第一页标题」+ 灰色「正文一行」，第二页「第二页标题」；`tmp/multi-run.pptx` 在视图里 0 个输入框（§2.3） | `[~]` 文字那条闭环，字号/颜色/几何的入口仍缺 |
 
 ---
 
