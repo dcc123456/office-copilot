@@ -1,10 +1,10 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { buildSampleWorkbookBytes } from "../scripts/make-sample-sheet.js";
-import { cellDisplayText, parseUserCellText } from "./cell-text.js";
+import { cellDisplayText, numberFormatFromCode, parseUserCellText } from "./cell-text.js";
 import { SheetFile, SheetOpenError } from "./sheet-file.js";
 import { applySheetPayload, sheetPayloadOf, workbookPayload } from "./sheet-dto.js";
-import { deleteTracksOp, insertTracksOp, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp, sortRowsOp } from "./sheet-edit.js";
+import { deleteTracksOp, insertTracksOp, numberFormatColumnOps, revertSheetOps, runSheetOps, setCellFormulaOp, setCellTextOp, setColumnWidthOp, sortRowsOp } from "./sheet-edit.js";
 import { describeSheet, findRows, readRange } from "./analysis/sheet-table.js";
 import type { SheetModel, SheetLike as SheetPayload } from "./model.js";
 
@@ -468,7 +468,7 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
 
     // 撤销后第二次保存：磁盘上已经是改过的那份，从它出发写回逆操作的结果
     const reverted = revertSheetOps(applied.after, applied.inverses);
-    expect(reverted.ok).toBe(true);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
     const undoneFile = await SheetFile.fromBytes(editedBytes, { fileName: "sample.xlsx" });
     const undoneModel = (await undoneFile.sheetAt(0)) as SheetModel;
     applySheetPayload(undoneModel, reverted.after);
@@ -501,7 +501,7 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
     expect(edited.partXml).toContain("<conditionalFormatting");
 
     const reverted = revertSheetOps(applied.after, applied.inverses);
-    expect(reverted.ok).toBe(true);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
     expect(widthSegments((await writeAndReopen(reverted.after)).sheet)).toEqual([
       [0, 2, 12],
       [3, 3, 14],
@@ -549,6 +549,48 @@ describe("跨界载荷（阶段 2：渲染层只拿结构化格子，保存时�
   });
 });
 
+describe("整列统一数字格式的落盘证据（spec 决策 D10）", () => {
+  it("写进文件再读回来：C 列三格都是 0.00%，文本格与日期列不受牵连，撤销后回到原格式码", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const percentFormat = numberFormatFromCode("0.00%");
+    expect(percentFormat).toEqual({ numFmtId: 10, isDateLike: false });
+    const ops = numberFormatColumnOps(payload, 2, percentFormat!).ops;
+    expect(ops.map((op) => op.after.address)).toEqual(["C2", "C3", "C4"]);
+
+    const applied = runSheetOps(payload, ops);
+    expect(applied.skipped).toEqual([]);
+    const edited = await writeAndReopen(applied.after);
+    for (const address of ["C2", "C3", "C4"]) {
+      expect(edited.sheet.cells[address]?.numberFormat).toEqual({ numFmtId: 10, isDateLike: false });
+    }
+    // 只改显示，不改内容：数值仍是原来的数，别的列的格式码一个字没动
+    expect(edited.sheet.cells["C2"]?.value).toBe(120);
+    expect(edited.sheet.cells["D2"]?.numberFormat?.formatCode).toBe("yyyy-mm-dd");
+    expect(edited.sheet.cells["C1"]?.numberFormat).toBeUndefined();
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    const back = await writeAndReopen(reverted.after);
+    expect(back.sheet.cells["C2"]?.numberFormat).toEqual({ numFmtId: 3, isDateLike: false });
+    expect(back.sheet.cells["C3"]?.numberFormat?.numFmtId ?? 0).toBe(0);
+  });
+
+  it("cellXfs 只追加不重排：统一格式后原有的 xf 段仍按原顺序留在前面", async () => {
+    const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
+    const before = xfsOf((await partTexts(await buildSampleWorkbookBytes()))["xl/styles.xml"]);
+
+    const applied = runSheetOps(payload, numberFormatColumnOps(payload, 2, numberFormatFromCode("0.000%")!).ops);
+    expect(applied.skipped).toEqual([]);
+    const file = await openSample();
+    const model = (await file.sheetAt(0)) as SheetModel;
+    applySheetPayload(model, applied.after);
+    file.writeSheet(model);
+    const after = xfsOf((await partTexts(await file.toBytes()))["xl/styles.xml"]);
+
+    expect(after.slice(0, before.length)).toEqual(before);
+  });
+});
+
 describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
   it("插一行写进文件后维度变大，撤销再存回去与插入前逐字一致", async () => {
     const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
@@ -566,7 +608,7 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
     expect(edited.partXml).toContain('<conditionalFormatting sqref="C2:C4">');
 
     const reverted = revertSheetOps(applied.after, applied.inverses);
-    expect(reverted.ok).toBe(true);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
     expect((await writeAndReopen(reverted.after)).partXml).toBe(baseline);
   });
 
@@ -612,7 +654,7 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
     expect(edited.partXml).toContain("<pane ");
 
     const reverted = revertSheetOps(applied.after, applied.inverses);
-    expect(reverted.ok).toBe(true);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
     const back = await writeAndReopen(reverted.after);
     expect(back.partXml).toContain('<mergeCells count="1"><mergeCell ref="H1:I2"/></mergeCells>');
     expect(widthSegments(back.sheet)).toEqual([
@@ -677,7 +719,7 @@ describe("公式落盘（spec 阶段 4 D4：`<f>` 交给 Excel，缓存值 `<v>`
     expect(edited.partXml).toContain("<conditionalFormatting");
 
     const reverted = revertSheetOps(applied.after, applied.inverses);
-    expect(reverted.ok).toBe(true);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
     const back = await writeAndReopen(reverted.after);
     expect(back.partXml).not.toContain("AVERAGE(C2:C4)");
     expect(back.sheet.cells["F2"]).toBeUndefined();

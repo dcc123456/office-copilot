@@ -8,7 +8,7 @@
  */
 import { isWorksheetRelationship, loadPackage, readText, relativeTarget, resolveTarget, type OpcPackage } from "./opc.js";
 import { children, isElement, parseDocument, type Element } from "./xml.js";
-import type { SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
+import type { SheetCell, SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
 import type { ResolvedChart } from "./chart-spec.js";
 import { buildChartParts, CHART_CONTENT_TYPE, DRAWING_CONTENT_TYPE, DRAWING_REL_TYPE } from "./xlsx-chart.js";
 import { SHARED_STRINGS_CONTENT_TYPE, SHARED_STRINGS_PART, SHARED_STRINGS_REL_TYPE, SharedStringTable } from "./xlsx-strings.js";
@@ -415,16 +415,20 @@ export class SheetFile {
    * 换格式时该格原有的字体/底色/边框/对齐一律随格带走（§2.3 不许拍平局部格式）。
    * 读不懂的格（`rawXml` 原样回写的）不碰。
    *
-   * @param sheet 待写入的表；就地补 `cell.styleIndex`。
+   * @param sheet 待写入的表；需要换格式的格会换成一份补好 `styleIndex` 的副本，上层载荷原样不动。
    */
   private resolveNumberFormatStyles(sheet: SheetModel): void {
-    for (const cell of Object.values(sheet.cells)) {
+    const resolved: Record<string, SheetCell> = {};
+    for (const [address, cell] of Object.entries(sheet.cells)) {
       if (!cell.numberFormat || cell.rawXml) continue;
       const current = this.styles.numberFormatFor(cell.styleIndex);
       if (current.numFmtId === cell.numberFormat.numFmtId && current.formatCode === cell.numberFormat.formatCode) continue;
-      cell.styleIndex = this.styles.withNumberFormat(cell.styleIndex, cell.numberFormat);
-      cell.numberFormat = this.styles.numberFormatFor(cell.styleIndex);
+      const styleIndex = this.styles.withNumberFormat(cell.styleIndex, cell.numberFormat);
+      resolved[address] = { ...cell, styleIndex, numberFormat: this.styles.numberFormatFor(styleIndex) };
     }
+    // 必须整体换表而不是就地改格子：`applySheetPayload` 让表和上层载荷共用同一批 cell 对象，
+    // 就地写 `styleIndex` 会把上层 op 记录的前像一起改掉，存过一次盘后撤销就认不出自己（§2.5）。
+    if (Object.keys(resolved).length > 0) sheet.cells = { ...sheet.cells, ...resolved };
   }
 
   /**
