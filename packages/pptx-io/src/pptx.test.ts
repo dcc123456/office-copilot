@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
-import { readPresentation } from "./read.js";
+import { applySlideEdit, readPresentation, revertSlideEdit, setShapeRunText } from "./index.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -82,5 +82,63 @@ describe("pptx-io：保真回写", () => {
     const written = await file.partText(slidePath);
     expect(written).toContain("<a:t>标题乙</a:t>");
     expect(written).toContain("<p:spPr/>"); // 回写没把占位符的空几何烘成实数（D3）
+  });
+});
+
+/**
+ * 造一份标题段里有**两个不同格式 run** 的幻灯片，用来验编辑只动目标 run、不拍平邻居（§2.3）。
+ *
+ * @returns zip 字节；标题形状 id=2，段内 run0 粗体"标题甲"、run1 sz=1800"副"。
+ */
+async function twoRunDeck(): Promise<Uint8Array> {
+  const zip = new JSZip();
+  zip.file("[Content_Types].xml", '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>');
+  zip.file("_rels/.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>');
+  zip.file("ppt/presentation.xml", '<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst><p:sldId id="256" r:id="rId7"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>');
+  zip.file("ppt/_rels/presentation.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>');
+  zip.file("ppt/slides/slide1.xml", '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1"/><a:t>标题甲</a:t></a:r><a:r><a:rPr sz="1800"/><a:t>副</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>');
+  return zip.generateAsync({ type: "uint8array" });
+}
+
+describe("pptx-io：结构化文字编辑 op + 撤销", () => {
+  it("产出的 op 带前后像，apply 后部件变、revert 后逐字回到原样", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "新标题");
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.op.beforeXml).toBe(original);
+    expect(result.op.afterXml).toContain("<a:t>新标题</a:t>");
+    // 提案阶段不落地：部件文本仍未变
+    expect((await file.partText(partPath))! ).toBe(original);
+
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toContain("<a:t>新标题</a:t>");
+    expect(file.changedParts).toEqual([partPath]);
+
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original); // 撤销逐字回原
+  });
+
+  it("改 run0 不动 run1 的 rPr，局部格式不被拍平（§2.3）", async () => {
+    const file = await PptxFile.open(await twoRunDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const result = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 }, "改后");
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const after = (await file.partText(partPath))!;
+    expect(after).toContain("<a:rPr b=\"1\"/><a:t>改后</a:t>"); // 目标 run 文本变、其 rPr 留住
+    expect(after).toContain("<a:rPr sz=\"1800\"/><a:t>副</a:t>"); // 邻居 run 的格式与文字一个没动
+  });
+
+  it("越界或图片形状回带原因的失败而不是抛异常", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const badPara = await setShapeRunText(file, { partPath, shapeId: 2, paraIndex: 5, runIndex: 0 }, "x");
+    expect(badPara.ok).toBe(false);
+    const badShape = await setShapeRunText(file, { partPath, shapeId: 999, paraIndex: 0, runIndex: 0 }, "x");
+    expect(badShape.ok).toBe(false);
+    if (!badShape.ok) expect(badShape.reason).toContain("找不到形状");
   });
 });

@@ -6,3 +6,4 @@
 export * from "./parts.js";
 export * from "./read.js";
 export * from "./pptx-file.js";
+export * from "./edit.js";
