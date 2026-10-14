@@ -228,8 +228,18 @@ pptx 里**每个 XML 部件都要自己的 `<Override>`**（`presentationml.slid
   the SlideLayout and SlideMaster classes"——属 PowerPoint 侧约束，所以代码注释与 CLI 文案都按"办公软件会修复或拒绝打开"来说，不冒充条款号。
   母版（slideMaster）由版式自己的关系链上去，没有单列判定。
 - 问题码文案在 CLI 装配层（§5.7），`Record<PptxAuditIssue["code"], string>` 让"新增码忘了配文案"在编译期就报错。
+- **第三条专属判定（`feat(pptx-io)` 0eebd25，阶段 4 那条缺陷的后续）**：几何元素 `<a:off>`/`<a:ext>`（组合形状那对是 `<a:chOff>`/`<a:chExt>`）的
+  x、y 与 cx、cy 四条在 Part 1 §20.1.1.15（`CT_Point2D`）与 §20.1.1.14（`CT_PositiveSize2D`）里全是 required attribute，只写一半 PowerPoint 就判损坏。
+  写侧那条守卫（`edit.ts` 的 `missingPairValues`）只能挡住"我们自己写的"，旧产物或别的工具写进来的这种 XML 之前审计回 **0 条**，等于没机检——现在审计与写侧各守一头，
+  判定按**本地名**比对，所以写成 `<off y="…"/>` 这种换前缀/默认命名空间的合法写法也抓得到。同一刀还管 `<a:xfrm>` 少整块：`CT_Transform2D` 把 `off|chOff` 与 `ext|chExt` 两个 choice 各列为必选子元素，
+  只写 off 不写 ext 的 `<a:xfrm>` 属性一个个都齐、照样是损坏（正是 a3bd03c 那条缺陷当时写出来的形状）。
 **本机实测**：python-pptx 1.0.2 生成的真实 40 部件 deck → `oc ppt check` 0 条、退出码 0；`setShapeRunText` 改标题后的写回同样 0 条；
 把 slide1 的关系表从包里删掉的那份 → 报 1 条"幻灯片没有指向版式（slideLayout）的关系"、退出码 1（闸门真的会拦）。
+**第三条那条的实测**（`tmp/audit-check/inject.mjs`，真实 deck 注入半个 `<a:off y="571500"/>`）：`oc ppt check` 报
+"几何元素只写了一半必填属性（x 与 y、cx 与 cy 得成对），打开时报损坏：a:off 缺 x"、退出码 1；同一份文件 python-pptx 抛
+`InvalidXmlError: required 'x' attribute not present on element {…}off`——独立读取器与我们的判定同向；未注入的对照组 0 条、退出码 0（不误报）。
+**对真实文件的误报面**（新加判定必须核一遍）：python-pptx 默认模板、我们的两份探针产物、WPS 自带的两份新演示模板（`new_wpp.pptx` 125 部件那份与 `mui/zh_HK/templates/newfile.pptx`）
+共 6 份 `.pptx` 逐份 `oc ppt check` 全部 0 条、退出码 0。
 
 ---
 
@@ -351,7 +361,8 @@ D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。
 **几何那条查出的一处红线缺陷（`fix(pptx-io)` a3bd03c，本批）**：`setShapeGeometry` 从前"给了哪个写哪个"，在**自己没写 `<a:xfrm>` 的形状**（标题/正文占位符，`boxPx` 为 `undefined`）上只给 `topPx` 时，get-or-create 就写出一半：`<p:spPr><a:xfrm><a:off y="571500"/></a:xfrm></p:spPr>`——既缺 `@x` 也缺 `<a:ext>`。
 一手依据：ECMA-376 Part 1 §20.1.1.15 `CT_Point2D` 把 `@x`/`@y` 都定成 required attribute、§20.1.1.14 `CT_PositiveSize2D` 同理，`CT_Transform2D` 又把 `a:off` 与 `a:ext` 都列为必选子元素。
-**独立读取器实测**（`tmp/probe/geo-probe.mjs`，`PYTHONPATH=tmp/pylibs`）：python-pptx 读这份产物直接抛 `InvalidXmlError: required 'x' attribute not present on element {…}off`，也就是 §2 那条"产物必须能被办公软件打开"被踩穿；而我们的 `auditPptxPackage` 当时回 **0 条**（它只判 OPC 五件与 `cSld>spTree`、版式关系，没判 DrawingML 的属性），所以这条只能靠写侧自己拦（把这类缺陷变成机检是下面"仍缺"的一条）。
+**独立读取器实测**（`tmp/probe/geo-probe.mjs`，`PYTHONPATH=tmp/pylibs`）：python-pptx 读这份产物直接抛 `InvalidXmlError: required 'x' attribute not present on element {…}off`，也就是 §2 那条"产物必须能被办公软件打开"被踩穿；而我们的 `auditPptxPackage` 当时回 **0 条**（它只判 OPC 五件与 `cSld>spTree`、版式关系，没判 DrawingML 的属性），所以这条当时只能靠写侧自己拦。
+**这一类现在是机检了**（`feat(pptx-io)` 0eebd25）：审计补 `slide-incomplete-transform` 一条，落盘前看得见半个 `<a:off>`/`<a:ext>`（含组合形状的 `chOff`/`chExt`），判定与写侧那刀同一套条款号，细节与实测记在 D10 的"已落"段第三条。
 修法两层：**引擎动手前先按必填属性核一刀**（`missingPairValues`，缺哪个就在理由里报哪个字段名；形状已有的那一半原样留住，所以正常形状单改宽/单改高照旧合法），**代理再拦在提案面**（`slideRequestsOfProposal` 见 `shape.boxPx` 缺失且四个值没给齐时逐条不交出、给中文理由，免得把注定失败的一条递给主进程换来整批不落地，§2.4）；工具面描述与 `SLIDE_SYSTEM` 同步这个约束，模型看得到。
 **为什么不补另一个轴的数**：那是把用户没要求的那一轴也钉死、顺手切断版式继承链（D3 的反面）；真要补继承值该走"母版/版式继承链解析"那条（下面阶段 2 的"仍缺"），不是在写侧猜。
 真 app 实跑（`tmp/probe/slide-geo-placeholder-ui.mjs`，桩端点 + 假 Key，`--user-data-dir=tmp/slide-geo/profile`，CDP 驱动 dist）：一条只给 `topPx` 的占位符提案进卡后**当场标成"改不了"**（卡上 `2 处改动` + 那句跳过理由，另两条照样落地），磁盘上两个形状各有一对完整的 off/ext（`952500/571500 + 4762500×1143000` 与新宽 `2857500`、原 `cy` 留住），点「撤销上一次保存」后 `slide1.xml` **逐字回原**，python-pptx 读回的仍是继承值（标题 `457200/274638/8229600/1143000` 来自版式，形状自己没写）。
@@ -370,7 +381,9 @@ D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 点「撤销上一次保存」只回最后那一次点击（磁盘回到 `3:TextBox 2 -> 2:Title 1 -> 4:TextBox 3`），**草稿没被吞掉**（仍 1 处待保存、值仍是「正文乙改过」）；
 最后点「保存」→ 磁盘上 `<a:t>` 依次是 `正文乙改过 | 标题甲 | 正文丙`，与新的叠放顺序一致。事后 `auditPptxPackage` **0 条**，python-pptx 独立读到叠放 `[3, 2, 4]`、文字 `['正文乙改过', '标题甲', '正文丙']`。
 顺手实测出一条**读侧的宽容**：夹具的幻灯片 XML 少一个 `</a:p>` 时，`readSlideShapes` 不报错，面板如实显示「这张幻灯片没有可读出的形状」——解析失败现在被折成"没有形状"，见下面「仍缺」。
-**仍缺**：历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下）、画布式选中与拖拽尺寸（现在能改几何的是数字输入框），以及把上面那类"DrawingML 必填属性缺一半"补进 `auditPptxPackage`（现在只有写侧拦，审计回 0 条，等于没机检）。
+**仍缺**：历史面板按格式渲染幻灯片记录（`components/HistoryPanel.tsx` 正在 dcc 手上改，本批没动它，见下）、画布式选中与拖拽尺寸（现在能改几何的是数字输入框）。
+上面那类"DrawingML 必填属性缺一半"已经从"只有写侧拦"变成机检（`slide-incomplete-transform`，见 D10 第三条），但审计目前只覆盖 `xfrm` 这一族属性/子元素；
+版式与母版部件（`slideLayout`/`slideMaster`）里同一族元素还没纳入判定，母版的 `cSld > spTree` 那两条也只对幻灯片生效。
 **增删形状这批（`addTextBox` / `removeShape`，本批新落）**：一手依据纠正了本文件前面那句"ECMA 要求 `p:cNvPr @id` 在**整份文档**内唯一"——**它是错的**。
 python-pptx 分配形状号的那段源码（`tmp/pylibs/pptx/oxml/shapes/groupshape.py:151-163` 的 `max_shape_id`）取的是**这一页 spTree 上的** `xpath("//@id")` 最大值，注释写 "XML id-values have document scope"，那份 document 就是这一个幻灯片部件；
 本机实测也对得上：`tmp/pptx-edit/probe.pptx` 两页的 id 分别是 `[1,2,3]` 与 `[1,2]`，**跨页本来就重复**。
@@ -619,3 +632,4 @@ open tmp/p0/deck.pptx（3 页 + 备注 + 图表 + 表格，建在 WPS 模板上�
   增删形状这批：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 16 / **pptx-io 52**（+7 条新建/删除：形状号在本页内取、骨架与单位、空段、转义、拒绝不落、逐字回原、删到空）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 495**（+3 条 `dropShapeDrafts`）`，合计 **1152**。`packages/opc` 另多导出一个 `XmlNode` 类型（自己走子树时要按它接 `isElement` 收窄），不是新实现。
   把增删形状开进 AI 提案面这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / **pptx-tools 20**（+4 条：`add_text_box` 五字段必填与非正尺寸与空文字、strict 拒 `shapeId`、`remove_shape` 缺号与 0 号、七类判别式在 zod 与给模型的 JSON `oneOf` 里逐项相等）/ pptx-io 52 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 497**（+2 条装配：加文本框只定位到整页 + 页号越界，同批已删的形状后面那条不交出）`，合计 **1158**。
   把几何单轴的必填属性核上这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 20 / **pptx-io 53**（+1 条：占位符上只给一轴带原因拒绝、且拒了不许留下半个 `<a:off>`）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 498**（+1 条装配：继承几何的形状只给一轴时不交出）`，合计 **1160**。
+  把几何那一类变成落盘前机检这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 20 / **pptx-io 58**（+5 条审计：半个 `<a:off>` 报出并念出缺的属性、四值写全不误报、`chOff`/`chExt` 与前缀换写也抓得到、`<a:xfrm>` 少整块 `ext/chExt` 也报、写全几何的产物自己过审计）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / **cli 5**（那条文案用例加了几何那码的断言）/ desktop 498`，合计 **1165**。
