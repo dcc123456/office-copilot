@@ -131,7 +131,8 @@ export interface SheetOpsResult {
 }
 
 /** 单条 op 的落地结果：成功给新载荷与逆操作，失败只给理由。 */
-type ApplyOutcome = { sheet: SheetPayload; inverse: SheetCoreOp } | { reason: string };
+/** 单条 op 落地的结果：新载荷 + 自己的逆操作；插删还会带出"引用被改写过的格子"（D8 的刷新目标）。 */
+type ApplyOutcome = { sheet: SheetPayload; inverse: SheetCoreOp; refresh?: A1Address[] } | { reason: string };
 
 /**
  * 一批 op 的唯一落地入口：在载荷的副本上顺序应用，失败的挑出去，成功的合成新载荷。
@@ -744,11 +745,12 @@ function applyShiftOp(sheet: SheetPayload, op: ShiftTracksOp): ApplyOutcome {
       target: trackAddress(next, op.axis, from),
       removed: shiftBand(op.removed, op.axis, shift),
     },
+    refresh: moved.rewritten,
   };
 }
 
 /** 插删之后的四样东西（格子、行元信息、列宽段、合并区）；认不出安全落点时只给理由。 */
-type MoveOutcome = { tracks: Pick<SheetPayload, "cells" | "rows" | "columns" | "merges"> } | { reason: string };
+type MoveOutcome = { tracks: Pick<SheetPayload, "cells" | "rows" | "columns" | "merges">; rewritten: A1Address[] } | { reason: string };
 
 /**
  * 算出位移之后的表内容。
@@ -769,6 +771,7 @@ function moveTracks(sheet: SheetPayload, op: ShiftTracksOp, from: number, shift:
   const positionOf = (cell: SheetCell) => (isRow ? cell.rowIndex : cell.colIndex);
 
   const cells: Record<string, SheetCell> = {};
+  const rewritten: A1Address[] = [];
   for (const cell of Object.values(sheet.cells)) {
     if (!inserting && positionOf(cell) >= from && positionOf(cell) <= to) continue;
     const movedBy = positionOf(cell) >= moveFrom ? delta : 0;
@@ -778,6 +781,8 @@ function moveTracks(sheet: SheetPayload, op: ShiftTracksOp, from: number, shift:
       const shiftedFormula = shiftFormula(cell.formula, op.axis, from, delta, inserting ? undefined : { startIndex: from, endIndex: to });
       if (!shiftedFormula.ok) return { reason: shiftedFormula.reason };
       placeCell(cells, { ...cell, formula: shiftedFormula.formula }, colIndex, rowIndex);
+      // 引用串真的变了（区间被收窄、或被平移出/入被删带）：这一格的缓存值就不再是它现在的意思，交给 D8 刷新。
+      if (shiftedFormula.formula !== cell.formula) rewritten.push({ colIndex, rowIndex });
       continue;
     }
     if (movedBy !== 0 && cell.rawXml?.includes("<f")) return { reason: "有原样保留的格子带着公式，位移会把公式和它引用的格子拆散" };
@@ -794,7 +799,7 @@ function moveTracks(sheet: SheetPayload, op: ShiftTracksOp, from: number, shift:
     else columns = [...columns, ...op.removed.columns.map((column) => shiftColumn(column, shift))];
     merges = [...merges, ...op.removed.merges.map((merge) => moveMerge(merge, isRow, shift, shift))];
   }
-  return { tracks: { cells, rows, columns: sortColumns(columns), merges: sortMerges(merges) } };
+  return { tracks: { cells, rows, columns: sortColumns(columns), merges: sortMerges(merges) }, rewritten };
 }
 
 /** 把一个格子按新位置放回结果表：`address` 与 `colIndex/rowIndex` 必须同步（spec D1）。 */
@@ -1206,36 +1211,37 @@ function planFormulaRefresh(sheet: SheetPayload, changedAddresses: A1Address[]):
     const ranges = formulaReferencedRanges(cell.formula);
     // null = 引用里有我们不解释的结构（跨表、数组常量等），证明不了有没有被牵连，按 D8 不碰。
     if (!ranges || !ranges.some((range) => changedAddresses.some((changed) => rangeContains(range, changed)))) continue;
-    const parsedAddress = parseA1(address);
-    if (!parsedAddress) continue;
-    const evaluated = evaluateFormula(cell.formula, sheet, address);
-    if (!evaluated.ok) continue;
-    const parts = formulaCellParts(evaluated.value);
-    if (cell.value === evaluated.value && cell.kind === parts.kind) continue;
-    planned.push({
-      kind: "setCellValue",
-      partPath: sheet.partPath,
-      target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
-      before: cell,
-      after: { ...cell, ...parts, value: evaluated.value, cachedValue: evaluated.value },
-    });
+    const refreshOp = planCellRefresh(sheet, address);
+    if (refreshOp) planned.push(refreshOp);
   }
   return planned;
 }
 
 /**
- * 顺序应用一批 op，失败的挑出去；`inverses` 与已落地的 `ops` 同序。
+ * 刷**指定这一格**的公式缓存：重算出真实值，产出一条自带逆操作的 `setCellValue` op（D8 的形状）。
  *
- * 一批 op 都是照**同一份快照**锚定的，而第一条 op 本身就会改掉它那一行的内容指纹——
- * 不重新锚定的话，同一行的第二条 op 会以"认不出这一行"被跳过（阶段 4 的交叉读探针实测到的）。
- * 所以这里记一张"批内改过的条：旧指纹 → 新指纹"的表，只在这批 op 内部生效；
- * 批外的改动（用户后来的手工编辑）仍然按原样拦下来，`AGENTS.md` §2.5 的语义不受影响。
- *
- * @param sheet 现场载荷（入参不被改动）。
- * @param ops 待应用的一批 op。
- * @param isUndo 是否撤销批：撤销批落地后不再刷新一轮公式缓存（spec D8），正向批会在 op 全部落地后追加刷新。
- * @returns `SheetOpsResult`；正向批的 `ops`/`inverses` 可能比提交的条数多（多出的是缓存刷新 op）。
+ * @param sheet 本批 op 落地之后的载荷。
+ * @param address 要刷的格子（A1，1 基显示地址）。
+ * @returns 需要刷时给 op；这一格不是可解析的公式格、算不出来、或值与显示都没变时返回 null（原样保留）。
  */
+function planCellRefresh(sheet: SheetPayload, address: string): SheetCoreOp | null {
+  const cell = sheet.cells[address];
+  if (!cell?.formula || cell.rawXml) return null;
+  const parsedAddress = parseA1(address);
+  if (!parsedAddress) return null;
+  const evaluated = evaluateFormula(cell.formula, sheet, address);
+  if (!evaluated.ok) return null;
+  const parts = formulaCellParts(evaluated.value);
+  if (cell.value === evaluated.value && cell.kind === parts.kind) return null;
+  return {
+    kind: "setCellValue",
+    partPath: sheet.partPath,
+    target: { row: trackAddress(sheet, "row", parsedAddress.rowIndex), colIndex: parsedAddress.colIndex },
+    before: cell,
+    after: { ...cell, ...parts, value: evaluated.value, cachedValue: evaluated.value },
+  };
+}
+
 function applyOps(sheet: SheetPayload, ops: SheetCoreOp[], isUndo: boolean): SheetOpsResult {
   let current = sheet;
   const opsApplied: SheetCoreOp[] = [];
@@ -1243,6 +1249,8 @@ function applyOps(sheet: SheetPayload, ops: SheetCoreOp[], isUndo: boolean): She
   const skipped: SheetSkippedOp[] = [];
   const reanchors = new Map<string, SheetTrackAddress>();
   const changedCells: A1Address[] = [];
+  // 插删把某条公式的引用串改写掉了（区间收窄、平移出入带），这些格子的缓存值当场就不对了（spec D9）。
+  const rewrittenCells: A1Address[] = [];
   for (const planned of ops) {
     const op = reanchorOp(planned, reanchors);
     const landedOn = trackLandedOn(current, op);
@@ -1259,10 +1267,24 @@ function applyOps(sheet: SheetPayload, ops: SheetCoreOp[], isUndo: boolean): She
       const changed = parseA1(op.after?.address ?? op.before?.address ?? "");
       if (changed) changedCells.push(changed);
     }
+    if (outcome.refresh) rewrittenCells.push(...outcome.refresh);
   }
   // 正向批：把被牵连的公式缓存刷成真实值（D8）。撤销批不刷——撤销的契约是回到批前那个样子。
   if (!isUndo) {
-    for (const refreshOp of planFormulaRefresh(current, changedCells)) {
+    const plannedRefresh = planFormulaRefresh(current, changedCells);
+    for (const position of rewrittenCells) {
+      const refreshOp = planCellRefresh(current, formatA1(position));
+      if (refreshOp) plannedRefresh.push(refreshOp);
+    }
+    // 两个来源可能撞同一格（既被内容改动牵连、又被插删改写引用），按锚点去重，别写两遍。
+    const seenAnchors = new Set<string>();
+    for (const refreshOp of plannedRefresh.filter((item) => {
+      if (item.kind !== "setCellValue") return true;
+      const key = `${item.target.row.fingerprint}|${item.target.row.nth}|${item.target.colIndex}`;
+      if (seenAnchors.has(key)) return false;
+      seenAnchors.add(key);
+      return true;
+    })) {
       const outcome = applyOne(current, refreshOp);
       if ("reason" in outcome) continue;
       current = outcome.sheet;

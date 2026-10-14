@@ -14,8 +14,11 @@
  * - 删掉区间**中间**的行时区间收缩（`SUM(C2:C4)` 删第 3 行 → `SUM(C2:C3)`），这与 Excel 一致：
  *   区间两个端点都不在被删带里，就只是各自上移。
  *
- * 认不出的写法（跨表 `!`、外部工作簿 `[1]`、结构化表 `[...]`、数组常量 `{}`、已有的 `#`）
- * 一律拒绝：它们的位移要连表名/表结构一起解析，那属于阶段 4 的公式求值器。
+ * 认不出的写法分两种处理（spec D9 第 1 条）：
+ * - **指向别的工作簿**的引用（`'[1]Sheet1'!$A$2`）原样带过——本地这张表插删挪不动它，
+ *   把它当成"不解析就整条拒绝"会让一条外部引用否决掉全表的插删（探针实测的缺陷）。
+ * - 跨表 `'其它表'!`、数组常量 `{}`、已有的 `#` 仍然整条拒绝：前者要连表名与本表的名字一起比对才敢断定它不受影响
+ *   （`SheetLike` 载荷里没有表名，只有 `SheetModel` 有），后两种根本不是引用，位移语义未知。
  */
 import { colNameToIndex, indexToColName } from "./address.js";
 import type { SheetAxis } from "./sheet-edit.js";
@@ -38,6 +41,12 @@ const TOKEN_PATTERN = /("(?:[^"]|"")*")|([!\[\]{}#])|((\$?)([A-Za-z]{1,3})(\$?)(
 
 /** 引用前后出现字母/数字/下划线/点/`$`，说明它不是独立引用而是某个名字的一部分（如 `Table1`、`ATAN2`）。 */
 const NAME_CHARS = /[A-Za-z0-9_.$]/;
+
+/**
+ * 一段指向**别的工作簿**的引用：`'[1]Sheet1'!$A$2`、`[1]Sheet1!A1:B2`。
+ * 带 `[数字]` 前缀就说明坐标系在另一个文件里，本地插删不挪它，整段原样带过（spec D9 第 1 条）。
+ */
+const EXTERNAL_REF_PATTERN = /^'?\[[0-9]+\][A-Za-z0-9_.\-]*'?!(?:\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6})(?::\$?[A-Za-z]{1,3}\$?[1-9][0-9]{0,6})?/;
 
 /** 一条 A1 引用的拆解；两处的 `$` 标记必须逐部分保留，否则平移会把绝对引用变成相对引用。 */
 interface RefParts {
@@ -63,6 +72,8 @@ export function shiftFormula(formula: string, axis: SheetAxis, from: number, del
   let cursor = 0;
   for (const match of formula.matchAll(pattern)) {
     const index = match.index ?? 0;
+    // 上一段外部引用是整段吃掉的，它内部的 `]` 与 `!` 会被同一个正则再次匹配到——跳过已消费的部分。
+    if (index < cursor) continue;
     out += formula.slice(cursor, index);
     cursor = index + match[0].length;
     if (match[1] !== undefined) {
@@ -71,6 +82,14 @@ export function shiftFormula(formula: string, axis: SheetAxis, from: number, del
       continue;
     }
     if (match[2] !== undefined) {
+      // 外部工作簿的引用：坐标系在别的文件里，本地插删不改它，整段原样带过（spec D9 第 1 条）。
+      // 命中时常在前缀的引号上（`'[1]S'!A1` 里的 `[` 不是第一个字符），要把已经写出的前缀也算进这一段。
+      const external = match[2] === "[" ? externalRefSpan(formula, index) : null;
+      if (external) {
+        out += external.text.slice(index - external.start);
+        cursor = external.start + external.text.length;
+        continue;
+      }
       return { ok: false, reason: `公式里有我们不解析的写法（出现「${match[2]}」），位移会把引用弄错：${formula}` };
     }
     const nameProblem = checkNotAName(match[0], formula, cursor);
@@ -93,6 +112,22 @@ export function shiftFormula(formula: string, axis: SheetAxis, from: number, del
 
 /** `checkNotAName` 的哨兵值：这段匹配是函数名的一部分，当普通文字带过。 */
 const SKIP_TOKEN = Symbol("skip");
+
+/**
+ * 从 `bracketIndex`（一个 `[` 的下标）往前找前缀的引号，试匹配一段外部工作簿引用。
+ *
+ * @param formula 公式体，不含前导 `=`。
+ * @param bracketIndex `[` 在公式里的下标。
+ * @returns 这一段的外部引用（起点与原文）；不是一段完整的外部引用时 null（调用方照旧整条拒绝）。
+ */
+function externalRefSpan(formula: string, bracketIndex: number): { start: number; text: string } | null {
+  const start = formula[bracketIndex - 1] === "'" ? bracketIndex - 1 : bracketIndex;
+  const matched = EXTERNAL_REF_PATTERN.exec(formula.slice(start));
+  if (!matched) return null;
+  // 只吃掉 `[1]Sheet1'!` 这段前缀而不带单元格地址（如 `[1]` 后面跟的是名字不是引用）时不算外部引用。
+  if (!matched[0].includes("!")) return null;
+  return { start, text: matched[0] };
+}
 
 /**
  * 判断这次匹配是不是一段更长名字的一部分。

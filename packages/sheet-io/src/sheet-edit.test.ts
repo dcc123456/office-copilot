@@ -723,3 +723,42 @@ describe("改动落地后刷新受影响公式的缓存（spec 决策 D8）", ()
     expect(applied.after.cells["D9"]?.value).toBe(0);
   });
 });
+
+describe("一条外部引用不再否决全表插删（spec 决策 D9 第 1 条）", () => {
+  it("含 `[1]` 引用的表上插行：那段原样带过，本表引用照常平移，撤销回到批前", () => {
+    const sheet = sheetOf([cellOf(0, 0, 1), cellOf(0, 1, 2), formulaCell("C1", 2, 0, "'[1]Sheet1'!$A$2"), formulaCell("D3", 3, 2, "SUM(A1:A2)")]);
+    const applied = runSheetOps(sheet, [insertTracksOp(sheet, "row", 0)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    // 外部那格的**公式文本**一个字不改（坐标系在别的文件里），格子本身随本表行位移下移一行。
+    expect(applied.after.cells["C2"]?.formula).toBe("'[1]Sheet1'!$A$2");
+    expect(applied.after.cells["D4"]?.formula).toBe("SUM(A2:A3)");
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("删掉区间中间的一行：区间收窄并落地，被改写的公式缓存跟着刷（D9 收的这条边界）", () => {
+    // `A2:A4` 的两个端点都不在被删带里，Excel 给的是收窄（不是 #REF!）；引用一改，`<v>` 当场就过期了。
+    const stale = { ...cellOf(1, 4, 60), formula: "SUM(A2:A4)", cachedValue: 60 };
+    const sheet = sheetOf([cellOf(0, 1, 10), cellOf(0, 2, 20), cellOf(0, 3, 30), stale]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "row", 2)!]);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(applied.after.cells["B4"]?.formula).toBe("SUM(A2:A3)");
+    expect(applied.after.cells["B4"]?.value).toBe(40);
+    // 刷新是追加进同一批的 op，所以 ops 比提交条数多一条（D8 的形状，装配面按提交条数数）
+    expect(applied.ops).toHaveLength(2);
+
+    const reverted = revertSheetOps(applied.after, applied.inverses);
+    expect(reverted.ok, reverted.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    expect(reverted.after.cells).toEqual(sheet.cells);
+  });
+
+  it("引用正好落在被删带里（单点引用）仍然整条拒绝，理由不变", () => {
+    const sheet = sheetOf([cellOf(0, 1, 10), cellOf(0, 2, 20), formulaCell("B5", 1, 4, "A3*2")]);
+    const applied = runSheetOps(sheet, [deleteTracksOp(sheet, "row", 2)!]);
+    expect(applied.ok).toBe(false);
+    expect(applied.skipped[0]?.reason).toContain("#REF!");
+  });
+});
+

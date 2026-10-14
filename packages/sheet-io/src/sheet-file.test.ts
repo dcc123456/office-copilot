@@ -570,13 +570,17 @@ describe("插删整行整列的落盘证据（阶段 3 · C16）", () => {
     expect((await writeAndReopen(reverted.after)).partXml).toBe(baseline);
   });
 
-  it("表里有认不出的引用写法时插删整条拒绝，载荷原样返回（宁可不改）", async () => {
+  it("表里只有外部工作簿引用时不再否决插列，那段原样带过（spec D9 第 1 条）", async () => {
     const payload = sheetPayloadOf((await (await openSample()).sheetAt(0)) as SheetModel);
     const applied = runSheetOps(payload, [insertTracksOp(payload, "col", 3)!]);
-    expect(applied.ok).toBe(false);
-    expect(applied.skipped[0]?.reason).toContain("不解析");
-    expect(applied.skipped[0]?.reason).toContain("'[1]Sheet1'!$A$2");
-    expect(applied.after).toBe(payload);
+    expect(applied.ok, applied.skipped.map((item) => item.reason).join(" | ")).toBe(true);
+    // 外部引用的坐标系在别的文件里：格子随本地列位移挪位，公式文本一个字都不改。
+    expect(applied.after.cells["K2"]?.formula).toBe("'[1]Sheet1'!$A$2");
+
+    const edited = await writeAndReopen(applied.after);
+    expect(edited.partXml).toContain("'[1]Sheet1'!$A$2");
+    const reverted = revertSheetOps(edited.sheet, applied.inverses.map((op) => op));
+    expect(reverted.skipped).toEqual([]);
   });
 
   it("删除带把合并区劈成两半时拒绝：合不回去的改动不做", async () => {

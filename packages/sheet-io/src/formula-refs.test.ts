@@ -87,7 +87,6 @@ describe("删除行列时的拦下规则（我们不产 #REF!）", () => {
 describe("认不出的写法一律拒绝（位移要连表名一起解析，属阶段 4）", () => {
   it.each([
     ["跨表引用", "Sheet2!A1"],
-    ["外部工作簿引用", "'[1]Sheet1'!$A$2"],
     ["结构化表引用", "SUM(Table1[金额])"],
     ["数组常量", "SUM({1,2})"],
     ["已经是坏引用", "#REF!+A1"],
@@ -98,5 +97,26 @@ describe("认不出的写法一律拒绝（位移要连表名一起解析，属�
   it("名字尾巴长得像引用时也拒绝，不许当成 A1 挪走", () => {
     expect(shiftFormula("1E5+A1", "row", 0, 1)).toMatchObject({ ok: false });
     expect(shiftFormula("Table1!A1", "row", 0, 1)).toMatchObject({ ok: false });
+  });
+});
+
+describe("外部工作簿的引用不参与本地插删（spec D9 第 1 条）", () => {
+  it("带 `[1]` 前缀的引用原样带过，不再让整条 op 被拒", () => {
+    // 坐标系在另一个文件里：本地插一行不会把那边的 A2 挪到 A3。
+    expect(shifted("\u0027[1]Sheet1\u0027!$A$2", "row", 0, 1)).toBe("\u0027[1]Sheet1\u0027!$A$2");
+    expect(shifted("[1]Sheet1!$A$2:$B$5", "col", 0, 2)).toBe("[1]Sheet1!$A$2:$B$5");
+  });
+
+  it("外部引用与本表引用混在一条里：只挪本表那段", () => {
+    expect(shifted("SUM(\u0027[1]S\u0027!A1:A2, C3)", "row", 2, 1)).toBe("SUM(\u0027[1]S\u0027!A1:A2, C4)");
+  });
+
+  it("跨表与数组常量仍然整条拒绝（载荷里没有本表名字，证不了它不受影响）", () => {
+    expect(shiftFormula("SUM(\u0027其它表\u0027!A1:A2)", "row", 0, 1)).toMatchObject({ ok: false });
+    expect(shiftFormula("SUM({1,2})+A5", "row", 0, 1)).toMatchObject({ ok: false });
+  });
+
+  it("`[1]` 后面不接引用时照旧拒绝，不猜", () => {
+    expect(shiftFormula("[1]金额", "row", 0, 1)).toMatchObject({ ok: false });
   });
 });
