@@ -264,7 +264,7 @@ python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `co
 这条同时是 §7.4⑥ 的"第三方办公软件真读过"与 §7.2 的"画面看得到"两层证据，pptx 线到这里不再有目视 BLOCKED。
 **仍缺**：母版/版式的 `effective` 继承链解析（阶段 3 视图才要）。审计与 CLI 那条已落，见 D10 的"已落"段。
 
-### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[~] 打开分派 + 列表式文字视图已落（改文字→保存→撤销，真 app 与 Keynote 双向实测）；字号/颜色/拖拽尺寸的画布编辑仍缺`
+### 阶段 3 · 幻灯片视图可用（人手动编辑）— `[~] 打开分派 + 列表式文字/字号/颜色/几何编辑已落（改→保存→撤销，真 app 与 python-pptx / Keynote 双向实测）；画布式拖拽与继承链解析仍缺`
 D7 的模式枚举 + 幻灯片列表 + 画布编辑（选中形状、改文字、改字号颜色、拖拽尺寸）。
 **完成判定**：起真实 app 走"改标题→存盘→Keynote 导出 PNG→肉眼比对文字与位置"，并把 PNG 里的实际文字写进收尾报告（§7.2）。
 **已落（2026-10-14，`apps/desktop/electron/pptxHandlers.ts` + preload 四条通道）**：跨界只送 `PresentationModel` 与
@@ -307,8 +307,44 @@ pptx-io 原 26 条未改未减。
   "这段有 2 截不同格式的文字，整段覆盖会拍平粗体与字号，本视图只读"。
 - **三种模式回归**（同一份 `dist`，同一实例依次换文件）：`.docx` → 工具栏/大纲/状态栏/185 段都在；`.xlsx` → 文档面板全隐、
   表格面板在；`.pptx` → deck 视图在、文档面板全隐。证明这次换枚举没改坏前两条路。
-**仍缺**：字号 / 颜色 / 形状几何的编辑入口（引擎侧四条 op 早就在，视图只装配了"改文字"这一条）、画布式选中与拖拽尺寸、
-modlog 落盘、notes/母版继承链（阶段 2 那条）。
+**已落（2026-10-14 第三批：字号 / 颜色 / 形状几何的编辑入口 + D4 的换算收到一处）**：
+- **D4 的换算单点变成结构**：新建 `packages/pptx-io/src/units.ts`（`emuToPx`/`pxToEmu`/`halfPointToPt`/`ptToHalfPoint` +
+  `ShapeBoxPx`/`ShapeGeometryPatch` 两个盒子类型），`edit.ts` 里那条私有的 `EMU_PER_PX` 与 `ShapeBoxPx` 删掉、改为引用它，
+  `read.ts` 也走同一份。**读侧从此交给视图的是 px 与 pt**（原来只给 EMU 的话，渲染层就得自己乘 9525 / ÷100，那是第二处换算）。
+- **读模型再补两条事实**（视图不猜，D3）：`SlideShape.paragraphRunFormats`（每段每条 run 自己显式写了的 `sizePt`/`bold`/`hex`，
+  没写的留 `undefined`＝继承，绝不填猜测值）与 `SlideShape.boxPx`（形状自己写的 `<a:xfrm>` 换成 px；没写就是 `undefined`，
+  与 `hasOwnGeometry` 一道构成"能不能改几何"的判据）。
+- **模型层扩到四类改动**：`slideDeckModel.ts` 的 `pendingTextEdits` → **`pendingEdits`**（返回 `PptxEditRequest[]`，
+  几何先于该形状的各段），草稿值从"一串文字"变成 `SlideDraft { text?, sizePt?, hex?, box? }`，几何另用键 `partPath@shapeId`。
+  四条守卫都在这一层：多 run 段落不交出（§2.3）、**与现场值相同的字段不交出**（空点"保存"不写盘）、
+  字号只把改过的那一项塞进 `RunFontFormat`（不连带写 `bold`，§2.3）、`boxPx` 为 `undefined` 时几何一个字段都不写（D3）。
+  单测随之 4 → 9 条。
+- **视图**：每个形状一行四个数（左/上/宽/高，只有自带几何时才出现，否则显示一句"继承自版式，本视图不写死"）；
+  每条单 run 段落在文字框右边加字号（`step=0.5`，PowerPoint 允许半磅）与颜色（`input[type=color]`，值一律 `#rrggbb`，§2.2），
+  继承来的字号占位显示"继承"、颜色 `title` 提示"当前颜色继承自版式"。样式只加进 `src/styles/slides.css`（§5.4）。
+- **单位/颜色的往返有机检**：`pptx-io` 新增 `units.test.ts` 2 条（9144000 EMU ↔ 960 px、负偏移、24.5pt ↔ sz 2450）；
+  `pptx.test.ts` 读模型两条新断言（`boxPx` = 96/384/288/96、多 run 段的 `[{bold:true},{sizePt:18}]`）+
+  一条"写进去再读回来"（同一形状连做 font/color/geometry 三条 op 后重新解析：`24.5pt`、`#3cb371`、四个 px 原样对上）。
+  **这条测试顺手抓到一处真缺陷写法**：把三个 op 生产者写成 `[await A, await B, await C]` 再依次 apply，会因为三条后像都基于
+  同一份原文而互相覆盖（只剩最后一条）——主进程 `editPptxDoc` 一直是"逐条现做逐条落地"，所以线上没这个洞，
+  但探针/视图必须照同一个顺序（已在测试注释里写明）。pptx-io 27 → 30 条。
+- **真 app 实测**（`pnpm build` 后跑 `dist`，CDP 连 DOM，§7.2）：夹具是 python-pptx 现生成的两页 deck
+  （第 1 页：继承几何的标题占位符 + 一个自带 `<a:xfrm>` 的三 run 段落文本框；第 2 页：20pt、`#aabbcc` 的一行）。
+  视图如实显示：第 1 页标题那格**没有**几何输入框、只有"继承"占位，那个三 run 段落 **0 个输入框**并写明"这段有 3 截不同格式的文字…本视图只读"；
+  文本框四个数是 `96/384/288/96`（= 1″/4″/3″/1″ @96DPI，逐 px 对上）；第 2 页那行回显 `20` 与 `#aabbcc`。
+  在第 2 页那个形状上改文字＋字号 32＋颜色 `#00cc00`＋左 150＋宽 300 → 顶栏"**4 处待保存**" → 点保存 →
+  toast"已保存，动了 1 张幻灯片"、顶栏归零、四个输入框从磁盘重读回来。**python-pptx 独立读回**（不是我们的 parser 自证）：
+  `left/top/width/height` = `150/192/300/96` px（**只有改过的左与宽变了，上与高一个 EMU 没动**）、`size=32.0pt`、
+  `rgb=00CC00`、`bold=None`（没连带写粗体，继承链保住）、第 1 页三 run 段落仍是"正文丙/粗(粗体)/细(18pt)"原样。
+  `oc ppt check` 退出码 0 → 点"撤销上一次保存" → 视图回到 `192/192/384/96`、`20`、`#aabbcc`、原文字；
+  **逐部件字节比对**：40 个部件里内容不同的是 0 个（撤销后整包回到原样）。
+- **发现的既有缺陷（不在本批修，另开）**：`.pptx`/`.xlsx`/`.docx` 的写回会给 zip **新增目录项**（`ppt/`、`ppt/slides/`），
+  而 python-pptx 产的原文件里没有目录项。内容与结构审计都不受影响（办公软件照开，`oc ppt check` 0 条），
+  但"部件清单逐条一致"这条保真标准不该靠它打折：根因是 `zip.file(path, content)` 会顺手合成父目录对象，
+  三个 IO 包各写一次（`docx.ts:823`、`sheet-file.ts:414`、`pptx-file.ts:67`）→ 该把序列化收进 `@office-copilot/opc` 一份并带
+  `createFolders: false`。
+**仍缺**：画布式选中与拖拽尺寸（本批是列表里的数字输入框，不是 WYSIWYG 拖拽）、notes/母版继承链解析（阶段 2 那条）、
+modlog 落盘。
 
 ### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字/字体/颜色 + 形状几何编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
@@ -357,8 +393,8 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 
 ### A. 文档正确性（最高优先级，对应 §2）
 - `[ ]` A1 未建模部件原样带过：富模板（125 part / 65 `tags`）打开→存回，`unzip -l` 条目集一致且未改部件字节逐字一致。
-- `[ ]` A2 母版/版式继承不被拍平：只改标题文字后 `slide1.xml` 的 `<p:spPr/>` 仍为空（D3）。
-- `[ ]` A3 单位换算单点：全仓 grep 不到第二处 `914400`/`9525`/百分点换算（D4）。
+- `[x]` A2 母版/版式继承不被拍平：只改标题文字后 `slide1.xml` 的 `<p:spPr/>` 仍为空（D3）。**实测**：真 app 里第 1 页那个继承几何的标题占位符**根本没有几何输入框**，保存只记账第 2 页那一个部件（toast"动了 1 张幻灯片"），python-pptx 读回第 1 页三 run 段落"正文丙/粗/细"连 18pt 都原样。
+- `[ ]` A3 单位换算单点：**pptx 侧已收到一处**（`pptx-io/units.ts`，`edit.ts` 里那条私有 `EMU_PER_PX` 已删）；但"全仓只有一处"这条判据写错了——每个 IO 包各有一份才是正解（sheet 侧 `chart-spec.ts`、docx 侧 `docx.ts:810`/`ooxml-pm.ts`/`textbox.ts:31` 各自一处），**docx-io 里那三处重复是既有缺陷**，与本线的 `pptx-io/units.ts` 不同源，待另开一批收敛。
 - `[ ]` A4 颜色：schemeClr 解析成 hex 交 UI，且不烤回 slide；`#rrggbb` 一条不减（§2.2）。
 - `[x]` A5 原子写：幻灯片存盘走 `writeFileAtomically` + `.bak`（照 `sheetHandlers.ts:159`）。**实测**：真 app 点保存后 `tmp/app-deck2.pptx.bak` 出现、磁盘重读是新文字，点撤销后磁盘回到原字。
 - `[ ]` A6 新建部件登记齐全（D10 的宽版五件），审计 0 条 + `oc ppt check` 退出码 0。
@@ -385,7 +421,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 ### D. UI 与工程（对应 §3/§4/§5）
 - `[x]` D1 `App.tsx` 的 `isSheet` 已换成模式枚举（`EditorMode`：九处文档门控与 `isSheet || isDeck` 全改），无新增布尔门控；三种模式在真 app 里各跑一遍确认没改坏表格与文档视图（阶段 3 的实测段）。
 - `[ ]` D2 无第二套 OPC / 解析 / 撤销 / 工具 schema / 样式体系（§3 红线）。
-- `[x]` D3 新函数全部有中文 JSDoc（含单位与失败语义）；命名有含义（本批：`pendingTextEdits`/`draftKeyOf`/`lockedParagraphHint`/`paragraphRunCounts`）。
+- `[x]` D3 新函数全部有中文 JSDoc（含单位与失败语义）；命名有含义（前两批：`pendingEdits`/`draftKeyOf`/`lockedParagraphHint`/`paragraphRunCounts`；本批：`emuToPx`/`pxToEmu`/`halfPointToPt`/`ptToHalfPoint`/`boxDraftKeyOf`/`pushGeometryEdits`/`changedBoxFields`/`readRunFormat`/`readBoxPx`/`patchBox`/`numberOrUndefined`）。
 - `[x]` D4 渲染层不碰 Node，跨界只走 preload 白名单（`SlideDeck` 只调 `window.officeCopilot.editPptx/revertPptx`；幻灯片原文从不过进程边界）。
 
 ### E. 测试与门禁（对应 §7）
@@ -421,6 +457,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | --- | --- | --- | --- | --- |
 | `13e62e2` + 本次实测 | 0 | 无产品代码改动（纯取证）；`pnpm build`/`pnpm test` 未跑（未动 `src`） | 三类夹具 python-pptx 1.0.2 全读通（35/125/49 part）；Keynote 14.2 打开并导出 PNG，**柱状图与表格肉眼可见**（附录 A2） | `[x]` |
 | `7e271ff` | 3（视图 + 打开分派） | `pnpm build` EXIT=0（含 `tsc --noEmit`，抓到一处联合类型窄化缺陷）；`pnpm test` EXIT=0，逐包：pptx-io 27 / opc 15 / desktop 462 / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1093 条 / 76 个文件**（`packages/shared` 仍无测试文件，已知假绿源） | `oc ppt info` 读磁盘：第一页是新标题、第二页原样；`oc ppt check` 退出码 0；`.bak` 生成；撤销后磁盘回原字。**Keynote 导出两页 PNG 肉眼看过**：第一页居中黑字「Keynote 要看到的第一页标题」+ 灰色「正文一行」，第二页「第二页标题」；`tmp/multi-run.pptx` 在视图里 0 个输入框（§2.3） | `[~]` 文字那条闭环，字号/颜色/几何的入口仍缺 |
+| `fb5b4f9` | 3（字号 / 颜色 / 几何入口 + D4 换算单点） | `pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包：pptx-io **30** / opc 15 / desktop **466** / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1300 条**（`packages/shared` 仍无测试文件） | 真 app（`dist` + CDP）打开 python-pptx 现生成的两页 deck：继承几何的占位符**没有**几何输入框、三 run 段落 0 个输入框、文本框四数 `96/384/288/96` 逐 px 对上；改文字+字号 32+`#00cc00`+左 150+宽 300 → 「4 处待保存」→ 保存 toast「动了 1 张幻灯片」→ **python-pptx 独立读回** `150/192/300/96`px、`32.0pt`、`rgb=00CC00`、`bold=None`（没连带写粗体），第 1 页三 run「正文丙/粗/细 18pt」原样 → `oc ppt check` 退出码 0 → 撤销后 40 个部件**内容不同的 0 个**。**画面效果仍 BLOCKED**（Keynote 只给文字与位置的 PNG，字体渲染未比对） | `[x]` 四类改动（文字/字号/颜色/几何）在真 app 里闭环；画布拖拽与继承链解析归入下批 |
 
 ---
 
