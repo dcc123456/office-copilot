@@ -11,6 +11,7 @@
  */
 import { XML_DECLARATION, children, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
+import { ptToHalfPoint, pxToEmu, type ShapeGeometryPatch } from "./units.js";
 
 /** 一次幻灯片编辑的前/后像（部件粒度）：文字与字体 op 共用这一份形状。 */
 export interface SlideEditOp {
@@ -40,7 +41,7 @@ export interface ShapeRunTarget {
 export interface RunFontFormat {
   /** 粗体；true 写 `b="1"`，false 写 `b="0"`。 */
   bold?: boolean;
-  /** 字号（CSS pt，非半磅）；写进 `sz` 时换算成 pt×100（§2.1，这里是唯一换算点）。 */
+  /** 字号（CSS pt，非半磅）；写进 `sz` 时按 `units.ts` 换成 pt×100（§2.1 的唯一换算点）。 */
   sizePt?: number;
 }
 
@@ -54,18 +55,6 @@ export interface ShapeGeometryTarget {
   shapeId: number;
 }
 
-/** 目标形状的位置/尺寸（CSS px @96DPI，非 EMU、非 pt）；给了哪个改哪个。 */
-export interface ShapeBoxPx {
-  /** 左偏移（px，可为负表示挪出幻灯片）。 */
-  leftPx?: number;
-  /** 上偏移（px，可为负）。 */
-  topPx?: number;
-  /** 宽（px，须为正）。 */
-  widthPx?: number;
-  /** 高（px，须为正）。 */
-  heightPx?: number;
-}
-
 /**
  * 一条要落地的幻灯片改动：`kind` 与本文件那四个 op 生产者一一对应，坐标原样交给它们。
  *
@@ -77,7 +66,7 @@ export type PptxEditRequest =
   | { kind: "text"; target: ShapeRunTarget; text: string }
   | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
   | { kind: "color"; target: ShapeRunTarget; hex: string }
-  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeBoxPx };
+  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch };
 
 /** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
 export interface PptxEditPayload {
@@ -99,9 +88,6 @@ export interface PptxRevertPayload {
 
 /** `<a:rPr>` 的填充组（ECMA-376 Part 1 §21.1.2.x）：同一 run 只能有一个，改色时先把旧填充删净再放新的。 */
 const FILL_GROUP_TAGS = ["a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill"];
-
-/** CSS px @96DPI → EMU 的换算系数（914400 EMU/inch ÷ 96 px/inch）；几何 op 是唯一的换算点（§2.1）。 */
-const EMU_PER_PX = 9525;
 
 /**
  * 产出一条"把指定 run 的文字改成 newText"的编辑提案，**不落地**。
@@ -143,7 +129,7 @@ export async function setRunFont(file: PptxFile, target: ShapeRunTarget, format:
   if (!located.ok) return located;
   const rPr = getOrCreateRunPr(located.run);
   if (format.bold !== undefined) rPr.attributes["b"] = format.bold ? "1" : "0";
-  if (format.sizePt !== undefined) rPr.attributes["sz"] = String(Math.round(format.sizePt * 100)); // pt → 百分磅，唯一换算点（§2.1）
+  if (format.sizePt !== undefined) rPr.attributes["sz"] = String(ptToHalfPoint(format.sizePt));
   return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
 }
 
@@ -178,9 +164,9 @@ export async function setRunColor(file: PptxFile, target: ShapeRunTarget, hex: s
  * @param target 形状定位坐标（部件路径 + 形状号）。
  * @param box 位置/尺寸（CSS px @96DPI）；给了哪个改哪个，left/top 允许负值，width/height 须为正。
  * @returns `{ ok, op }`：无属性、尺寸非法、定位失败或形状是组合（子偏移语义不同，暂不支持）时 `{ ok:false, reason }`。
- *   px→EMU 换算只在这一处发生（§2.1）。对占位符写显式 `<a:xfrm>` 是用户明示的覆盖，不是读侧烘焙（D3 只禁止读侧把继承几何固化）。
+ *   px→EMU 换算走 `units.ts`，那是全仓唯一的一处（§2.1）。对占位符写显式 `<a:xfrm>` 是用户明示的覆盖，不是读侧烘焙（D3 只禁止读侧把继承几何固化）。
  */
-export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarget, box: ShapeBoxPx): Promise<SlideEditResult> {
+export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarget, box: ShapeGeometryPatch): Promise<SlideEditResult> {
   if (box.leftPx === undefined && box.topPx === undefined && box.widthPx === undefined && box.heightPx === undefined) {
     return { ok: false, reason: "没有要改的几何属性（left / top / width / height 至少给一个）。" };
   }
@@ -193,13 +179,13 @@ export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarg
   const xfrm = getOrCreateChild(spPr, "a:xfrm", true); // CT_ShapeProperties：xfrm 是第一个子元素
   if (box.leftPx !== undefined || box.topPx !== undefined) {
     const off = getOrCreateChild(xfrm, "a:off", false);
-    if (box.leftPx !== undefined) off.attributes["x"] = String(Math.round(box.leftPx * EMU_PER_PX));
-    if (box.topPx !== undefined) off.attributes["y"] = String(Math.round(box.topPx * EMU_PER_PX));
+    if (box.leftPx !== undefined) off.attributes["x"] = String(pxToEmu(box.leftPx));
+    if (box.topPx !== undefined) off.attributes["y"] = String(pxToEmu(box.topPx));
   }
   if (box.widthPx !== undefined || box.heightPx !== undefined) {
     const ext = getOrCreateChild(xfrm, "a:ext", false);
-    if (box.widthPx !== undefined) ext.attributes["cx"] = String(Math.round(box.widthPx * EMU_PER_PX));
-    if (box.heightPx !== undefined) ext.attributes["cy"] = String(Math.round(box.heightPx * EMU_PER_PX));
+    if (box.widthPx !== undefined) ext.attributes["cx"] = String(pxToEmu(box.widthPx));
+    if (box.heightPx !== undefined) ext.attributes["cy"] = String(pxToEmu(box.heightPx));
   }
   return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
 }

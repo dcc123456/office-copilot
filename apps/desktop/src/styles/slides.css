@@ -99,6 +99,8 @@
 }
 
 .slide-para-input {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 24px;
   padding: 0 6px;
   border: 1px solid var(--border);
@@ -106,6 +108,54 @@
   background: var(--bg);
   color: var(--text);
   font: inherit;
+}
+
+/* 一段一行：文字框 + 字号 + 颜色。数字与颜色都只是装配，落地范围由 slideDeckModel 决定。 */
+.slide-para-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.slide-field {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.slide-field input {
+  height: 24px;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.slide-field input[type="number"] {
+  width: 56px;
+}
+
+.slide-field input[type="color"] {
+  width: 28px;
+  padding: 0;
+}
+
+/* 形状自己的 <a:xfrm>：四个字段一行，单位是 CSS px（换算不在这里发生，§2.1）。 */
+.slide-box-fields {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.slide-box-note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 /* 只读的段落用底色区分出来：多条 run 的段落在本视图里不许整段覆盖（§2.3）。 */

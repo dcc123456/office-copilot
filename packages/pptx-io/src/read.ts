@@ -1,8 +1,9 @@
 /**
  * `.pptx` 读模型：把 `ppt/presentation.xml` 的幻灯片清单与各张表的形状树读成结构化数据。
  *
- * 单位（`AGENTS.md` §2.1）：页面尺寸、形状偏移/尺寸都是 **EMU**（914400/inch），这里原样读、不换算；
- * 换算只在渲染层做。
+ * 单位（`AGENTS.md` §2.1 / spec D4）：换算发生在**这里**（IO 边），交给 UI 的一律是 CSS px 与 CSS pt；
+ * 只有页面尺寸 `slideSizeEmu` 保留 EMU（名字里就写着单位）。形状自己的 `<a:xfrm>` 走 `units.ts` 换成 px，
+ * run 的 `sz` 换成 pt——渲染层再乘一次 100 或 9525 就是第二处换算，属缺陷。
  *
  * 溯源红线（spec D3）：占位符（title / body 等）在幻灯片里 `<p:spPr/>` 常是**空的**，它的位置、字体、
  * 颜色全部从版式/母版继承。我们只记录"这格自己有没有写几何（`hasOwnGeometry`）"，绝不把继承来的坐标
@@ -10,6 +11,7 @@
  */
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
 import { PRESENTATION_PART } from "./parts.js";
+import { emuToPx, halfPointToPt, type ShapeBoxPx } from "./units.js";
 
 /** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
 export interface SlideShape {
@@ -34,6 +36,20 @@ export interface SlideShape {
    * 整段覆盖会把局部格式拍平（`AGENTS.md` §2.3），那种段落只许按 run 逐条改。
    */
   paragraphRunCounts: number[];
+  /** 每段的 run 格式，与 `paragraphTexts` 一一对应（该段第 i 条 run 是第 i 项）；只含该 run 显式写了的属性。 */
+  paragraphRunFormats: RunFormat[][];
+  /** 形状自己写的 `<a:xfrm>`（CSS px @96DPI）；没有写（几何继承自版式）时 undefined，禁止烘焙（D3）。 */
+  boxPx?: ShapeBoxPx;
+}
+
+/** 一条 run 自己的字符格式（读侧已换算成 pt 与 `#rrggbb`）。 */
+export interface RunFormat {
+  /** 字号 pt；该 run 没写 `sz`（从版式/母版继承）时 undefined——继承值不许猜（D3）。 */
+  sizePt?: number;
+  /** 粗体；只有显式写了 `b` 才给值，没写给 undefined（同样是继承）。 */
+  bold?: boolean;
+  /** 文字颜色 `#rrggbb`（§2.2）；只有 `<a:solidFill><a:srgbClr @val>` 读得出来，`schemeClr` 给 undefined。 */
+  hex?: string;
 }
 
 /** 一张幻灯片。 */
@@ -160,5 +176,46 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
     hasOwnGeometry: !!spPr && !!firstChild(spPr, "a:xfrm"),
     paragraphTexts: paragraphs.map((p) => text(p)),
     paragraphRunCounts: paragraphs.map((p) => findChildren(p, "a:r").length),
+    paragraphRunFormats: paragraphs.map((p) => findChildren(p, "a:r").map(readRunFormat)),
+    boxPx: readBoxPx(spPr),
   };
+}
+
+/**
+ * 读一条 run 自己的 `<a:rPr>`：字号（半磅→pt）、粗体、`srgbClr` 颜色。
+ *
+ * @param run 段落里的 `<a:r>` 元素。
+ * @returns 只填了该 run **显式写了**的属性；没写的一律 undefined，表示"这个值是从版式继承的"（D3 不许烘焙）。
+ */
+function readRunFormat(run: Element): RunFormat {
+  const rPr = firstChild(run, "a:rPr");
+  if (!rPr) return {};
+  const format: RunFormat = {};
+  const rawSz = rPr.attributes["sz"];
+  const sizePt = Number(rawSz);
+  if (rawSz !== undefined && Number.isFinite(sizePt)) format.sizePt = halfPointToPt(sizePt);
+  const rawBold = rPr.attributes["b"];
+  if (rawBold !== undefined) format.bold = rawBold === "1" || rawBold === "true" || rawBold === "on";
+  const solidFill = firstChild(rPr, "a:solidFill");
+  const srgbClr = solidFill ? firstChild(solidFill, "a:srgbClr") : undefined;
+  const val = srgbClr?.attributes["val"];
+  if (val && /^[0-9a-fA-F]{6}$/.test(val)) format.hex = `#${val.toLowerCase()}`;
+  return format;
+}
+
+/**
+ * 读形状自己写的 `<a:xfrm>`（EMU→px 走 `units.ts`）。
+ *
+ * @param spPr 形状的 `<p:spPr>`，可以不存在。
+ * @returns 四个值都齐才给；只写了 `off` 或只写了 `ext`、或数字读不出来时 undefined（不猜继承值）。
+ */
+function readBoxPx(spPr: Element | undefined): ShapeBoxPx | undefined {
+  const xfrm = spPr ? firstChild(spPr, "a:xfrm") : undefined;
+  const off = xfrm ? firstChild(xfrm, "a:off") : undefined;
+  const ext = xfrm ? firstChild(xfrm, "a:ext") : undefined;
+  if (!off || !ext) return undefined;
+  const values = [off.attributes["x"], off.attributes["y"], ext.attributes["cx"], ext.attributes["cy"]].map(Number);
+  if (!values.every(Number.isFinite)) return undefined;
+  const [x, y, cx, cy] = values as [number, number, number, number];
+  return { leftPx: emuToPx(x), topPx: emuToPx(y), widthPx: emuToPx(cx), heightPx: emuToPx(cy) };
 }

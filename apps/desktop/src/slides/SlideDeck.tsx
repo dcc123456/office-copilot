@@ -1,15 +1,16 @@
 /**
- * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状与文字，单条 run 的段落可就地改文字。
+ * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色与形状的位置尺寸。
  *
- * 这里只做装配：草稿哪些能落地由 `slideDeckModel.ts` 说一不二，段落里有几条 run 是 `@office-copilot/pptx-io`
- * 读模型给的事实，改动一律收成 `PptxEditRequest` 交给主进程现做 op（组件不碰幻灯片原文，也不碰 Node 能力，
- * `AGENTS.md` §3.3 / §5.2）。
- * 一段里有多条 run 时**不许**整段覆盖——那会把粗体/字号这些局部格式拍平（§2.3），那种段落只读。
+ * 这里只做装配：草稿哪些能落地由 `slideDeckModel.ts` 说一不二，段落里有几条 run、形状有没有自己的
+ * `<a:xfrm>` 都是 `@office-copilot/pptx-io` 读模型给的事实，改动一律收成 `PptxEditRequest` 交给主进程现做 op
+ * （组件不碰幻灯片原文，也不碰 Node 能力，`AGENTS.md` §3.3 / §5.2）。
+ * 两条守卫在模型层：一段里有多条 run 时**不许**整段覆盖（会拍平局部格式，§2.3）；几何继承自版式时**不写死**（D3）。
+ * 单位一律 CSS pt / px（读侧已按 `pptx-io/units.ts` 换好），视图里不再乘 100 或 9525（§2.1）。
  */
 import { useCallback, useMemo, useState } from "react";
-import type { PresentationModel, SlideEditOp, SlideShape } from "@office-copilot/pptx-io";
+import type { PresentationModel, ShapeBoxPx, SlideEditOp, SlideShape } from "@office-copilot/pptx-io";
 import { toast } from "../components/ui/Toast.js";
-import { draftKeyOf, pendingTextEdits } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, pendingEdits, type SlideDraft } from "./slideDeckModel.js";
 import "../styles/slides.css";
 
 export interface SlideDeckProps {
@@ -20,6 +21,9 @@ export interface SlideDeckProps {
   /** 用主进程送回的新模型刷新视图，避免再发一次读请求。 */
   onDeck: (deck: PresentationModel) => void;
 }
+
+/** 颜色选择框在"这一截字的颜色继承自版式"时的显示值（不代表现场真有这个色）。 */
+const INHERITED_COLOR = "#000000";
 
 /**
  * 形状在列表上的身份说明。
@@ -46,20 +50,62 @@ function lockedParagraphHint(runCount: number): string {
   return `这段有 ${runCount} 截不同格式的文字，整段覆盖会拍平粗体与字号，本视图只读`;
 }
 
+/**
+ * 数字输入框的取值。
+ *
+ * @param raw 输入框原始串。
+ * @returns 解析出的数值；空串或非法数字回 undefined，含义是"这条不交出"（不是 0，也不是"改回继承值"）。
+ */
+function numberOrUndefined(raw: string): number | undefined {
+  const trimmed = raw.trim();
+  const value = Number(trimmed);
+  return trimmed === "" || !Number.isFinite(value) ? undefined : value;
+}
+
+/** 四个几何字段的中文标签（输入框顺序与这里一致）。 */
+const BOX_FIELD_LABEL: Record<keyof ShapeBoxPx, string> = {
+  leftPx: "左",
+  topPx: "上",
+  widthPx: "宽",
+  heightPx: "高",
+};
+
 export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
-  /** 未保存的段落草稿：键见 `draftKeyOf`，值是用户改后的文字。 */
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /** 未保存的草稿：run 级字段键见 `draftKeyOf`，几何键见 `boxDraftKeyOf`。 */
+  const [drafts, setDrafts] = useState<Record<string, SlideDraft>>({});
   /** 上一次落地那批 op 的前像；送回复用同一条撤销通道（§2.5）。 */
   const [lastOps, setLastOps] = useState<SlideEditOp[]>([]);
   const [isBusy, setIsBusy] = useState(false);
 
+  /** 把一处 run 级草稿字段并进去（同一定位键上文字/字号/颜色各存各的，互不覆盖）。 */
+  const patchDraft = useCallback((key: string, patch: SlideDraft) => {
+    setDrafts((current) => ({ ...current, [key]: { ...current[key], ...patch } }));
+  }, []);
+
+  /**
+   * 改几何草稿里的单个字段。
+   *
+   * @param key 该形状的几何键。
+   * @param field `leftPx` / `topPx` / `widthPx` / `heightPx` 之一。
+   * @param raw 输入框原始串；清空会把这一项从草稿里删掉（= 不写这个字段）。
+   */
+  const patchBox = useCallback((key: string, field: keyof ShapeBoxPx, raw: string) => {
+    const value = numberOrUndefined(raw);
+    setDrafts((current) => {
+      const box = { ...current[key]?.box };
+      if (value === undefined) delete box[field];
+      else box[field] = value;
+      return { ...current, [key]: { ...current[key], box } };
+    });
+  }, []);
+
   /** 待保存的那批改动：落地范围与顺序由模型层决定，视图这里只拿来显示条数和送主进程。 */
-  const pendingEdits = useMemo(() => pendingTextEdits(deck, drafts), [deck, drafts]);
+  const edits = useMemo(() => pendingEdits(deck, drafts), [deck, drafts]);
 
   const saveEdits = useCallback(async () => {
-    if (pendingEdits.length === 0) return;
+    if (edits.length === 0) return;
     setIsBusy(true);
-    const saved = await window.officeCopilot.editPptx({ path, edits: pendingEdits });
+    const saved = await window.officeCopilot.editPptx({ path, edits });
     setIsBusy(false);
     if (!saved.ok || !saved.presentation) {
       if (saved.message) toast(saved.message, "error");
@@ -69,7 +115,7 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
     setLastOps(saved.ops ?? []);
     onDeck(saved.presentation);
     toast(`已保存，动了 ${(saved.changedParts ?? []).length} 张幻灯片`);
-  }, [onDeck, path, pendingEdits]);
+  }, [edits, onDeck, path]);
 
   const revertLastBatch = useCallback(async () => {
     if (lastOps.length === 0) return;
@@ -91,15 +137,15 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
     <div className="slide-deck">
       <div className="slide-deck-bar">
         <span className="slide-deck-count">
-          {deck.slides.length} 页 · {pendingEdits.length} 处待保存
+          {deck.slides.length} 页 · {edits.length} 处待保存
         </span>
-        <button type="button" onClick={() => void saveEdits()} disabled={isBusy || pendingEdits.length === 0}>
+        <button type="button" onClick={() => void saveEdits()} disabled={isBusy || edits.length === 0}>
           保存
         </button>
         <button type="button" onClick={() => void revertLastBatch()} disabled={isBusy || lastOps.length === 0}>
           撤销上一次保存
         </button>
-        {pendingEdits.length > 0 ? (
+        {edits.length > 0 ? (
           <button type="button" onClick={() => setDrafts({})} disabled={isBusy}>
             放弃改动
           </button>
@@ -113,36 +159,78 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
               <span className="slide-card-part">{slide.partPath}</span>
             </h3>
             {slide.shapes.length === 0 ? <p className="slide-para-locked">这张幻灯片没有可读出的形状。</p> : null}
-            {slide.shapes.map((shape) => (
-              <div className="slide-shape" key={`${slide.partPath}#${shape.shapeId}`}>
-                <div className="slide-shape-meta">
-                  <strong>{shape.name || `形状 ${shape.shapeId}`}</strong>
-                  <span className="slide-shape-kind">{shapeKindLabel(shape)}</span>
-                </div>
-                {shape.paragraphTexts.map((paragraphText, paraIndex) => {
-                  const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;
-                  const key = draftKeyOf(slide.partPath, shape.shapeId, paraIndex);
-                  if (runCount !== 1) {
+            {slide.shapes.map((shape) => {
+              const boxKey = boxDraftKeyOf(slide.partPath, shape.shapeId);
+              return (
+                <div className="slide-shape" key={`${slide.partPath}#${shape.shapeId}`}>
+                  <div className="slide-shape-meta">
+                    <strong>{shape.name || `形状 ${shape.shapeId}`}</strong>
+                    <span className="slide-shape-kind">{shapeKindLabel(shape)}</span>
+                  </div>
+                  {shape.boxPx ? (
+                    <div className="slide-box-fields">
+                      {(["leftPx", "topPx", "widthPx", "heightPx"] as (keyof ShapeBoxPx)[]).map((field) => (
+                        <label className="slide-field" key={field}>
+                          <span>{BOX_FIELD_LABEL[field]}</span>
+                          <input
+                            type="number"
+                            value={drafts[boxKey]?.box?.[field] ?? shape.boxPx?.[field] ?? ""}
+                            onChange={(event) => patchBox(boxKey, field, event.target.value)}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="slide-box-note">位置与尺寸继承自版式，本视图不写死（写死就切断母版联动，spec D3）。</p>
+                  )}
+                  {shape.paragraphTexts.map((paragraphText, paraIndex) => {
+                    const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;
+                    const key = draftKeyOf(slide.partPath, shape.shapeId, paraIndex);
+                    if (runCount !== 1) {
+                      return (
+                        <div className="slide-para-locked" key={key}>
+                          <span>{paragraphText || "（空段）"}</span>
+                          <em>{lockedParagraphHint(runCount)}</em>
+                        </div>
+                      );
+                    }
+                    const draft = drafts[key];
+                    const currentFormat = shape.paragraphRunFormats[paraIndex]?.[0] ?? {};
                     return (
-                      <div className="slide-para-locked" key={key}>
-                        <span>{paragraphText || "（空段）"}</span>
-                        <em>{lockedParagraphHint(runCount)}</em>
+                      <div className="slide-para-row" key={key}>
+                        <input
+                          className="slide-para-input"
+                          type="text"
+                          value={draft?.text ?? paragraphText}
+                          onChange={(event) => patchDraft(key, { text: event.target.value })}
+                          spellCheck={false}
+                        />
+                        <label className="slide-field">
+                          <span>字号</span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={0.5}
+                            placeholder={currentFormat.sizePt === undefined ? "继承" : ""}
+                            value={draft?.sizePt ?? currentFormat.sizePt ?? ""}
+                            onChange={(event) => patchDraft(key, { sizePt: numberOrUndefined(event.target.value) })}
+                          />
+                        </label>
+                        <label className="slide-field">
+                          <span>颜色</span>
+                          <input
+                            type="color"
+                            title={currentFormat.hex ?? "当前颜色继承自版式"}
+                            value={draft?.hex ?? currentFormat.hex ?? INHERITED_COLOR}
+                            onChange={(event) => patchDraft(key, { hex: event.target.value })}
+                          />
+                        </label>
                       </div>
                     );
-                  }
-                  return (
-                    <input
-                      className="slide-para-input"
-                      key={key}
-                      type="text"
-                      value={drafts[key] ?? paragraphText}
-                      onChange={(event) => setDrafts((current) => ({ ...current, [key]: event.target.value }))}
-                      spellCheck={false}
-                    />
-                  );
-                })}
-              </div>
-            ))}
+                  })}
+                </div>
+              );
+            })}
           </section>
         ))}
       </div>

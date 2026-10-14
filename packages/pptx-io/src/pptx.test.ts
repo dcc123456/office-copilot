@@ -53,14 +53,18 @@ describe("pptx-io：读模型", () => {
     expect(title!.isPlaceholder).toBe(true);
     expect(title!.placeholderRef).toBe("title");
     expect(title!.hasOwnGeometry).toBe(false); // 空 <p:spPr/>：几何从版式继承，不许烘焙（D3）
+    expect(title!.boxPx).toBeUndefined(); // 继承来的坐标不给数字——视图据此把几何输入框换成一句说明
     expect(title!.paragraphTexts).toEqual(["标题甲"]);
     expect(title!.paragraphRunCounts).toEqual([1]); // 一段一条 run：视图允许整段改
+    expect(title!.paragraphRunFormats).toEqual([[{}]]); // 那条 run 没写 rPr：字号/粗体/颜色全是继承，不许猜
     expect(body!.isPlaceholder).toBe(true);
     expect(body!.placeholderRef).toBe("1"); // idx="1" 而非 type
     expect(textbox!.isPlaceholder).toBe(false);
     expect(textbox!.hasOwnGeometry).toBe(true);
     expect(textbox!.paragraphTexts).toEqual(["正文丙"]);
     expect(textbox!.paragraphRunCounts).toEqual([1]);
+    // EMU → CSS px 只在 IO 边发生一次（§2.1）：914400/9525=96，3657600/9525=384，2743200/9525=288。
+    expect(textbox!.boxPx).toEqual({ leftPx: 96, topPx: 384, widthPx: 288, heightPx: 96 });
   });
 
   it("一段里两条不同格式 run 时如实报 2，视图据此不许整段改（§2.3）", async () => {
@@ -69,6 +73,8 @@ describe("pptx-io：读模型", () => {
     // 文字是拼接串，看不出这段里其实有粗体与非粗体两截——条数才是视图要的那个信息。
     expect(title.paragraphTexts).toEqual(["标题甲副"]);
     expect(title.paragraphRunCounts).toEqual([2]);
+    // 逐 run 的格式照实给：run0 只写了 b，run1 只写了 sz（半磅 1800 → 18pt），都没写颜色。
+    expect(title.paragraphRunFormats).toEqual([[{ bold: true }, { sizePt: 18 }]]);
   });
 });
 
@@ -282,5 +288,29 @@ describe("pptx-io：形状几何 op（移动 / 缩放）", () => {
     const badW = await setShapeGeometry(file, { partPath, shapeId: 4 }, { widthPx: 0 });
     expect(badW.ok).toBe(false);
     if (!badW.ok) expect(badW.reason).toContain("宽度");
+  });
+});
+
+describe("pptx-io：写进去再读回来，单位与颜色形态原样对上（§2.1/§2.2 全程只有一处换算）", () => {
+  it("字号 pt、颜色 hex、几何 px 交出什么读回什么，视图不会看到第二次换算的数", async () => {
+    const file = await PptxFile.open(await minimalDeck()); // 标题 run 原本没有 rPr，spPr 是空的
+    const partPath = file.model.slides[0]!.partPath;
+    const target = { partPath, shapeId: 2, paraIndex: 0, runIndex: 0 };
+    // 逐条算、逐条落：后一条的前像必须包含前一条的结果（视图那批改动在主进程里也是这个顺序）。
+    for (const produce of [
+      () => setRunFont(file, target, { sizePt: 24.5, bold: true }),
+      () => setRunColor(file, target, "#3cb371"),
+      () => setShapeGeometry(file, { partPath, shapeId: 2 }, { leftPx: 120, topPx: 60, widthPx: 500, heightPx: 250 }),
+    ]) {
+      const result = await produce();
+      if (!result.ok) throw new Error(result.reason);
+      applySlideEdit(file, result.op);
+    }
+    const { model } = await readPresentation(await file.toBytes());
+    const title = model.slides[0]!.shapes.find((s) => s.shapeId === 2)!;
+    // 24.5pt → sz=2450 → 24.5pt；颜色大写落盘、小写读回（编辑器内一律 #rrggbb，§2.2）。
+    expect(title.paragraphRunFormats).toEqual([[{ sizePt: 24.5, bold: true, hex: "#3cb371" }]]);
+    expect(title.boxPx).toEqual({ leftPx: 120, topPx: 60, widthPx: 500, heightPx: 250 });
+    expect(title.hasOwnGeometry).toBe(true); // 用户明示覆盖后，这份几何就是形状自己的了
   });
 });

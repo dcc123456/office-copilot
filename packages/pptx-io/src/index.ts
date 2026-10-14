@@ -7,6 +7,7 @@
  * 依赖方向（`AGENTS.md` §5.1）：只依赖 `@office-copilot/opc`，与 `docx-io`/`sheet-io` 平级、互不依赖。
  */
 export * from "./parts.js";
+export * from "./units.js";
 export * from "./read.js";
 export * from "./pptx-file.js";
 export * from "./edit.js";
