@@ -349,15 +349,20 @@ modlog 落盘。
 ### 阶段 4 · 结构化 op + 撤销/modlog — `[~] run 级文字/字体/颜色 + 形状几何编辑 op + 内容寻址撤销已落引擎；其余 op、modlog、UI 装配仍缺`
 D5 的 op 集合与内容寻址撤销，接同一份 modlog。
 **完成判定**：每类 op 有逆操作单测；"改完→用户手工再改别处→撤销"只回到自己那一格，不牵连后面的手工编辑。
-**实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op、modlog 落盘、渲染层提案卡装配。
+**实测（文字 + 字体 + 颜色 + 几何这四条已达标）**：`pptx-io/edit.ts` 的 `setShapeRunText` 只改目标 `<a:r>` 的 `<a:t>`、`setRunFont` 只改目标 run 自己的 `<a:rPr>` 的 `b`/`sz`（pt×100，字号唯一换算点落 IO 边，§2.1；rPr 缺失时新建插到 `<a:t>` 前）、`setRunColor` 只替换该 run 的填充组为 `<a:solidFill><a:srgbClr val>`（`#rrggbb` 归一，§2.2；同 run 重复上色只留一个填充）、`setShapeGeometry` 只写目标形状的 `<p:spPr><a:xfrm>` 的 off/ext（px×9525→EMU，几何唯一换算点，§2.1；组合形状拒绝；占位符只在用户明示覆盖时才写 xfrm，不在读侧烘焙，D3）；四者共用一套定位（`locateShape`→`locateRun`）与 get-or-create 助手与前/后像 op 契约，`apply`/`revert` 内容寻址（§2.5），邻居 run 与别的形状逐字不动（§2.3）。本机 python-pptx 交叉读真实 deck：`setShapeRunText` 编辑后标题变、粗体 run 保住，`apply→revert` 后 **38 个部件全部字节级回到原样（0 个变化）**；`setRunFont` run0 改非粗体 20pt、run1 加粗，读回 run0 `bold=False size=20.0`、run1 原 11.0pt 未受牵连；`setRunColor` run0 上 `#c00000`，读回 `rgb=C00000` 且其 `bold=True` 留住、run1 无颜色且 11pt 不动；`setShapeGeometry` 把文本框移到 0.5″,1.0″ 缩放为 6″×2″，python-pptx 读回 `left=0.5 top=1.0 width=6.0 height=2.0`（inches），文字保住。**仍缺**：增删形状/调整层级等结构 op、modlog 落盘（渲染层与代理的提案卡装配已在阶段 5 落，真 app 实测）。
 **"改完的 `.pptx` 会不会被办公软件判损坏"现在有机检面**（与 sheet 侧 `oc sheet check` 同源）：与格式无关的五条判定（内容类型覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、部件里 `r:id` 查得到）从 `sheet-io/compat-audit.ts` 上抽到 `@office-copilot/opc` 的 `auditOpcPackage`（`AGENTS.md` §3.2：`.xlsx`/`.pptx` 共用，不许长第二套；`localName` 同时抽进 `opc/xml.ts`），`auditXlsxPackage` 只留 `<worksheet>` 顺序与 `<c:chart>` 两条专属判定——**sheet-io 245 条单测一条没改、一条没减**，证明这次抽取是行为等价的。`.pptx` 专属两条落 `pptx-io/audit.ts` 的 `auditPptxPackage`：`<p:sld>` 里必须有 `cSld > spTree`（cSld 是 Part 1 §19.3.1.16，"最小一张幻灯片"要 `CommonSlideData` 里套 `ShapeTree` 出自 Learn "Working with presentation slides"）、幻灯片必须有一条指向 slideLayout 的内部关系（同页原话把 SlideLayout 关联列为必须，**ISO 正文里没有对应 MUST**；Target 是否存在由通用那条覆盖）。条款号初稿凭记忆写过 §19.3.1.9/.10/.2，已按官方一手页复核改过（见 D10 的复核记录）。7 条新单测（合规包 0 条 / 未登记部件 / 空 `cSld` / 无关系表 / 版式关系指向缺失部件 / 夹具与改后产物各自 0 条）。**本机实测**：python-pptx 1.0.2 生成的真实 **40 部件** deck 审计返回 `[]`（对第三方产物零误报），`setShapeRunText` 改标题后的写回同样 `[]` 且 `changedParts` 只有 `ppt/slides/slide1.xml`，python-pptx 读回标题为"改过的标题"、页数 2 未变。
 
-### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 packages/pptx-tools 已落（schema + JSON Schema + 永不抛异常校验）；slideAgent 装配与真端点探针仍缺`
+### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 pptx-tools + slideAgent（含 12 条单测）+ 桌面提案卡装配已落；真端点模型行为探针仍缺`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。
 **D6 落定**：不新建 `packages/agent-tools`、也不塞进 `packages/shared`，而是**照 `word-tools`/`sheet-tools` 的先例每格式一个工具面包** → 新建 `packages/pptx-tools`（纯 `zod`，不 import `pptx-io`，与既有两包同构）。工具面含 `ppt_describe`/`ppt_read_slide_text`（读，页/形状/段/run 由引擎从现场文件列）与 `ppt_submit_proposal`（写，四类：`set_run_text`/`set_run_font`/`set_run_color`/`set_shape_geometry`，一一对应 `pptx-io/edit.ts` 的四个带逆操作 op）。坐标是模型视角：页号 1 基、shapeId 取自 describe、段/run 0 基；单位说在描述里（字号 pt、几何 px，换算留在引擎边 §2.1）；跨字段"至少给一项"约束放外层 `superRefine`（`discriminatedUnion` 不接受被 `.refine` 包的成员）。
 **完成判定**：单测（mock fetch）覆盖"模型给数字/给原始 XML/给越界索引都要回中文理由"；真端点探针实测模型会不会点对工具、
 落地后 Keynote PNG 里文字真的变了。
-**实测（工具面校验这条已达标）**：`packages/pptx-tools` 15 条单测覆盖坏 JSON / 缺字段 / 多字段(strict) / 越界(页号 0、字号 401、宽 0、文 2001 字) / 未知 type / font-与-geometry 不给任何属性 → 全部回中文理由、绝不抛异常；并断言每个 `PPTX_TOOLS` 定义都能在同名 schema 表里找到（不给模型一个校验不了的口子）。**仍缺**：桌面 `slideAgent` 把 `slideNumber`→部件路径、把校验过的入参调四个引擎 op 的装配；真端点探针看模型行为。
+**实测（工具面校验这条已达标）**：`packages/pptx-tools` 15 条单测覆盖坏 JSON / 缺字段 / 多字段(strict) / 越界(页号 0、字号 401、宽 0、文 2001 字) / 未知 type / font-与-geometry 不给任何属性 → 全部回中文理由、绝不抛异常；并断言每个 `PPTX_TOOLS` 定义都能在同名 schema 表里找到（不给模型一个校验不了的口子）。
+**实测（`slideAgent` 装配这条已达标，AGENTS §2.4/2.8/2.11）**：`apps/desktop/src/ai/slideAgent.ts` 是**唯一**把模型视角（页号 1 基）换成引擎视角（`ppt/slides/slideN.xml` + `shapeId` + 段/run 0 基）的地方（`slideRequestsOfProposal`），12 条单测钉住四类改动各自落到正确的部件路径与序号、多 run 段落按模型指的 run 改（不整段覆盖，§2.3）、
+页号/形状号/段号/run 号对不上现场模型的**逐条不交出并给中文理由**（"没有第 9 页""没有 shapeId=99""越界（只有 1 段）""没有文字体""文字来自字段"），而不是整批静默不落；上送首条消息带结构画像并说清单位与截断规则（25 页只描述前 20 页，§2.9）；暂停留在两轮之间、`messages` 原样攒着供「继续」复用；8 轮封顶。
+**真 app 实跑（`tmp/slide-ai-app-probe.mjs`，端点是本机 8899 桩 + 假 Key，验装配面不是模型行为）**：打开 `tmp/slide-ai/probe.pptx` → 幻灯片视图 + 那条幻灯片引导语 + 幻灯片专属 placeholder，文档的快捷指令入口不出现（`chips:0`）；发一句"把第 1 页标题改成 Q3 复盘，正文里『粗』那一截标红" → 卡片头写 **2 处改动**（只算能落的两条）、清单里三条都念出来、越界那条后面跟 `· 没有第 9 页（这份文稿共 2 页），这条跳过。`；点「应用到幻灯片」→ 卡上出现"已写入 1 张幻灯片。要回退请在幻灯片面板点「撤销上一次保存」。"，磁盘 `slide1.xml` 的标题 run 变 `Q3 复盘`、`srgbClr val="C00000"` 只出现在第 1 截 run 上（`正文丙`/`细` 两截原样，§2.3 没被拍平），标题栏脏点**不出现**（落地当场写盘，内存没有待存改动），幻灯片面板的「撤销上一次保存」由禁用变可点；点它 → toast"已撤销上一次保存的那批改动"，磁盘回到 `标题甲` 且 `colors: []`。
+**表格那半边没被这次泛化改坏（`tmp/sheet-ai-app-probe.mjs`，同一只桩）**：表格引导语/placeholder/无快捷指令都在；`sheet_create_chart` 回来的图表卡显示"1 张图表 + 引用与数值都由引擎从现场表读"、`ChartPreview` 的 canvas 在、点「插入图表」只排进待写清单并置脏（dirty=true），文案如实说"撤销栈管不到图表"；`sheet_submit_proposal` 回来的改动卡"2 处改动 · C2 ← 999 · B5 ← 华南"，点「应用到表格」后网格当场是 `999`/`华南`，且 `D3` 的 `SUM(C2:C5)` 缓存值跟着重算成 2269（§2.11），卡上给「查看修改历史」。
+**仍缺**：真端点探针看模型会不会点对 `ppt_*` 工具名与形状 id（B5）、pptx 的 modlog 落盘（阶段 4）。
 
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
@@ -409,7 +414,9 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 - `[ ]` B1 模型只交引用与意图，数字由引擎算（图表、页码、坐标）。
 - `[ ]` B2 模型交原始 XML / XPath 一律拒（不抄 OfficeCLI 的 `raw-set`）。
 - `[ ]` B3 半自动必须点确认才落地；全自动仍受撤销约束。
-- `[ ]` B4 送模型的幻灯片内容按 §2.9 截断（形状数、每形状文本 ≤120 字），不许整包上送。
+- `[x]` B4 送模型的幻灯片内容按 §2.9 截断（形状数、每形状文本 ≤120 字），不许整包上送。
+  **实测**：`pptx-io/analysis.ts` 的 `describeDeck`/`readSlideText` 各带页数、每页形状数、每段 run 数与单条 run 文字 120 字的上限，
+  被截掉的部分置 `truncated` 让模型接着调 `readSlideText`；`slideAgent.test.ts` 用 25 页的模型断言上送里写的是"只描述了前 20 页"。
 - `[ ]` B5 真端点探针：模型会点对 `ppt` 工具名与形状 id；结论与原始 tool_calls 记进文档（探针在 `tmp/`，不进主干）。
 
 ### C. 可撤销性与历史（对应 §2.5）
@@ -420,13 +427,16 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 
 ### D. UI 与工程（对应 §3/§4/§5）
 - `[x]` D1 `App.tsx` 的 `isSheet` 已换成模式枚举（`EditorMode`：九处文档门控与 `isSheet || isDeck` 全改），无新增布尔门控；三种模式在真 app 里各跑一遍确认没改坏表格与文档视图（阶段 3 的实测段）。
-- `[ ]` D2 无第二套 OPC / 解析 / 撤销 / 工具 schema / 样式体系（§3 红线）。
+- `[ ]` D2 无第二套 OPC / 解析 / 撤销 / 工具 schema / 样式体系（§3 红线）。本批新增的那条**没长第二套**：
+  幻灯片提案卡与表格那张收成同一张 `ToolPlanCard`（落地出口是 `ToolLand` 的三个分支，卡片装配、暂停续跑、聊天模式不动文件都只剩一份），
+  幻灯片落地与手工「保存」共用 `App.tsx` 的同一个 `commitSlideEdits` 口、撤销凭据也只有一份。仍开着的是 zip 目录项那份重复（阶段 3 的"发现的既有缺陷"）与 `docx-io` 的三处单位换算（A3）。
 - `[x]` D3 新函数全部有中文 JSDoc（含单位与失败语义）；命名有含义（前两批：`pendingEdits`/`draftKeyOf`/`lockedParagraphHint`/`paragraphRunCounts`；本批：`emuToPx`/`pxToEmu`/`halfPointToPt`/`ptToHalfPoint`/`boxDraftKeyOf`/`pushGeometryEdits`/`changedBoxFields`/`readRunFormat`/`readBoxPx`/`patchBox`/`numberOrUndefined`）。
 - `[x]` D4 渲染层不碰 Node，跨界只走 preload 白名单（`SlideDeck` 只调 `window.officeCopilot.editPptx/revertPptx`；幻灯片原文从不过进程边界）。
 
 ### E. 测试与门禁（对应 §7）
 - `[x]` E1 每条写入路径有单测（本批：`slideDeckModel.test.ts` 4 条钉住「哪些段落会被写进文件」，视图本身不装配落地逻辑），**逐包核对通过数**（`packages/shared` 无测试是已知假绿源）。
 - `[x]` E2 `pnpm build`（含 `tsc --noEmit`）+ `pnpm test` 重定向后读退出码，不许管道 tail。本批两次都是 `EXIT=0`，且 build 真抓到一处联合类型窄化缺陷（`slideDeckModel.test.ts` 里 `edit.target.paraIndex`）。
+  阶段 5 这批的门禁：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包通过数 `opc 15 / sheet-tools 12 / pptx-tools 15 / pptx-io 37 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / desktop 478`（合计 1119；`packages/shared` 仍无测试文件，是已知假绿源）。
 - `[x]` E3 视觉验收走 Keynote PNG 导出通道并报告看到的文字内容：`keynote-out.001.png` 第一页居中黑字「Keynote 要看到的第一页标题」+ 下方灰色「正文一行」，`002.png` 第二页「第二页标题」原样（阶段 3 实测段）。
 - `[ ]` E4 探针与夹具产物只进 `tmp/` 并清理；禁止 `git add -A`。
 
