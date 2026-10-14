@@ -406,9 +406,9 @@ python-pptx 独立读到 3 个形状：`id=4 name='TextBox 3' type=TEXT_BOX (17)
 而该文件正带着 dcc 未提交的改动，改它会撞车，所以本批只把记录与撤销做扎实，AI 提案卡上的幻灯片那张仍不给「查看修改历史」入口。
 **"改完的 `.pptx` 会不会被办公软件判损坏"现在有机检面**（与 sheet 侧 `oc sheet check` 同源）：与格式无关的五条判定（内容类型覆盖、Override 指向存在、关系 Target 可解析、关系 Id 不重复、部件里 `r:id` 查得到）从 `sheet-io/compat-audit.ts` 上抽到 `@office-copilot/opc` 的 `auditOpcPackage`（`AGENTS.md` §3.2：`.xlsx`/`.pptx` 共用，不许长第二套；`localName` 同时抽进 `opc/xml.ts`），`auditXlsxPackage` 只留 `<worksheet>` 顺序与 `<c:chart>` 两条专属判定——**sheet-io 245 条单测一条没改、一条没减**，证明这次抽取是行为等价的。`.pptx` 专属两条落 `pptx-io/audit.ts` 的 `auditPptxPackage`：`<p:sld>` 里必须有 `cSld > spTree`（cSld 是 Part 1 §19.3.1.16，"最小一张幻灯片"要 `CommonSlideData` 里套 `ShapeTree` 出自 Learn "Working with presentation slides"）、幻灯片必须有一条指向 slideLayout 的内部关系（同页原话把 SlideLayout 关联列为必须，**ISO 正文里没有对应 MUST**；Target 是否存在由通用那条覆盖）。条款号初稿凭记忆写过 §19.3.1.9/.10/.2，已按官方一手页复核改过（见 D10 的复核记录）。7 条新单测（合规包 0 条 / 未登记部件 / 空 `cSld` / 无关系表 / 版式关系指向缺失部件 / 夹具与改后产物各自 0 条）。**本机实测**：python-pptx 1.0.2 生成的真实 **40 部件** deck 审计返回 `[]`（对第三方产物零误报），`setShapeRunText` 改标题后的写回同样 `[]` 且 `changedParts` 只有 `ppt/slides/slide1.xml`，python-pptx 读回标题为"改过的标题"、页数 2 未变。
 
-### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 pptx-tools + slideAgent（含 12 条单测）+ 桌面提案卡装配已落；真端点模型行为探针仍缺`
+### 阶段 5 · AI 工具面 + `slideAgent` — `[~] 工具面 pptx-tools（七类改动，与引擎那七个 op 齐平）+ slideAgent（含 15 条单测）+ 桌面提案卡装配已落；真端点模型行为探针仍缺`
 D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提案卡复用现有装配。
-**D6 落定**：不新建 `packages/agent-tools`、也不塞进 `packages/shared`，而是**照 `word-tools`/`sheet-tools` 的先例每格式一个工具面包** → 新建 `packages/pptx-tools`（纯 `zod`，不 import `pptx-io`，与既有两包同构）。工具面含 `ppt_describe`/`ppt_read_slide_text`（读，页/形状/段/run 由引擎从现场文件列）与 `ppt_submit_proposal`（写，四类：`set_run_text`/`set_run_font`/`set_run_color`/`set_shape_geometry`，一一对应 `pptx-io/edit.ts` 的四个带逆操作 op）。坐标是模型视角：页号 1 基、shapeId 取自 describe、段/run 0 基；单位说在描述里（字号 pt、几何 px，换算留在引擎边 §2.1）；跨字段"至少给一项"约束放外层 `superRefine`（`discriminatedUnion` 不接受被 `.refine` 包的成员）。
+**D6 落定**：不新建 `packages/agent-tools`、也不塞进 `packages/shared`，而是**照 `word-tools`/`sheet-tools` 的先例每格式一个工具面包** → 新建 `packages/pptx-tools`（纯 `zod`，不 import `pptx-io`，与既有两包同构）。工具面含 `ppt_describe`/`ppt_read_slide_text`（读，页/形状/段/run 由引擎从现场文件列）与 `ppt_submit_proposal`（写，初批四类：`set_run_text`/`set_run_font`/`set_run_color`/`set_shape_geometry`，一一对应 `pptx-io/edit.ts` 当时那四个带逆操作 op；引擎把叠放与增删建成七个 op 后，工具面在下面"第二批"一段里同步成七类）。坐标是模型视角：页号 1 基、shapeId 取自 describe、段/run 0 基；单位说在描述里（字号 pt、几何 px，换算留在引擎边 §2.1）；跨字段"至少给一项"约束放外层 `superRefine`（`discriminatedUnion` 不接受被 `.refine` 包的成员）。
 **完成判定**：单测（mock fetch）覆盖"模型给数字/给原始 XML/给越界索引都要回中文理由"；真端点探针实测模型会不会点对工具、
 落地后 Keynote PNG 里文字真的变了。
 **实测（工具面校验这条已达标）**：`packages/pptx-tools` 15 条单测覆盖坏 JSON / 缺字段 / 多字段(strict) / 越界(页号 0、字号 401、宽 0、文 2001 字) / 未知 type / font-与-geometry 不给任何属性 → 全部回中文理由、绝不抛异常；并断言每个 `PPTX_TOOLS` 定义都能在同名 schema 表里找到（不给模型一个校验不了的口子）。
@@ -416,8 +416,11 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 页号/形状号/段号/run 号对不上现场模型的**逐条不交出并给中文理由**（"没有第 9 页""没有 shapeId=99""越界（只有 1 段）""没有文字体""文字来自字段"），而不是整批静默不落；上送首条消息带结构画像并说清单位与截断规则（25 页只描述前 20 页，§2.9）；暂停留在两轮之间、`messages` 原样攒着供「继续」复用；8 轮封顶。
 **真 app 实跑（`tmp/slide-ai-app-probe.mjs`，端点是本机 8899 桩 + 假 Key，验装配面不是模型行为）**：打开 `tmp/slide-ai/probe.pptx` → 幻灯片视图 + 那条幻灯片引导语 + 幻灯片专属 placeholder，文档的快捷指令入口不出现（`chips:0`）；发一句"把第 1 页标题改成 Q3 复盘，正文里『粗』那一截标红" → 卡片头写 **2 处改动**（只算能落的两条）、清单里三条都念出来、越界那条后面跟 `· 没有第 9 页（这份文稿共 2 页），这条跳过。`；点「应用到幻灯片」→ 卡上出现"已写入 1 张幻灯片。要回退请在幻灯片面板点「撤销上一次保存」。"，磁盘 `slide1.xml` 的标题 run 变 `Q3 复盘`、`srgbClr val="C00000"` 只出现在第 1 截 run 上（`正文丙`/`细` 两截原样，§2.3 没被拍平），标题栏脏点**不出现**（落地当场写盘，内存没有待存改动），幻灯片面板的「撤销上一次保存」由禁用变可点；点它 → toast"已撤销上一次保存的那批改动"，磁盘回到 `标题甲` 且 `colors: []`。
 **表格那半边没被这次泛化改坏（`tmp/sheet-ai-app-probe.mjs`，同一只桩）**：表格引导语/placeholder/无快捷指令都在；`sheet_create_chart` 回来的图表卡显示"1 张图表 + 引用与数值都由引擎从现场表读"、`ChartPreview` 的 canvas 在、点「插入图表」只排进待写清单并置脏（dirty=true），文案如实说"撤销栈管不到图表"；`sheet_submit_proposal` 回来的改动卡"2 处改动 · C2 ← 999 · B5 ← 华南"，点「应用到表格」后网格当场是 `999`/`华南`，且 `D3` 的 `SUM(C2:C5)` 缓存值跟着重算成 2269（§2.11），卡上给「查看修改历史」。
-**仍缺**：真端点探针看模型会不会点对 `ppt_*` 工具名与形状 id（B5）。pptx 的 modlog 落盘已在阶段 4 收掉。
-
+**第二批（把引擎已有的两条结构 op 开进提案面）**：阶段 4 建完 `addTextBox`/`removeShape` 后，工具面还停在五类——那是一处没人说过的收窄（模型能提的比引擎能做的少，用户说"加个致谢框"时模型只能回"做不了"）。现在 `PptxEdit` 的判别式联合是七条，与 `edit.ts` 那七个 op 生产者齐平：
+`add_text_box` 要页号 + 四个几何值 + 文字（全必填，`strict` 连 `shapeId` 都拒——新形状号由引擎在落地时按该页现有最大值 +1 分配，模型在这一份提案里引用不到自己刚要建的那个框，这条写进字段描述与系统提示词），`remove_shape` 要页号 + 形状号。
+给模型的 JSON `oneOf` 与 zod 联合由一条新单测钉住必须逐项相等（只加校验忘了改声明 = 模型根本提不了那条；反向也一样）。装配面加一条**同批守卫**：这一批里已经删掉的形状再被指到，那条只进 `notes`——按数组顺序落地时它必然定位失败，而失败语义是整批不写（§2.4），等于让用户白点一次确认；现场模型是提案前那一份，所以光查"这一页有没有它"拦不住重复删。
+**真 app 实跑（`tmp/probe/slide-ai-structure-ui.mjs`，本机 8899 桩 + 假 Key，验装配面不是模型行为）**：桩交四条提案（加文本框、删形状 3、改刚被删的那条、删根本不存在的第 9 页）→ 卡片头 **2 处改动**，新文本框那行是「第 1 页 加文本框「谢谢观看」（96,420px 起 480×120px）」、删形状那行是「第 1 页 · 形状 3 删掉整个形状（连同它里面的文字）」，两条拦下的各跟一句理由（「在同一批里已经被删掉」「没有第 9 页（这份文稿共 2 页）」）；点「应用到幻灯片」→ 磁盘形状序列 `[2:Title 1, 3:TextBox 2]` 变 `[2:Title 1, 4:TextBox 3]`（新框拿到 4 号，因为它落地时页内最大是 3，随后 3 号被删），`<a:t>` 只剩 `标题甲 | 谢谢观看`，脏点不出现，幻灯片面板那行跟着列出新框；点「撤销上一次保存」→ `slide1.xml` 与原文件**连声明都逐字一致**（`byte:true`，前像本来就是从磁盘读的那一份）。落地仍走 `ppt:edit` 那一个口，所以存前审计（`auditPptxPackage`）与 modlog 一句没改。
+**仍缺**：真端点探针看模型会不会点对 `ppt_*` 工具名与形状 id（B5），也包括它会不会主动用 `add_text_box`/`remove_shape`。pptx 的 modlog 落盘已在阶段 4 收掉。
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
 
@@ -607,3 +610,4 @@ open tmp/p0/deck.pptx（3 页 + 备注 + 图表 + 表格，建在 WPS 模板上�
 按 §6.5/§7.3 由本次执行者清理，不入库。
 
   增删形状这批：`pnpm build` 与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / pptx-tools 16 / **pptx-io 52**（+7 条新建/删除：形状号在本页内取、骨架与单位、空段、转义、拒绝不落、逐字回原、删到空）/ word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 495**（+3 条 `dropShapeDrafts`）`，合计 **1152**。`packages/opc` 另多导出一个 `XmlNode` 类型（自己走子树时要按它接 `isElement` 收窄），不是新实现。
+  把增删形状开进 AI 提案面这批：`pnpm build`（含 `tsc --noEmit`）与 `pnpm test` 都 `EXIT=0`，逐包 `opc 15 / sheet-tools 12 / **pptx-tools 20**（+4 条：`add_text_box` 五字段必填与非正尺寸与空文字、strict 拒 `shapeId`、`remove_shape` 缺号与 0 号、七类判别式在 zod 与给模型的 JSON `oneOf` 里逐项相等）/ pptx-io 52 / word-client 8 / docx-io 296 / word-tools 6 / sheet-io 245 / server 2 / cli 5 / **desktop 497**（+2 条装配：加文本框只定位到整页 + 页号越界，同批已删的形状后面那条不交出）`，合计 **1158**。
