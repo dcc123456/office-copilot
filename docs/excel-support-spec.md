@@ -773,7 +773,7 @@ P7（原生 chart part 的 spike，本阶段最大的风险项）在阶段 5 的
    **实测**：阶段 3/4/5 用临时 CDP harness 驱动**构建产物**里的真实 app（等价于 dev 版，且避开了用户自己在跑的实例），走完"开表→改格→保存→撤销→再保存→插图表→再保存"，看到的卡片文案、按钮、状态与落盘五件部件都记在 §八 对应行；表格模式下没有文档工具栏（`App.tsx` 的 `!isSheet`），保存走命令面板这条已写进 `AGENTS.md` §8 环境事实。
 27. `[x]` 测试产物只落 `tmp/` 且清理；不新增任何二进制夹具入库（`AGENTS.md` §7.3）。
     **实测**：夹具由 `packages/sheet-io/scripts/make-sample-sheet.ts` 在测试里现生成，仓库内无 `.xlsx`；探针与日志全在 `tmp/xlsx-probe/`（未跟踪）。
-    **已清**（2026-10-13）：阶段 5 的 app 探针目录里那份 `config.json`（从用户 `userData/config.json` **复制来的、含真实 Key**）已删掉，`tmp/chart-ui-profile/` 与 `profile2/` 两份都在；全仓 grep 那段 Key 的明文（含 `tmp/`）零命中，两份探针脚本只在运行时从配置读 `provider.apiKey`，不把密钥写进源码。仍要记住的前提：`tmp/` **没有 `.gitignore` 条目**，所以它一直以待跟踪目录出现在 `git status` 里，任何 `git add -A` 都会把当时的探针产物（可能含复制来的配置）一起带上——这条已写进 `AGENTS.md` §7.3，禁用 `git add -A` 不是可选项。
+    **已清**（2026-10-13）：阶段 5 的 app 探针目录里那份 `config.json`（从用户 `userData/config.json` **复制来的、含真实 Key**）已删掉，`tmp/chart-ui-profile/` 与 `profile2/` 两份都在；全仓 grep 那段 Key 的明文（含 `tmp/`）零命中，两份探针脚本只在运行时从配置读 `provider.apiKey`，不把密钥写进源码。仍要记住的前提：`tmp/` **没有 `.gitignore` 条目**，所以它一直以待跟踪目录出现在 `git status` 里，任何 `git add -A` 都会把当时的探针产物（可能含复制来的配置）一起带上——这条已写进 `AGENTS.md` §7.3，禁用 `git add -A` 不是可选项。**2026-10-14 更新**：经 dcc 明示，`tmp/` 已进 `.gitignore`（`591ed89`），它不再以未跟踪目录出现在 `git status` 里。改的是环境事实不是规则——§7.3 的实质口径照旧：探针产物只准落在 `tmp/`、里面可能躺着含真实 Key 的复制配置，所以仍逐文件点名 `git add`，禁止 `git add -A`。
 28. `[x]` 提交信息中文、`<type>(<scope>)`、一事一提交，功能与格式化不夹带；已推送并复核远端。
     **实测**：阶段 6 拆成 `a72196e`（feat(cli)：只读子命令 + 该包第一条测试）与本提交（docs：README/AGENTS/spec 回填）两件事，各自推送后 `git status -sb` + `git ls-remote origin main` 双重复核；用户自己的未提交 WIP（`HistoryPanel.tsx`、`styles.css`）没有被夹带进任何一个提交。
 
