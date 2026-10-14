@@ -1,4 +1,5 @@
 import type { ResolvedChart, SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
+import type { PptxEditPayload, PptxRevertPayload, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
 
 /** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
 export interface SheetOpenResult {
@@ -106,6 +107,32 @@ export type ToolTurnResult =
   | { ok: true; content: string; toolCalls: ToolCall[] }
   | { ok: false; message: string; needsSetup?: boolean };
 
+/** 打开 `.pptx` 的结果：跨界只有结构化形状与文字，幻灯片 XML 原文留在主进程。 */
+export interface PptxOpenOutcome {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+  presentation?: PresentationModel;
+}
+
+/**
+ * 幻灯片保存 / 撤销的结果。
+ *
+ * `ops` 是主进程现做出的那批前/后像：渲染层拿不到幻灯片原文，所以撤销要把它们原样送回 `ppt:revert`（§2.5）。
+ * `presentation` 是主进程写盘后重读的那份，视图直接用它刷新，不必再发一次读请求。
+ */
+export interface PptxEditOutcome {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+  /** 本次真正动过的幻灯片部件路径。 */
+  changedParts?: string[];
+  ops?: SlideEditOp[];
+  presentation?: PresentationModel;
+}
+
 /** 打开对话框的选择结果：只有路径，读 docx 还是 xlsx 由渲染层按扩展名分派。 */
 export interface OpenPickResult {
   ok: boolean;
@@ -118,6 +145,10 @@ interface OfficeCopilotAPI {
   newFile: () => Promise<unknown>;
   openFile: () => Promise<OpenPickResult>;
   readSheet: (filePath: string) => Promise<SheetOpenResult>;
+  readPptx: (filePath: string) => Promise<PptxOpenOutcome>;
+  editPptx: (payload: PptxEditPayload) => Promise<PptxEditOutcome>;
+  revertPptx: (payload: PptxRevertPayload) => Promise<PptxEditOutcome>;
+  savePptxAs: (payload: PptxEditPayload) => Promise<PptxEditOutcome>;
   saveSheet: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveSheetAs: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveFile: (payload: {

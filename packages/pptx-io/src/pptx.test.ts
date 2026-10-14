@@ -54,11 +54,21 @@ describe("pptx-io：读模型", () => {
     expect(title!.placeholderRef).toBe("title");
     expect(title!.hasOwnGeometry).toBe(false); // 空 <p:spPr/>：几何从版式继承，不许烘焙（D3）
     expect(title!.paragraphTexts).toEqual(["标题甲"]);
+    expect(title!.paragraphRunCounts).toEqual([1]); // 一段一条 run：视图允许整段改
     expect(body!.isPlaceholder).toBe(true);
     expect(body!.placeholderRef).toBe("1"); // idx="1" 而非 type
     expect(textbox!.isPlaceholder).toBe(false);
     expect(textbox!.hasOwnGeometry).toBe(true);
     expect(textbox!.paragraphTexts).toEqual(["正文丙"]);
+    expect(textbox!.paragraphRunCounts).toEqual([1]);
+  });
+
+  it("一段里两条不同格式 run 时如实报 2，视图据此不许整段改（§2.3）", async () => {
+    const { model } = await readPresentation(await twoRunDeck());
+    const title = model.slides[0]!.shapes.find((s) => s.shapeId === 2)!;
+    // 文字是拼接串，看不出这段里其实有粗体与非粗体两截——条数才是视图要的那个信息。
+    expect(title.paragraphTexts).toEqual(["标题甲副"]);
+    expect(title.paragraphRunCounts).toEqual([2]);
   });
 });
 

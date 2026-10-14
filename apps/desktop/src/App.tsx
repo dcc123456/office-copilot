@@ -50,6 +50,8 @@ import { HistoryPanel } from "./components/HistoryPanel.js";
 import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
+import type { PresentationModel } from "@office-copilot/pptx-io";
+import { SlideDeck } from "./slides/SlideDeck.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
 import { ToastHost, toast } from "./components/ui/Toast.js";
@@ -74,9 +76,16 @@ import { renderHeaderFooterHtml } from "./editor/renderHeaderFooter.js";
 // We intentionally type loosely; TipTap accepts JSON content directly.
 type PMDoc = Record<string, unknown>;
 
+/**
+ * 编辑区当前是哪一个格式（`docs/office-parity-spec.md` D7）。
+ *
+ * `"pdf"` 还没有分支会赋到它，列在这里是 D7 定下的扩展点：pdf 线进来时加一个成员与一条分派，
+ * 而不是再叠一层 `!isSheet && !isDeck && !isPdf` 这种布尔组合。
+ */
+export type EditorMode = "doc" | "sheet" | "slide" | "pdf";
+
 /** A4 at 96dpi — what the editor renders until 页面设置 supplies a section. */
 const FALLBACK_PAGE = { pageWidth: 794, pageHeight: 1123, header: 48, footer: 48 };
-
 const STARTER_CONTENT: PMDoc = {
   type: "doc",
   content: [
@@ -126,6 +135,13 @@ export function App() {
    * 换一份工作簿或关文档都要清空，否则会把上一份的图插进当前文件。
    */
   const [pendingCharts, setPendingCharts] = useState<{ partPath: string; chart: ResolvedChart }[]>([]);
+  /**
+   * 打开的 `.pptx` 模型；null 表示当前不是幻灯片那条路。
+   *
+   * 与表格同口径：幻灯片 XML 原文只在主进程，这里只有结构化形状与文字；改动交给 `SlideDeck` 里那批草稿
+   * 走 `ppt:edit`（spec 阶段 3）。
+   */
+  const [deck, setDeck] = useState<PresentationModel | null>(null);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -258,6 +274,7 @@ export function App() {
     setStarted(true);
     setSheetWorkbook(null);
     setPendingCharts([]);
+    setDeck(null);
   }, [editor, stopTracking]);
 
   /**
@@ -371,12 +388,29 @@ export function App() {
         if (!ok) return;
       }
       // 拖入 / 最近文件进来的路径也按扩展名分派，跟「打开」对话框一个口径。
+      if (/\.pptx$/i.test(p)) {
+        const opened = await window.officeCopilot.readPptx(p);
+        if (!opened.ok || !opened.presentation) {
+          if (opened.message) toast(opened.message, "error");
+          return;
+        }
+        stopTracking();
+        setSheetWorkbook(null);
+        setPendingCharts([]);
+        setDeck(opened.presentation);
+        setFilePath(opened.path ?? p);
+        setDirty(false);
+        setStarted(true);
+        window.officeCopilot.addRecent(p);
+        return;
+      }
       if (/\.xlsx$/i.test(p)) {
         const sheet = await window.officeCopilot.readSheet(p);
         if (!sheet.ok || !sheet.workbook) {
           if (sheet.message) toast(sheet.message, "error");
           return;
         }
+        setDeck(null);
         openSheetPayload(sheet.workbook, sheet.path ?? p);
         return;
       }
@@ -388,6 +422,7 @@ export function App() {
       stopTracking();
       setSheetWorkbook(null);
       setPendingCharts([]);
+      setDeck(null);
       editor.commands.setContent(r.doc as never);
       setHeaderDoc((r.header as never) ?? null);
       setFooterDoc((r.footer as never) ?? null);
@@ -444,10 +479,10 @@ export function App() {
       dragDepthRef.current = 0;
       setDropActive(false);
       const file = Array.from(e.dataTransfer.files).find((f) =>
-        /\.(docx|json|xlsx)$/i.test(f.name),
+        /\.(docx|json|xlsx|pptx)$/i.test(f.name),
       );
       if (!file) {
-        toast("只能打开 .docx 文档或 .xlsx 表格。", "error");
+        toast("只能打开 .docx 文档、.xlsx 表格或 .pptx 演示文稿。", "error");
         return;
       }
       const p = window.officeCopilot.pathForFile(file);
@@ -517,6 +552,11 @@ export function App() {
   );
 
   const handleSave = useCallback(async () => {
+    // 幻灯片那条路自己带「保存」：待保存的草稿在 SlideDeck 里，不走这两个全局入口（spec 阶段 3）。
+    if (deck) {
+      toast("幻灯片的改动请在幻灯片面板里点「保存」。");
+      return;
+    }
     if (sheetWorkbook) {
       if (!canWriteSheet(sheetWorkbook)) return;
       const saved = await window.officeCopilot.saveSheet({
@@ -554,9 +594,14 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
+  }, [canWriteSheet, deck, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
 
   const handleSaveAs = useCallback(async () => {
+    // 幻灯片那条路自己带「保存」：待保存的草稿在 SlideDeck 里，不走这两个全局入口（spec 阶段 3）。
+    if (deck) {
+      toast("幻灯片的改动请在幻灯片面板里点「保存」。");
+      return;
+    }
     if (sheetWorkbook) {
       if (!canWriteSheet(sheetWorkbook)) return;
       const saved = await window.officeCopilot.saveSheetAs({
@@ -600,7 +645,7 @@ export function App() {
     } else if (!r.canceled && r.message) {
       toast(r.message, "error");
     }
-  }, [canWriteSheet, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
+  }, [canWriteSheet, deck, editor, headerDoc, footerDoc, section, linkStyle, footnoteBodies, commentBodies, pendingCharts, sheetWorkbook]);
 
   /**
    * 给当前选区新建一条批注，并把侧栏开到那条上。
@@ -1114,8 +1159,9 @@ export function App() {
 
   if (!editor) return <div className="app">启动中…</div>;
 
-  // 表格与文档是两套视图：打开 .xlsx 时隐藏的是文档专属的面板（大纲、样式、脚注、批注）。
-  const isSheet = sheetWorkbook !== null;
+  // 表格、幻灯片与文档是三套视图：打开前两者时隐藏的都是文档专属的面板（大纲、样式、脚注、批注）。
+  // 判定收成一处模式（D7）：pdf 线进来时只多一个分支，不再往下叠 `!isSheet && !isDeck` 这种布尔组合。
+  const mode: EditorMode = deck !== null ? "slide" : sheetWorkbook !== null ? "sheet" : "doc";
   // AI 面板两套都要：表格模式下代理只读这张表的载荷，写入仍然只有 commitSheetOps 这一个口（spec 决策 D6）。
   const activeSheet = sheetWorkbook?.sheets[sheetIndex] ?? null;
   const sheetBridge = activeSheet
@@ -1148,14 +1194,14 @@ export function App() {
           } as React.CSSProperties
         }
       >
-        {!isSheet && (
+        {mode === "doc" && (
           <Outline
             editor={editor}
             collapsed={outlineCollapsed}
             onToggle={() => setOutlineCollapsed((v) => !v)}
           />
         )}
-        {!isSheet && !outlineCollapsed && (
+        {mode === "doc" && !outlineCollapsed && (
           <div
             className="resizer"
             title="拖动调整宽度，双击复位"
@@ -1163,7 +1209,7 @@ export function App() {
             onDoubleClick={outlineResize.onDoubleClick}
           />
         )}
-        {!isSheet && stylePaneOpen && (
+        {mode === "doc" && stylePaneOpen && (
           <StylePane
             editor={editor}
             styles={docStyles}
@@ -1171,7 +1217,7 @@ export function App() {
             onClose={() => setStylePaneOpen(false)}
           />
         )}
-        {!isSheet && footnotePaneOpen && editor && (
+        {mode === "doc" && footnotePaneOpen && editor && (
           <FootnotePane
             editor={editor}
             bodies={footnoteBodies}
@@ -1182,7 +1228,7 @@ export function App() {
             onClose={() => setFootnotePaneOpen(false)}
           />
         )}
-        {!isSheet && commentPaneOpen && editor && (
+        {mode === "doc" && commentPaneOpen && editor && (
           <CommentPane
             editor={editor}
             bodies={commentBodies}
@@ -1196,7 +1242,7 @@ export function App() {
           />
         )}
         <div className="editor-area">
-          {isSheet && sheetWorkbook ? (
+          {mode === "sheet" && sheetWorkbook ? (
             <SheetView
               workbook={sheetWorkbook}
               activeIndex={sheetIndex}
@@ -1205,9 +1251,10 @@ export function App() {
               onUndo={() => void undoLastSheetEdit()}
             />
           ) : null}
+          {deck && filePath ? <SlideDeck deck={deck} path={filePath} onDeck={setDeck} /> : null}
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
-          {!isSheet && docStyleCss ? <style>{docStyleCss}</style> : null}
-          {!isSheet && started ? (
+          {mode === "doc" && docStyleCss ? <style>{docStyleCss}</style> : null}
+          {mode === "doc" && started ? (
             <Toolbar
               editor={editor}
               onInsertImage={insertImage}
@@ -1221,33 +1268,35 @@ export function App() {
               dirty={dirty}
             />
           ) : null}
-          {!isSheet && showFind && <FindBar editor={editor} onClose={() => setShowFind(false)} />}
-          {isSheet ? null : started ? (
-            editor && (
-              <PageChrome
-                editor={editor}
-                headerDoc={headerDoc}
-                footerDoc={footerDoc}
-                section={section}
-                onHeaderChange={setHeaderDoc}
-                onFooterChange={setFooterDoc}
-              >
-                <TableBubbleMenu editor={editor} />
-                <AISuggestionBubble
+          {mode === "doc" && showFind && <FindBar editor={editor} onClose={() => setShowFind(false)} />}
+          {mode === "doc" ? (
+            started ? (
+              editor && (
+                <PageChrome
                   editor={editor}
-                  docKey={filePath ?? "未命名文档"}
-                  onApplied={() => setDirty(true)}
-                />
-              </PageChrome>
+                  headerDoc={headerDoc}
+                  footerDoc={footerDoc}
+                  section={section}
+                  onHeaderChange={setHeaderDoc}
+                  onFooterChange={setFooterDoc}
+                >
+                  <TableBubbleMenu editor={editor} />
+                  <AISuggestionBubble
+                    editor={editor}
+                    docKey={filePath ?? "未命名文档"}
+                    onApplied={() => setDirty(true)}
+                  />
+                </PageChrome>
+              )
+            ) : (
+              <Welcome
+                onNew={handleNew}
+                onOpen={handleOpen}
+                onOpenRecent={(p) => openPath(p, true)}
+              />
             )
-          ) : (
-            <Welcome
-              onNew={handleNew}
-              onOpen={handleOpen}
-              onOpenRecent={(p) => openPath(p, true)}
-            />
-          )}
-          {!isSheet && (
+          ) : null}
+          {mode === "doc" && (
             <StatusBar wordCount={wordCount} charCount={charCount} editorEl={editorEl} />
           )}
         </div>
@@ -1326,7 +1375,7 @@ export function App() {
         <div className="drop-overlay">
           <div className="drop-overlay-card">
             <FileDown size={28} />
-            松开以打开 .docx / .xlsx
+            松开以打开 .docx / .xlsx / .pptx
           </div>
         </div>
       )}

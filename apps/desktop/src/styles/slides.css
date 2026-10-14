@@ -1,0 +1,126 @@
+/* 幻灯片视图（spec 阶段 3）。
+   页面尺寸、形状几何都不在这里换算：那些数字属于文档内容，单位换算只发生在 pptx-io 的边上
+   （AGENTS.md §2.1）。这份样式表只管颜色、边框、滚动与对齐（§5.4）。 */
+
+.slide-deck {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.slide-deck-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: no-drag;
+}
+
+.slide-deck-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.slide-deck-bar button {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+}
+
+.slide-deck-bar button:disabled {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.slide-deck-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.slide-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  padding: var(--space-2);
+}
+
+.slide-card-title {
+  margin: 0 0 var(--space-1);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.slide-card-part {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+
+.slide-shape {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-1) 0;
+  border-top: 1px solid var(--border);
+}
+
+.slide-shape-meta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.slide-shape-kind {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.slide-para-input {
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+/* 只读的段落用底色区分出来：多条 run 的段落在本视图里不许整段覆盖（§2.3）。 */
+.slide-para-locked {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-tint);
+  color: var(--text);
+}
+
+.slide-para-locked em {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+}

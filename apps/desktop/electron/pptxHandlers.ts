@@ -20,10 +20,9 @@ import {
   setShapeRunText,
   type PptxAuditIssue,
   type PresentationModel,
-  type RunFontFormat,
-  type ShapeBoxPx,
-  type ShapeGeometryTarget,
-  type ShapeRunTarget,
+  type PptxEditPayload,
+  type PptxEditRequest,
+  type PptxRevertPayload,
   type SlideEditOp,
 } from "@office-copilot/pptx-io";
 import { newlyIntroducedIssues } from "@office-copilot/opc";
@@ -52,31 +51,6 @@ export type PptxEditResult =
     }
   | { ok: false; canceled: true }
   | { ok: false; message: string };
-
-/** 一条要落地的幻灯片改动：`kind` 与 `pptx-io/edit.ts` 的四个 op 生产者一一对应，坐标原样交给它们。 */
-export type PptxEditRequest =
-  | { kind: "text"; target: ShapeRunTarget; text: string }
-  | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
-  | { kind: "color"; target: ShapeRunTarget; hex: string }
-  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeBoxPx };
-
-/** 渲染层送回来的保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
-export interface PptxEditPayload {
-  /** 当前文档路径；null 表示还没落过盘。 */
-  path: string | null;
-  /** 本次要落地的一批改动，按顺序应用。 */
-  edits: PptxEditRequest[];
-  /** 另存为时对话框用的缺省文件名。 */
-  defaultName?: string;
-}
-
-/** 撤销请求：渲染层把攒下的那批 op **逆序**送回来（§2.5 内容寻址，不按位置，也不牵连用户后来的手工编辑）。 */
-export interface PptxRevertPayload {
-  /** 当前文档路径。 */
-  path: string;
-  /** 之前落地时那批 op 的前像来源。 */
-  ops: SlideEditOp[];
-}
 
 /**
  * 注册幻灯片相关的通道。

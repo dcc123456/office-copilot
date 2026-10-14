@@ -2,7 +2,10 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { ToolTurnRequest, ToolTurnResult } from "./aiHandlers.js";
 import type { SessionRecord, SessionSummary, SessionTurn } from "./sessionStore.js";
 import type { SheetOpenResult, SheetSavePayload, SheetSaveResult } from "./sheetHandlers.js";
-import type { PptxEditPayload, PptxEditResult, PptxOpenResult, PptxRevertPayload } from "./pptxHandlers.js";
+import type { PptxEditPayload, PptxRevertPayload } from "@office-copilot/pptx-io";
+// 结果形状与 electron/pptxHandlers.ts 的 PptxOpenResult / PptxEditResult 一致；
+// 那两处带着主进程组装的中文文案（§5.7），不属于引擎契约，所以这里就地镜像一份。
+import type { PptxEditResult, PptxOpenResult } from "./pptxHandlers.js";
 
 interface AITransformPayload {
   action: string;

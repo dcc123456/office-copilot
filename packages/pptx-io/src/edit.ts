@@ -66,6 +66,37 @@ export interface ShapeBoxPx {
   heightPx?: number;
 }
 
+/**
+ * 一条要落地的幻灯片改动：`kind` 与本文件那四个 op 生产者一一对应，坐标原样交给它们。
+ *
+ * 这是**跨界契约**（渲染层 → 主进程）放在引擎侧的理由：两边都按它构造与解析，
+ * 写第二份就会有人改一边忘一边（`AGENTS.md` §3.2）。里面只有坐标与值，没有幻灯片原文，
+ * 也没有给人看的文案（§5.7：文案在渲染层组装）。
+ */
+export type PptxEditRequest =
+  | { kind: "text"; target: ShapeRunTarget; text: string }
+  | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
+  | { kind: "color"; target: ShapeRunTarget; hex: string }
+  | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeBoxPx };
+
+/** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
+export interface PptxEditPayload {
+  /** 当前文档路径；null 表示还没落过盘。 */
+  path: string | null;
+  /** 本次要落地的一批改动，按数组顺序应用。 */
+  edits: PptxEditRequest[];
+  /** 另存为时对话框用的缺省文件名。 */
+  defaultName?: string;
+}
+
+/** 撤销请求：把之前落地时送回来的那批 op **逆序**送回即可回滚（§2.5 内容寻址）。 */
+export interface PptxRevertPayload {
+  /** 当前文档路径。 */
+  path: string;
+  /** 之前那批改动落地时的 op（带前像）。 */
+  ops: SlideEditOp[];
+}
+
 /** `<a:rPr>` 的填充组（ECMA-376 Part 1 §21.1.2.x）：同一 run 只能有一个，改色时先把旧填充删净再放新的。 */
 const FILL_GROUP_TAGS = ["a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", "a:pattFill", "a:grpFill"];
 

@@ -27,6 +27,13 @@ export interface SlideShape {
   hasOwnGeometry: boolean;
   /** 每段文字（`<a:p>` 内所有 `<a:t>` 拼接）；图片/图形框无 txBody 时为空数组。 */
   paragraphTexts: string[];
+  /**
+   * 每段自己的 `<a:r>` 条数，与 `paragraphTexts` 一一对应。
+   *
+   * 视图靠它决定"这段能不能整段改"：一段里有多条 run 说明各截文字带着不同的格式，
+   * 整段覆盖会把局部格式拍平（`AGENTS.md` §2.3），那种段落只许按 run 逐条改。
+   */
+  paragraphRunCounts: number[];
 }
 
 /** 一张幻灯片。 */
@@ -143,6 +150,7 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
   const ph = phHost ? firstChild(phHost, "p:ph") : undefined;
   const spPr = firstChild(el, "p:spPr");
   const txBody = firstChild(el, "p:txBody");
+  const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
   return {
     shapeId: Number(cNvPr?.attributes["id"] ?? 0),
     name: String(cNvPr?.attributes["name"] ?? ""),
@@ -150,6 +158,7 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
     isPlaceholder: !!ph,
     placeholderRef: ph ? String(ph.attributes["type"] ?? ph.attributes["idx"] ?? "") : undefined,
     hasOwnGeometry: !!spPr && !!firstChild(spPr, "a:xfrm"),
-    paragraphTexts: txBody ? findChildren(txBody, "a:p").map((p) => text(p)) : [],
+    paragraphTexts: paragraphs.map((p) => text(p)),
+    paragraphRunCounts: paragraphs.map((p) => findChildren(p, "a:r").length),
   };
 }
