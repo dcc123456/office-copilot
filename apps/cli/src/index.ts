@@ -4,18 +4,20 @@ import * as p from "@clack/prompts";
 import pc from "picocolors";
 import fs from "node:fs";
 import path from "node:path";
-import { loadDocx, saveDoc, log, warn, fail } from "./fsutil.js";
+import { loadDocx, saveDoc, log, warn, fail, clip } from "./fsutil.js";
 import { runAgent } from "./agent.js";
 import { registerSheetCommands } from "./sheet.js";
+import { registerPptCommands } from "./ppt.js";
 import type { ProposedEdit } from "@office-copilot/shared";
 
 const program = new Command();
 program
   .name("oc")
-  .description("Office 智能助手 CLI —— 直接修改 .docx、只读分析 .xlsx，Word 和 WPS 都能打开。")
+  .description("Office 智能助手 CLI —— 直接修改 .docx、只读分析 .xlsx 与 .pptx，Word / Excel / PowerPoint 和 WPS 都能打开。")
   .version("0.1.0");
 
 registerSheetCommands(program);
+registerPptCommands(program);
 
 program
   .command("list <file>")
@@ -23,7 +25,7 @@ program
   .action(async (file: string) => {
     const doc = await loadDocx(file);
     for (const para of doc.file.listParagraphs()) {
-      const head = para.text.length > 120 ? para.text.slice(0, 120) + "…" : para.text;
+      const head = clip(para.text, 120);
       log(
         `${pc.dim(String(para.index).padStart(4, " "))} ${pc.yellow(
           para.style ?? "Normal",
@@ -206,7 +208,7 @@ function printEdits(edits: ProposedEdit[]): void {
         break;
       case "insert_paragraph":
         p.log.message(
-          `  ${pc.green("+ 段落(" + e.position + (e.anchor != null ? "@" + e.anchor : "") + ")")}: ${truncate(e.text, 100)}`,
+          `  ${pc.green("+ 段落(" + e.position + (e.anchor != null ? "@" + e.anchor : "") + ")")}: ${clip(e.text, 100)}`,
         );
         break;
       case "insert_table":
@@ -218,10 +220,6 @@ function printEdits(edits: ProposedEdit[]): void {
         break;
     }
   }
-}
-
-function truncate(s: string, n: number): string {
-  return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
 function applyEdit(doc: import("@office-copilot/docx-io").DocxFile, edit: ProposedEdit): void {

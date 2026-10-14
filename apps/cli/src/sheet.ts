@@ -29,7 +29,7 @@ import {
   type SheetPayload,
   type WorkbookPayload,
 } from "@office-copilot/sheet-io";
-import { fail, log, warn } from "./fsutil.js";
+import { emit, fail, log, warn } from "./fsutil.js";
 
 /** 打开一份 `.xlsx` 后 CLI 要用的东西：载荷、按 `--sheet` 选中的表、只读理由。 */
 interface LoadedWorkbook {
@@ -134,12 +134,6 @@ function collect(value: string, previous: string[]): string[] {
 /** 读侧不许抛异常：引擎给的"为什么不行"原样说给人听。 */
 function reportReason(reason: string | undefined): never {
   fail(reason ?? "引擎没给出原因。");
-}
-
-/** `--json` 时把结构化结果原样打出去，否则走各自的排版。 */
-function emit(json: boolean | undefined, structured: unknown, render: () => void): void {
-  if (json) log(JSON.stringify(structured, null, 2));
-  else render();
 }
 
 /** 把打开时引擎记下的警告与未建模部件念出来（spec §零.7：不许静默丢弃）。 */
