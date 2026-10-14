@@ -50,7 +50,7 @@ import { HistoryPanel } from "./components/HistoryPanel.js";
 import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
-import type { PresentationModel } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
 import { SlideDeck } from "./slides/SlideDeck.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
@@ -142,6 +142,13 @@ export function App() {
    * 走 `ppt:edit`（spec 阶段 3）。
    */
   const [deck, setDeck] = useState<PresentationModel | null>(null);
+  /**
+   * 上一次幻灯片落地那批 op 的前像，连同它属于哪个文件（`path`）。
+   *
+   * 记住文件是因为前像只对那份文件有效：换一份 `.pptx` 后还拿旧批次去撤销，会把上一份的 XML 写进当前文件。
+   * 手工视图与 AI 提案共用这一个批次（spec 阶段 3、5）。
+   */
+  const [lastSlideBatch, setLastSlideBatch] = useState<{ path: string; ops: SlideEditOp[] } | null>(null);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -550,6 +557,44 @@ export function App() {
     },
     [canWriteSheet, sheetIndex, sheetWorkbook],
   );
+
+  /**
+   * 幻灯片改动的唯一落地口（spec 阶段 3、4）：把手工草稿与 AI 提案这两路合成的同一条请求交给主进程。
+   *
+   * 主进程按数组顺序逐条现做 op（同一部件上后一条能看到前一条的结果）、过结构审计、原子写盘，
+   * 并把这批 op 的前像带回来当作下一次撤销的凭据（§2.5 内容寻址）。
+   * 视图与代理都不自己攒 op、也不各开第二条写盘通道（§3.2）。
+   *
+   * @param edits 要落地的一批改动，坐标已是引擎侧的部件路径 + shapeId + 段/run 序号。
+   * @returns 主进程的回包（含刷新后的模型与 `changedParts`）；当前没有打开的演示文稿时 null，调用方据此报"没写入"。
+   */
+  const commitSlideEdits = useCallback(
+    async (edits: PptxEditRequest[]) => {
+      if (!filePath || !deck || edits.length === 0) return null;
+      const saved = await window.officeCopilot.editPptx({ path: filePath, edits });
+      if (saved.ok && saved.presentation) {
+        setDeck(saved.presentation);
+        setLastSlideBatch({ path: filePath, ops: saved.ops ?? [] });
+      }
+      return saved;
+    },
+    [deck, filePath],
+  );
+
+  /**
+   * 撤销上一次幻灯片保存的那批改动：把带回来的 op **逆序**送回，后落地的先写回前像（§2.5）。
+   *
+   * @returns 主进程的回包；当前文件没有对应的待撤销批次时 null（换过文件就不算，别把上一份的前像写进现在这份）。
+   */
+  const revertSlideEdits = useCallback(async () => {
+    if (!filePath || lastSlideBatch?.path !== filePath || !lastSlideBatch.ops.length) return null;
+    const reverted = await window.officeCopilot.revertPptx({ path: filePath, ops: [...lastSlideBatch.ops].reverse() });
+    if (reverted.ok && reverted.presentation) {
+      setDeck(reverted.presentation);
+      setLastSlideBatch(null);
+    }
+    return reverted;
+  }, [filePath, lastSlideBatch]);
 
   const handleSave = useCallback(async () => {
     // 幻灯片那条路自己带「保存」：待保存的草稿在 SlideDeck 里，不走这两个全局入口（spec 阶段 3）。
@@ -1167,6 +1212,15 @@ export function App() {
   const sheetBridge = activeSheet
     ? { payload: activeSheet, onCommitOps: commitSheetOps, onCommitChart: commitSheetChart }
     : undefined;
+  // 幻灯片也两套都要：手工草稿与 AI 提案共用同一个落地口，撤销凭据也只有一份（spec 阶段 5）。
+  const slideBridge = deck
+    ? {
+        deck,
+        canRevert: Boolean(filePath && lastSlideBatch?.path === filePath && lastSlideBatch.ops.length),
+        onCommit: commitSlideEdits,
+        onRevert: revertSlideEdits,
+      }
+    : undefined;
 
   return (
     <div
@@ -1251,7 +1305,14 @@ export function App() {
               onUndo={() => void undoLastSheetEdit()}
             />
           ) : null}
-          {deck && filePath ? <SlideDeck deck={deck} path={filePath} onDeck={setDeck} /> : null}
+          {slideBridge ? (
+            <SlideDeck
+              deck={slideBridge.deck}
+              canRevert={slideBridge.canRevert}
+              onCommit={slideBridge.onCommit}
+              onRevert={slideBridge.onRevert}
+            />
+          ) : null}
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
           {mode === "doc" && docStyleCss ? <style>{docStyleCss}</style> : null}
           {mode === "doc" && started ? (
@@ -1308,17 +1369,22 @@ export function App() {
             onDoubleClick={aiResize.onDoubleClick}
           />
         )}
-        {/* key 按模式取：文档与表格各开一条会话，引导语与线程都只属于当前这种文档。 */}
+        {/* key 按模式取：文档、表格、幻灯片各开一条会话，引导语与线程都只属于当前这种文档。 */}
         {showAI && (
           <AIPanel
-            key={sheetBridge ? "sheet" : "doc"}
+            key={mode}
             editor={editor}
             docKey={filePath ?? "未命名文档"}
             sheet={sheetBridge}
+            slides={slideBridge}
             collapsed={aiCollapsed}
             onToggle={() => setAiCollapsed((v) => !v)}
             onOpenHistory={() => setHistoryOpen(true)}
-            onChanged={() => setDirty(true)}
+            onChanged={() => {
+              // 幻灯片那条落地就写盘了（与手工「保存」同一条通道），内存里没有待存的改动。
+              if (mode === "slide") return;
+              setDirty(true);
+            }}
           />
         )}
       </div>

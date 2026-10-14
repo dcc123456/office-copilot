@@ -26,6 +26,9 @@ function textEditKey(edit: PptxEditRequest): string {
 /**
  * 造一个形状快照：文字、每段 run 条数与第一段那截 run 的现场格式。
  *
+ * 每段的 run 级现场（文字与格式）这里只给一条，与 `paragraphRunCounts` 不一致也无妨：
+ * 落地范围由条数说了算（多条 run 就不许整段覆盖），本文件的断言不读 run 级文字。
+ *
  * @param shapeId 形状号。
  * @param paragraphs 每段的 `[文字, 该段 <a:r> 条数, run 0 的现场格式]`；第三项只给段 0 用。
  * @returns 一个形状快照；没有自己的 `<a:xfrm>`（`boxPx` 留空），几何用例各自再补。
@@ -39,6 +42,7 @@ function shapeOf(shapeId: number, paragraphs: [string, number, RunFormat?][]): S
     hasOwnGeometry: false,
     paragraphTexts: paragraphs.map(([paragraphText]) => paragraphText),
     paragraphRunCounts: paragraphs.map(([, runCount]) => runCount),
+    paragraphRunTexts: paragraphs.map(([paragraphText]) => [paragraphText]),
     paragraphRunFormats: paragraphs.map(([, , runFormat]) => [runFormat ?? {}]),
   };
 }

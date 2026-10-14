@@ -16,6 +16,7 @@ import {
   Loader2,
   PencilLine,
   Table2,
+  Presentation,
   Workflow,
   SpellCheck,
   MessageSquare,
@@ -53,11 +54,18 @@ import { useAnchoredMenu } from "../hooks/useAnchoredMenu.js";
 import { ChartPreview } from "../sheet/ChartPreview.js";
 import { sheetCommitTally } from "../sheet/sheetHistory.js";
 import { runSheetAgent } from "./sheetAgent.js";
+import { runSlideAgent } from "./slideAgent.js";
+import type { SheetAgentOutcome } from "./sheetAgent.js";
+import type { SlideAgentOutcome } from "./slideAgent.js";
 import { formatA1 } from "@office-copilot/sheet-io";
 import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
 import type { SheetEditT } from "@office-copilot/sheet-tools";
+import type { PptxEditRequest, PresentationModel, ShapeBoxPx } from "@office-copilot/pptx-io";
+import type { PptxEditT } from "@office-copilot/pptx-tools";
+import { SHAPE_BOX_FIELD_LABEL } from "../slides/slideDeckModel.js";
 import type {
   AppSettings,
+  PptxEditOutcome,
   ProviderConfig,
   SessionSummary,
   SessionTurn,
@@ -114,25 +122,43 @@ interface RewriteCard {
 }
 
 /**
- * 表格提案卡：模型交出的改动条目 + 引擎算好的可落地 op。
+ * 工具回合卡的落地出口：一份文件只会是一种格式，所以这几种互斥。
+ *
+ * `idle` 是卡片刚挂出来、还没收到提案时那一档（此时只显示"正在核对…"，没有可落地的东西）。
+ */
+type ToolLand =
+  | { kind: "idle" }
+  | { kind: "sheet-ops"; ops: SheetCoreOp[] }
+  /** 图表不是 op：它随保存写进 `.xlsx`，撤销栈管不到，卡片要如实说这句（§2.5 的边界）。 */
+  | { kind: "chart"; chart: ResolvedChart }
+  | { kind: "slide"; requests: PptxEditRequest[] };
+
+/** 工具回合卡的格式：一次任务只可能问一个代理，卡片靠它挑文案与代理。 */
+type ToolFormat = "sheet" | "slide";
+
+/** 一次工具回合的调用形状：用户那句诉求、供应商、续跑的 transcript 与暂停位。 */
+type ToolRunner = (input: {
+  instruction: string;
+  providerId?: string;
+  messages?: ToolTurnMessage[];
+  isPaused: () => boolean;
+}) => Promise<ToolAskOutcome>;
+
+/**
+ * 工具回合提案卡：表格与幻灯片共用这一张（`AGENTS.md` §3.2：同一逻辑不许长第三套装配）。
  *
  * 与文档那张的差别只在"没有逐字流式"：工具回合是一整轮一整轮回来的，
- * 中途能展示的只有"正在核对表格"，所以 `status` 停在 streaming 时不显示正文。
+ * 中途能展示的只有"正在核对"，所以 `status` 停在 streaming 时不显示正文。
  */
-interface SheetPlanCard {
+interface ToolPlanCard {
+  /** 这一张属于哪一个代理：文案与续跑都按它取，不让调用方再传一遍。 */
+  format: ToolFormat;
   summary: string;
-  /** 模型提的条目原样留着，卡片按它列改动清单（op 是引擎的表示，给人看的是这个）。 */
-  edits: SheetEditT[];
-  /** 能落地的部分；空数组意味着这份提案落不了地，卡片不会挂出来。 */
-  ops: SheetCoreOp[];
-  /** 没能变成 op 的条目原因，逐条给人看。 */
+  /** 卡片上那一列中文行：由渲染层按模型提的条目组好（引擎的 op / 请求是另一回事，§5.7）。 */
+  lines: string[];
+  /** 没能变成落地改动的条目原因，逐条给人看。 */
   notes: string[];
-  /**
-   * `sheet_create_chart` 解析过的图表；给了它这张卡就是图表卡（`ops` 必为空）。
-   *
-   * 图表不是 op：它随保存写进 `.xlsx`，撤销栈管不到，卡片要如实说这句（§2.5 的边界）。
-   */
-  chart?: ResolvedChart;
+  land: ToolLand;
   status: CardStatus;
   message?: string;
   stopped?: boolean;
@@ -140,6 +166,13 @@ interface SheetPlanCard {
   instruction: string;
   messages: ToolTurnMessage[];
 }
+
+/** 一次工具回合的归一化结果：两个代理各说各的话，卡片只看这一种形状。 */
+type ToolAskOutcome =
+  | { kind: "answer"; text: string; messages: ToolTurnMessage[] }
+  | { kind: "paused"; messages: ToolTurnMessage[] }
+  | { kind: "failed"; message: string; needsSetup?: boolean; messages: ToolTurnMessage[] }
+  | { kind: "proposal"; summary: string; lines: string[]; notes: string[]; land: ToolLand; messages: ToolTurnMessage[] };
 
 type Item =
   | {
@@ -154,7 +187,7 @@ type Item =
     }
   | { id: string; t: "plan"; label: string; card: PlanCard }
   | { id: string; t: "rewrite"; label: string; card: RewriteCard }
-  | { id: string; t: "sheet"; label: string; card: SheetPlanCard };
+  | { id: string; t: "tool"; label: string; card: ToolPlanCard };
 
 /**
  * 提案条目 → 卡片上的一行中文说明。
@@ -202,6 +235,112 @@ function sheetChartLines(chart: ResolvedChart): string[] {
   ];
 }
 
+/**
+ * 幻灯片提案条目 → 卡片上的一行中文。
+ *
+ * 坐标用的是模型视角（页号 1 基、段/run 0 基），与代理回给模型的编号一致，用户能对着幻灯片面板核对（§5.7）。
+ *
+ * @param edits `ppt_submit_proposal` 校验过的条目。
+ * @returns 与条目同序的中文行；长文字截到 40 字，清单要能一眼扫完。
+ */
+function slideEditLines(edits: readonly PptxEditT[]): string[] {
+  return edits.map((edit) => {
+    const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
+    // 段号与 run 号只有 run 级改动才带：几何条目上没有这两项，取用之前先按类型分岔。
+    const atRun =
+      edit.type === "set_shape_geometry" ? where : `${where} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
+    switch (edit.type) {
+      case "set_run_text": {
+        const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
+        return `${atRun}文字改为「${value || "（清空）"}」`;
+      }
+      case "set_run_font": {
+        const bits = [
+          edit.bold === undefined ? null : edit.bold ? "加粗" : "取消加粗",
+          edit.sizePt === undefined ? null : `${edit.sizePt}pt`,
+        ].filter((bit): bit is string => bit !== null);
+        return `${atRun}字体改为 ${bits.join("、")}`;
+      }
+      case "set_run_color":
+        return `${atRun}颜色改为 ${edit.color}`;
+      case "set_shape_geometry": {
+        const given = (["leftPx", "topPx", "widthPx", "heightPx"] as (keyof ShapeBoxPx)[])
+          .filter((field) => edit[field] !== undefined)
+          .map((field) => `${SHAPE_BOX_FIELD_LABEL[field]} ${Math.round(edit[field]!)}px`);
+        return `${where} 的位置尺寸改为 ${given.join("，")}`;
+      }
+    }
+  });
+}
+
+/**
+ * 卡片头部与"已写入"那句要报的条数。
+ *
+ * @param land 这张卡的落地出口。
+ * @returns 改动条数与一句中文；图表按"一张"算，`idle` 那档此时卡片正显示"正在核对…"。
+ */
+function toolLandTally(land: ToolLand): { count: number; label: string } {
+  switch (land.kind) {
+    case "sheet-ops":
+      return { count: land.ops.length, label: `${land.ops.length} 处改动` };
+    case "chart":
+      return { count: 1, label: "1 张图表" };
+    case "slide":
+      return { count: land.requests.length, label: `${land.requests.length} 处改动` };
+    case "idle":
+      return { count: 0, label: "0 处改动" };
+  }
+}
+
+/**
+ * 表格代理的结果 → 卡片只看的那一种形状（`answer`/`paused`/`failed` 三种原样透传）。
+ *
+ * @param outcome `runSheetAgent` 的回包。
+ * @returns 归一化后的 `ToolAskOutcome`。
+ */
+function sheetToolOutcome(outcome: SheetAgentOutcome): ToolAskOutcome {
+  switch (outcome.kind) {
+    case "proposal":
+      return {
+        kind: "proposal",
+        summary: outcome.summary,
+        lines: sheetEditLines(outcome.edits),
+        notes: outcome.notes,
+        land: { kind: "sheet-ops", ops: outcome.ops },
+        messages: outcome.messages,
+      };
+    case "chart":
+      return {
+        kind: "proposal",
+        summary: `插入一张${CHART_KIND_LABEL[outcome.chart.kind]}`,
+        lines: sheetChartLines(outcome.chart),
+        notes: [],
+        land: { kind: "chart", chart: outcome.chart },
+        messages: outcome.messages,
+      };
+    default:
+      return outcome;
+  }
+}
+
+/**
+ * 幻灯片代理的结果 → 同一种形状。
+ *
+ * @param outcome `runSlideAgent` 的回包；`edits` 已是引擎坐标，`proposed` 是模型原样的条目。
+ * @returns 归一化后的 `ToolAskOutcome`（清单给人看模型条目，落地用引擎坐标）。
+ */
+function slideToolOutcome(outcome: SlideAgentOutcome): ToolAskOutcome {
+  if (outcome.kind !== "proposal") return outcome;
+  return {
+    kind: "proposal",
+    summary: outcome.summary,
+    lines: slideEditLines(outcome.proposed),
+    notes: outcome.notes,
+    land: { kind: "slide", requests: outcome.edits },
+    messages: outcome.messages,
+  };
+}
+
 const uid = () => crypto.randomUUID();
 
 /** 每个新会话开头的那句引导语：不进会话正文，存盘时要跳过。 */
@@ -223,6 +362,27 @@ const SHEET_WELCOME_ITEM: Item = {
   text:
     "直接说要对这张表做什么，比如「各区域销售额汇总」「找出销售额最高的三个月」「删掉重复的行」「按销售额把这批行重排」「把这一列拉宽」。数字由表格引擎算，不是我估的；能改的只有写格子、列宽、插行删行、按一列重排整行五类，每次改动都要你点「应用到表格」才落地，落地后能在修改历史里单独撤销。",
 };
+
+/** 打开 .pptx 时的引导语：说的是这份文稿能改什么。 */
+const SLIDE_WELCOME_ITEM: Item = {
+  id: WELCOME_ID,
+  t: "msg",
+  role: "assistant",
+  text:
+    "直接说要改这份文稿的哪里，比如「把第 1 页标题改成 Q3 复盘」「第 2 页那个文本框往下挪 60 像素」「把标题那截字加粗改成 32 磅」。页号从 1 数起，形状号与段/run 号由幻灯片引擎从现场文件列出来，不是我估的；能改的只有某一截字的文字/粗体/字号/颜色，以及形状的位置与尺寸。增删形状、调层级、改版式现在做不了。每次改动都要你点「应用到幻灯片」才落地，落地会直接写文件，能在幻灯片面板点「撤销上一次保存」回退。",
+};
+
+/**
+ * 按当前打开的格式挑那句引导语：一份文件只会是一种格式，所以三段互斥。
+ *
+ * @param isSheet 打开的是 `.xlsx`。
+ * @param isSlide 打开的是 `.pptx`。
+ * @returns 挂在线程开头的那条引导语；两者都不是就是文档那句。
+ */
+function welcomeItemOf(isSheet: boolean, isSlide: boolean): Item {
+  if (isSheet) return SHEET_WELCOME_ITEM;
+  return isSlide ? SLIDE_WELCOME_ITEM : WELCOME_ITEM;
+}
 
 /** 会话历史浮层宽度（px），须与 `styles/aiPanel.css` 的 `.ai-session-pop` 一致。 */
 const SESSION_POP_WIDTH = 250;
@@ -259,21 +419,20 @@ function turnsOfItems(items: readonly Item[]): SessionTurn[] {
       turns.push({ role: "assistant", text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}` });
       continue;
     }
-    if (it.t === "sheet") {
+    if (it.t === "tool") {
       const c = it.card;
       if (c.status === "streaming") continue;
       const result =
         c.status === "applied"
-          ? "已写入表格"
+          ? "已写入"
           : c.status === "dismissed"
             ? "用户放弃了这份提案"
             : c.status === "failed"
               ? `未写入（${c.stopped ? "已暂停" : c.message ?? "失败"}）`
-              : `${c.ops.length} 处改动待确认`;
-      const lines = sheetEditLines(c.edits);
+              : `${toolLandTally(c.land).count} 处改动待确认`;
       turns.push({
         role: "assistant",
-        text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}${lines.length ? `\n· ${lines.join("\n· ")}` : ""}`,
+        text: `【${it.label}】${c.summary || "（无摘要）"} · ${result}${c.lines.length ? `\n· ${c.lines.join("\n· ")}` : ""}`,
       });
       continue;
     }
@@ -335,6 +494,46 @@ const SHEET_MODE_HINTS: Record<AiMode, string> = {
   auto: "全自动：AI 给出提案就直接写入表格，改动记录在修改历史里，可单独撤销。",
 };
 
+/**
+ * 幻灯片模式下三种模式各说一句人话。
+ *
+ * 与表格那条的差别在"能回退到哪"：幻灯片落地是直接写文件，撤销凭据是这一次批次的前像，
+ * modlog 还没接（spec 阶段 4 的「modlog 落盘」仍缺），所以这里不许说"记录在修改历史里"。
+ */
+const SLIDE_MODE_HINTS: Record<AiMode, string> = {
+  chat: "聊天模式：AI 只回答与给建议，不会改动幻灯片。",
+  semi: "半自动：AI 给出提案卡，你点「应用到幻灯片」才写文件，之后可在幻灯片面板点「撤销上一次保存」回退。",
+  auto: "全自动：AI 给出提案就直接写文件，回退同样用幻灯片面板上那一个撤销按钮（只撤最近一次落地的那批）。",
+};
+
+/**
+ * 工具回合卡上那几句按格式组装的中文（`AGENTS.md` §5.7：引擎只给结构化条目，文案在渲染层）。
+ *
+ * `historyEntry` 说的是"这次落地能不能在修改历史里查到"：表格的 op 逐条进了 modlog，
+ * 幻灯片那条还没接（spec 阶段 4 仍缺），所以它的卡片不给那个链接，只指幻灯片面板的撤销按钮。
+ */
+const TOOL_CARD_COPY: Record<
+  ToolFormat,
+  { label: string; target: string; checking: string; confirm: string; landed: string; historyEntry: boolean }
+> = {
+  sheet: {
+    label: "AI 表格提案",
+    target: "这张表",
+    checking: "正在核对表格…",
+    confirm: "应用到表格",
+    landed: "已写入表格",
+    historyEntry: true,
+  },
+  slide: {
+    label: "AI 幻灯片提案",
+    target: "这份演示文稿",
+    checking: "正在核对文稿…",
+    confirm: "应用到幻灯片",
+    landed: "已写入文稿",
+    historyEntry: false,
+  },
+};
+
 const MODES: Array<{ id: AiMode; label: string; icon: typeof MessageSquare; title: string; hint: string }> = [
   {
     id: "chat",
@@ -384,10 +583,29 @@ export interface SheetPanelBridge {
   onCommitChart: (chart: ResolvedChart) => boolean;
 }
 
+/**
+ * 幻灯片面板要接的东西：当前这份文稿的模型（只读）与唯一的落地口。
+ *
+ * `onCommit` 就是 `App.tsx` 里手工「保存」用的那一个：代理与视图共用同一条 `ppt:edit` 通道，
+ * 于是撤销凭据也只有一份（spec 阶段 5、`AGENTS.md` §3.2）。
+ */
+export interface SlidePanelBridge {
+  /** 主进程读出来的演示文稿模型；代理只读它，写入一律经 `onCommit`。 */
+  deck: PresentationModel;
+  /**
+   * 落地这一批改动（引擎坐标：部件路径 + shapeId + 段/run 序号）。
+   *
+   * @param edits 提案里能变成改动的条目，顺序即落地顺序。
+   * @returns 主进程的回包（含刷新后的模型与 `changedParts`）；当前没有打开的文稿时 null。
+   */
+  onCommit: (edits: PptxEditRequest[]) => Promise<PptxEditOutcome | null>;
+}
+
 export function AIPanel({
   editor,
   docKey,
   sheet,
+  slides,
   collapsed,
   onToggle,
   onOpenHistory,
@@ -397,12 +615,14 @@ export function AIPanel({
   docKey: string;
   /** 打开 .xlsx 时给；没有它就是文档模式，走原来那套选区改写与方案卡。 */
   sheet?: SheetPanelBridge;
+  /** 打开 .pptx 时给；与 `sheet` 互斥（一份文件只会是一种格式）。 */
+  slides?: SlidePanelBridge;
   collapsed: boolean;
   onToggle: () => void;
   onOpenHistory?: () => void;
   onChanged: () => void;
 }) {
-  const [items, setItems] = useState<Item[]>([sheet ? SHEET_WELCOME_ITEM : WELCOME_ITEM]);
+  const [items, setItems] = useState<Item[]>(() => [welcomeItemOf(Boolean(sheet), Boolean(slides))]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AiMode>("semi");
   const modeRef = useRef<AiMode>("semi");
@@ -444,8 +664,8 @@ export function AIPanel({
     setBusy(v);
   }, []);
 
-  /** 新会话开头那句引导语：表格与文档说的不是一回事。 */
-  const welcomeItem = sheet ? SHEET_WELCOME_ITEM : WELCOME_ITEM;
+  /** 新会话开头那句引导语：表格、幻灯片与文档说的不是一回事。 */
+  const welcomeItem = welcomeItemOf(Boolean(sheet), Boolean(slides));
 
   const refreshSettings = useCallback(async () => {
     const s = (await window.officeCopilot.getSettings()) as AppSettings;
@@ -740,32 +960,33 @@ export function AIPanel({
     [runAgent],
   );
 
-  /* ------------- sheet: run the tool loop, land on confirm ------- */
+  /* --------- tool loop: 表格与幻灯片共用这一套卡片与落地流程 ------- */
 
-  const patchSheetCard = useCallback((id: string, fn: (c: SheetPlanCard) => SheetPlanCard) => {
+  const patchToolCard = useCallback((id: string, fn: (c: ToolPlanCard) => ToolPlanCard) => {
     setItems((prev) =>
-      prev.map((it) => (it.id === id && it.t === "sheet" ? { ...it, card: fn(it.card) } : it)),
+      prev.map((it) => (it.id === id && it.t === "tool" ? { ...it, card: fn(it.card) } : it)),
     );
   }, []);
 
   /**
-   * 确认落地一张表格提案：op 交给 app 的唯一写入口，它自己核对现场并记修改历史。
+   * 确认落地一张工具回合卡：三种出口各走各的唯一写入口，落地结果在卡上如实报。
    *
-   * 图表卡走另一条：它没有 op，只能排进待写清单、随下一次保存写进 `.xlsx`，
-   * 所以这里如实告诉用户"撤销栈管不到它"（§2.5 的边界）。
+   * 表格 op 交给 `commitSheetOps`（它自己核对现场并记修改历史）；图表没有 op，只能排进待写清单、
+   * 随下一次保存写进 `.xlsx`，所以这里如实说"撤销栈管不到它"（§2.5 的边界）；
+   * 幻灯片那批请求走的正是手工「保存」那一个口，落盘即生效，回退凭据是这一次批次的前像。
    *
    * @param id 卡片条目 id。
    * @param card 待落地的提案。
    */
-  const applySheetPlan = useCallback(
-    async (id: string, card: SheetPlanCard) => {
-      patchSheetCard(id, (c) => ({ ...c, status: "applying" }));
-      if (card.chart) {
-        if (!sheet?.onCommitChart(card.chart)) {
-          patchSheetCard(id, (c) => ({ ...c, status: "failed", message: "这张表已经关了，图表没有排进去。" }));
+  const applyToolPlan = useCallback(
+    async (id: string, card: ToolPlanCard) => {
+      patchToolCard(id, (c) => ({ ...c, status: "applying" }));
+      if (card.land.kind === "chart") {
+        if (!sheet?.onCommitChart(card.land.chart)) {
+          patchToolCard(id, (c) => ({ ...c, status: "failed", message: "这张表已经关了，图表没有排进去。" }));
           return;
         }
-        patchSheetCard(id, (c) => ({
+        patchToolCard(id, (c) => ({
           ...c,
           status: "applied",
           message: "已排进待写清单，保存后写进文件。撤销栈管不到图表，要回退请用同名 .bak。",
@@ -773,59 +994,129 @@ export function AIPanel({
         onChanged();
         return;
       }
-      const result = sheet?.onCommitOps(card.ops, card.summary);
-      if (!result || !sheetCommitTally(card.ops, result)[0]) {
-        patchSheetCard(id, (c) => ({
-          ...c,
-          status: "failed",
-          message:
-            result?.skipped.map((item) => item.reason).join("；") || "表格内容已经变化，这次没有写入。",
-        }));
+      if (card.land.kind === "sheet-ops") {
+        const result = sheet?.onCommitOps(card.land.ops, card.summary);
+        if (!result || !sheetCommitTally(card.land.ops, result)[0]) {
+          patchToolCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            message:
+              result?.skipped.map((item) => item.reason).join("；") || "表格内容已经变化，这次没有写入。",
+          }));
+          return;
+        }
+        // 落地条数与提案条数不一致时必须说出来：剩下那些没生效（AGENTS.md §2.5）。
+        // 分子按提交的那批算，不用 `result.ops.length`——引擎会把受牵连的公式缓存刷新额外追加进那一批（spec D8）。
+        const [landed, submitted] = sheetCommitTally(card.land.ops, result);
+        const partial = result.skipped.length
+          ? `部分写入（${landed}/${submitted}）：${result.skipped.map((item) => item.reason).join("；")}`
+          : undefined;
+        patchToolCard(id, (c) => ({ ...c, status: "applied", message: partial }));
+        onChanged();
+        if (partial) toast(partial, "error");
         return;
       }
-      // 落地条数与提案条数不一致时必须说出来：剩下那些没生效（AGENTS.md §2.5）。
-      // 分子按提交的那批算，不用 `result.ops.length`——引擎会把受牵连的公式缓存刷新额外追加进那一批（spec D8）。
-      const [landed, submitted] = sheetCommitTally(card.ops, result);
-      const partial = result.skipped.length
-        ? `部分写入（${landed}/${submitted}）：${result.skipped.map((item) => item.reason).join("；")}`
-        : undefined;
-      patchSheetCard(id, (c) => ({ ...c, status: "applied", message: partial }));
-      onChanged();
-      if (partial) toast(partial, "error");
+      if (card.land.kind === "slide") {
+        const result = await slides?.onCommit(card.land.requests);
+        if (!result || !result.ok || !result.presentation) {
+          patchToolCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            message: result?.message || "这份演示文稿已经不在了，改动没有写入。",
+          }));
+          return;
+        }
+        patchToolCard(id, (c) => ({
+          ...c,
+          status: "applied",
+          message: `已写入 ${(result.changedParts ?? []).length} 张幻灯片。要回退请在幻灯片面板点「撤销上一次保存」。`,
+        }));
+        onChanged();
+        return;
+      }
+      // idle 只挂在还在等提案的卡上，那种卡没有落地按钮；真被点到时如实报，不假装写入了。
+      patchToolCard(id, (c) => ({ ...c, status: "failed", message: "这份提案里还没有能落地的改动。" }));
     },
-    [onChanged, patchSheetCard, sheet],
+    [onChanged, patchToolCard, sheet, slides],
   );
 
   /**
-   * 跑一次表格任务：转工具回合，结果落到指定或新建的提案卡上。
+   * 全自动模式下那句提示：三种出口的"接下来怎么回退"各不相同，不许笼统说成"可撤销"。
    *
-   * @param opts.instruction 用户原话；点「继续」时还是这一句。
-   * @param opts.label 卡片标题。
-   * @param opts.cardId 复用已有卡片（点「继续」时），不给就新挂一张。
-   * @param opts.messages 暂停时攒下的 transcript；给了就从这一串往后接着跑，不让模型重读整表。
+   * @param land 卡片的落地出口。
+   * @returns 一句中文，进 toast。
    */
-  const runSheetAsk = useCallback(
-    async (opts: {
-      instruction: string;
-      label: string;
-      cardId?: string;
-      messages?: ToolTurnMessage[];
-    }) => {
-      const payload = sheet?.payload;
-      if (!payload) return;
+  function autoToastOf(land: ToolLand): string {
+    if (land.kind === "chart") return "全自动：图表已排进待写清单，保存后写进文件。";
+    if (land.kind === "slide") return "全自动：已直接写入演示文稿，可在幻灯片面板撤销上一次保存。";
+    return "全自动：已直接写入表格，可在修改历史里撤销这次改动。";
+  }
+
+  /**
+   * 按格式挑那一个代理：桥不在（文件已关）就不给，卡片此时也没有地方可落。
+   *
+   * @param format 卡片格式。
+   * @returns 交给 `runToolAsk` 的那一个调用；两个代理的结果都在这里折成同一种形状（§3.2）。
+   */
+  const toolRunnerOf = useCallback(
+    (format: ToolFormat): ToolRunner | null =>
+      format === "sheet"
+        ? sheet
+          ? async (input) =>
+              sheetToolOutcome(
+                await runSheetAgent({
+                  sheet: sheet.payload,
+                  instruction: input.instruction,
+                  providerId: input.providerId,
+                  messages: input.messages,
+                  isPaused: input.isPaused,
+                }),
+              )
+          : null
+        : slides
+          ? async (input) =>
+              slideToolOutcome(
+                await runSlideAgent({
+                  deck: slides.deck,
+                  instruction: input.instruction,
+                  providerId: input.providerId,
+                  messages: input.messages,
+                  isPaused: input.isPaused,
+                }),
+              )
+          : null,
+    [sheet, slides],
+  );
+
+  /**
+   * 跑一次工具任务：转工具回合，结果落到指定或新建的提案卡上。
+   *
+   * 表格代理与幻灯片代理各说各的话，但卡片装配、暂停续跑、聊天模式不动文件这三段只有一份（§3.2）。
+   *
+   * @param opts.format 当前格式；标题、"没动它"说的对象与跑哪一个代理都从它取。
+   * @param opts.instruction 用户原话；点「继续」时还是这一句。
+   * @param opts.cardId 复用已有卡片（点「继续」时），不给就新挂一张。
+   * @param opts.messages 暂停时攒下的 transcript；给了就从这一串往后接着跑，不让模型重读整份文件。
+   */
+  const runToolAsk = useCallback(
+    async (opts: { format: ToolFormat; instruction: string; cardId?: string; messages?: ToolTurnMessage[] }) => {
+      const runner = toolRunnerOf(opts.format);
+      if (!runner) return;
+      const copy = TOOL_CARD_COPY[opts.format];
       const id = opts.cardId ?? uid();
       if (opts.cardId) {
-        patchSheetCard(id, (c) => ({ ...c, status: "streaming", message: undefined, stopped: false }));
+        patchToolCard(id, (c) => ({ ...c, status: "streaming", message: undefined, stopped: false }));
       } else {
         push({
           id,
-          t: "sheet",
-          label: opts.label,
+          t: "tool",
+          label: copy.label,
           card: {
+            format: opts.format,
             summary: "",
-            edits: [],
-            ops: [],
+            lines: [],
             notes: [],
+            land: { kind: "idle" },
             status: "streaming",
             instruction: opts.instruction,
             messages: [],
@@ -835,15 +1126,14 @@ export function AIPanel({
       setBusyBoth(true);
       pausedRef.current = false;
       try {
-        const outcome = await runSheetAgent({
-          sheet: payload,
+        const outcome = await runner({
           instruction: opts.instruction,
           providerId: activeProviderId ?? undefined,
           messages: opts.messages,
           isPaused: () => pausedRef.current,
         });
         if (outcome.kind === "paused") {
-          patchSheetCard(id, (c) => ({
+          patchToolCard(id, (c) => ({
             ...c,
             status: "failed",
             stopped: true,
@@ -854,7 +1144,7 @@ export function AIPanel({
         }
         if (outcome.kind === "failed") {
           if (outcome.needsSetup) setSettingsOpen(true);
-          patchSheetCard(id, (c) => ({
+          patchToolCard(id, (c) => ({
             ...c,
             status: "failed",
             messages: outcome.messages,
@@ -862,103 +1152,77 @@ export function AIPanel({
           }));
           return;
         }
-        // 纯分析问题（汇总、找极值）不出提案：这一轮的正文就是答复。
+        // 纯分析问题（汇总、找极值、有几页）不出提案：这一轮的正文就是答复。
         if (outcome.kind === "answer") {
           dismiss(id);
           note(outcome.text);
           return;
         }
-        // 出图那条：引用与数值都已由引擎从现场表读好，这里只挂一张要用户确认的图表卡。
-        if (outcome.kind === "chart") {
-          const chartLines = sheetChartLines(outcome.chart);
-          if (modeRef.current === "chat") {
-            // 聊天模式不动表：把要画的图念出来，不挂一张点了会排进待写清单的卡（§2.8）。
-            dismiss(id);
-            note(`按你说的，这张表可以画这么一张图（聊天模式没有动它）：\n· ${chartLines.join("\n· ")}\n要落地请切到「半自动」或「全自动」。`);
-            return;
-          }
-          const chartCard: SheetPlanCard = {
-            summary: `插入一张${CHART_KIND_LABEL[outcome.chart.kind]}`,
-            edits: [],
-            ops: [],
-            notes: [],
-            chart: outcome.chart,
-            status: "pending",
-            instruction: opts.instruction,
-            messages: outcome.messages,
-          };
-          patchSheetCard(id, () => chartCard);
-          if (modeRef.current === "auto") {
-            toast("全自动：图表已排进待写清单，保存后写进文件。", "success");
-            await applySheetPlan(id, chartCard);
-          }
-          return;
-        }
-        if (!outcome.ops.length) {
-          dismiss(id);
-          note(`这份提案里没有能落地的改动：${outcome.notes.join("；") || outcome.summary}`);
-          return;
-        }
-        const card: SheetPlanCard = {
-          summary: outcome.summary,
-          edits: outcome.edits,
-          ops: outcome.ops,
-          notes: outcome.notes,
-          status: "pending",
-          instruction: opts.instruction,
-          messages: outcome.messages,
-        };
         if (modeRef.current === "chat") {
-          // 聊天模式不动表：把想改的地方念出来，不挂一张点了会落地的卡（§2.8）。
+          // 聊天模式不动文件：把想改的地方念出来，不挂一张点了会落地的卡（§2.8）。
           dismiss(id);
-          const lines = sheetEditLines(card.edits);
           note(
-            `按你说的，这张表可以这么改（聊天模式没有动它）：${card.summary}\n· ${lines.join("\n· ")}${
-              card.notes.length ? `\n${card.notes.map((n) => `· ${n}`).join("\n")}` : ""
+            `按你说的，${copy.target}可以这么改（聊天模式没有动它）：${outcome.summary}\n· ${outcome.lines.join("\n· ")}${
+              outcome.notes.length ? `\n${outcome.notes.map((n) => `· ${n}`).join("\n")}` : ""
             }\n要落地请切到「半自动」或「全自动」。`,
           );
           return;
         }
-        patchSheetCard(id, () => card);
-        // 半自动要用户点「应用到表格」；全自动是用户显式选的例外，仍然逐条记进修改历史可撤销（§2.8）。
+        if (toolLandTally(outcome.land).count === 0) {
+          dismiss(id);
+          note(`这份提案里没有能落地的改动：${outcome.notes.join("；") || outcome.summary}`);
+          return;
+        }
+        const card: ToolPlanCard = {
+          format: opts.format,
+          summary: outcome.summary,
+          lines: outcome.lines,
+          notes: outcome.notes,
+          land: outcome.land,
+          status: "pending",
+          instruction: opts.instruction,
+          messages: outcome.messages,
+        };
+        patchToolCard(id, () => card);
+        // 半自动要用户点确认；全自动是用户显式选的例外，仍然逐条可撤销（§2.8）。
         if (modeRef.current === "auto") {
-          toast("全自动：已直接写入表格，可在修改历史里撤销这次改动。", "success");
-          await applySheetPlan(id, card);
+          toast(autoToastOf(outcome.land), "success");
+          await applyToolPlan(id, card);
         }
       } catch (e) {
         const err = e as Error & { needsSetup?: boolean };
         if (err.needsSetup) setSettingsOpen(true);
-        patchSheetCard(id, (c) => ({ ...c, status: "failed", message: "调用失败：" + (err.message ?? String(e)) }));
+        patchToolCard(id, (c) => ({ ...c, status: "failed", message: "调用失败：" + (err.message ?? String(e)) }));
       } finally {
         setBusyBoth(false);
       }
     },
-    [activeProviderId, applySheetPlan, dismiss, note, patchSheetCard, push, setBusyBoth, sheet],
+    [activeProviderId, applyToolPlan, dismiss, note, patchToolCard, push, setBusyBoth, toolRunnerOf],
   );
 
   /**
-   * 用户那句诉求 → 表格代理。
+   * 用户那句诉求 → 当前格式的工具回合。
    *
-   * @param instruction 原话（已 trim）。
-   * @param label 卡片标题。
+   * @param format 表格还是幻灯片；一句 `sheet`/`slides` 的说法都写在 `TOOL_CARD_COPY` 里。
+   * @param instruction 原话（首尾空白会被去掉）。
    */
-  const askSheet = useCallback(
-    async (instruction: string, label = "AI 表格提案") => {
+  const askTool = useCallback(
+    async (format: ToolFormat, instruction: string) => {
       const trimmed = instruction.trim();
-      if (!trimmed || busyRef.current || !sheet) return;
+      if (!trimmed || busyRef.current || !toolRunnerOf(format)) return;
       push({ id: uid(), t: "msg", role: "user", text: trimmed });
-      await runSheetAsk({ instruction: trimmed, label });
+      await runToolAsk({ format, instruction: trimmed });
     },
-    [push, runSheetAsk, sheet],
+    [push, runToolAsk, toolRunnerOf],
   );
 
   /** 点「继续」：把暂停时攒下的 transcript 原样送回，工具回合从这一轮往后跑。 */
-  const continueSheetPlan = useCallback(
-    async (id: string, card: SheetPlanCard, label: string) => {
+  const continueToolPlan = useCallback(
+    async (id: string, card: ToolPlanCard) => {
       if (busyRef.current || !card.messages.length) return;
-      await runSheetAsk({ instruction: card.instruction, label, cardId: id, messages: card.messages });
+      await runToolAsk({ format: card.format, instruction: card.instruction, cardId: id, messages: card.messages });
     },
-    [runSheetAsk],
+    [runToolAsk],
   );
 
   /* ------------- selection rewrite: stream then apply -------------- */
@@ -1277,9 +1541,13 @@ export function AIPanel({
     async (raw: string) => {
       const text = raw.trim();
       if (!text || busyRef.current) return;
-      // 表格没有"选区改写"这条路：分析、整理、计算都交给代理决定出不出提案。
+      // 表格与幻灯片都没有"选区改写"这条路：分析、整理、计算都交给代理决定出不出提案。
       if (sheet) {
-        await askSheet(text);
+        await askTool("sheet", text);
+        return;
+      }
+      if (slides) {
+        await askTool("slide", text);
         return;
       }
       if (modeRef.current !== "chat") {
@@ -1288,7 +1556,7 @@ export function AIPanel({
       }
       await runChat({ prompt: text });
     },
-    [askAgent, askSheet, runChat, sheet],
+    [askAgent, askTool, runChat, sheet, slides],
   );
 
   const stopStream = useCallback(() => {
@@ -1653,34 +1921,37 @@ export function AIPanel({
               );
             }
 
-            if (it.t === "sheet") {
+            if (it.t === "tool") {
               const c = it.card;
-              // 图表卡列的是引用与落点，提案卡列的是改动条目；两样都在渲染层组装（§5.7）。
-              const lines = c.chart ? sheetChartLines(c.chart) : sheetEditLines(c.edits);
+              const copy = TOOL_CARD_COPY[c.format];
+              // 清单上的行在收到提案时就组好了（表格是改动条目，幻灯片是模型提的条目）。
+              const isChart = c.land.kind === "chart";
               // 卡片沿用文档方案卡的那套类名（`.ai-card*` / `.op-list`），只换标题图标与文案。
               return (
                 <div key={it.id} className={`ai-card ${c.status}`}>
                   <div className="ai-card-head">
-                    <Table2 size={13} />
+                    {c.format === "sheet" ? <Table2 size={13} /> : <Presentation size={13} />}
                     <span className="ai-card-title">{it.label}</span>
                     {c.status === "streaming" ? (
                       <span className="ai-card-streaming">
                         <Loader2 size={12} className="spin" />
-                        正在核对表格…
+                        {copy.checking}
                       </span>
                     ) : (
-                      <span className="ai-card-count">{c.chart ? "1 张图表" : `${c.ops.length} 处改动`}</span>
+                      <span className="ai-card-count">{toolLandTally(c.land).label}</span>
                     )}
                   </div>
                   {c.summary && <div className="ai-card-summary">{c.summary}</div>}
-                  {lines.length > 0 && (
+                  {c.lines.length > 0 && (
                     <ul className="op-list">
-                      {lines.map((line, i) => (
+                      {c.lines.map((line, i) => (
                         <li key={i}>{line}</li>
                       ))}
                     </ul>
                   )}
-                  {c.chart && c.status !== "streaming" && <ChartPreview chart={c.chart} />}
+                  {c.land.kind === "chart" && c.status !== "streaming" && (
+                    <ChartPreview chart={c.land.chart} />
+                  )}
                   {c.notes.length > 0 && (
                     <div className="ai-card-notes">
                       {c.notes.map((n, i) => (
@@ -1692,8 +1963,8 @@ export function AIPanel({
                   <div className="ai-card-actions">
                     {c.status === "pending" && (
                       <>
-                        <button className="primary" onClick={() => void applySheetPlan(it.id, c)}>
-                          <Check size={12} /> {c.chart ? "插入图表" : "应用到表格"}
+                        <button className="primary" onClick={() => void applyToolPlan(it.id, c)}>
+                          <Check size={12} /> {isChart ? "插入图表" : copy.confirm}
                         </button>
                         <button className="ghost" onClick={() => dismiss(it.id)}>
                           <X size={12} /> 放弃
@@ -1707,8 +1978,8 @@ export function AIPanel({
                     )}
                     {c.status === "applied" && (
                       <span className="ai-card-status ok">
-                        <Check size={12} /> {c.chart ? "已排进待写清单" : "已写入表格"}
-                        {onOpenHistory && (
+                        <Check size={12} /> {isChart ? "已排进待写清单" : copy.landed}
+                        {copy.historyEntry && onOpenHistory && (
                           <button className="link-btn" onClick={onOpenHistory}>
                             查看修改历史
                           </button>
@@ -1722,7 +1993,7 @@ export function AIPanel({
                       <button
                         className="primary"
                         title="接着上一次停下的地方继续跑工具回合"
-                        onClick={() => void continueSheetPlan(it.id, c, it.label)}
+                        onClick={() => void continueToolPlan(it.id, c)}
                       >
                         <Play size={12} /> 继续
                       </button>
@@ -1837,8 +2108,8 @@ export function AIPanel({
                 </>
               )}
             </div>
-            {/* 快捷指令全是文档动作（改写、排版），表格模式下不给出来。 */}
-            {!sheet && mode !== "chat" && (
+            {/* 快捷指令全是文档动作（改写、排版），表格与幻灯片模式下都不给出来。 */}
+            {!sheet && !slides && mode !== "chat" && (
               <div className="ai-pop-wrap">
                 <button
                   type="button"
@@ -1908,7 +2179,11 @@ export function AIPanel({
           </div>
           {modeHintOpen && (
             <div className="ai-mode-hint">
-              {sheet ? SHEET_MODE_HINTS[mode] : MODES.find((m) => m.id === mode)?.hint}
+              {sheet
+                ? SHEET_MODE_HINTS[mode]
+                : slides
+                  ? SLIDE_MODE_HINTS[mode]
+                  : MODES.find((m) => m.id === mode)?.hint}
             </div>
           )}
           <textarea

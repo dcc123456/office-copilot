@@ -6,6 +6,18 @@
  */
 import type { PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideShape } from "@office-copilot/pptx-io";
 
+/**
+ * 形状几何四个字段的中文标签（单位是 CSS px，非 pt、非 EMU）。
+ *
+ * 视图的输入框与 AI 提案卡都要说这四个字段，放这里是因为落地范围也由本模块定（§3.2 不写第二份）。
+ */
+export const SHAPE_BOX_FIELD_LABEL: Record<keyof ShapeBoxPx, string> = {
+  leftPx: "左",
+  topPx: "上",
+  widthPx: "宽",
+  heightPx: "高",
+};
+
 /** 一处未保存的草稿：只带用户真改过的那几项（没改的字段留 undefined，不交出、也不覆盖）。 */
 export interface SlideDraft {
   /** 段落文字（整段只有一条 run 时才允许改，见 {@link pendingEdits}）。 */

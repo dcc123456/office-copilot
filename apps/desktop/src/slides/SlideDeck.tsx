@@ -8,18 +8,21 @@
  * 单位一律 CSS pt / px（读侧已按 `pptx-io/units.ts` 换好），视图里不再乘 100 或 9525（§2.1）。
  */
 import { useCallback, useMemo, useState } from "react";
-import type { PresentationModel, ShapeBoxPx, SlideEditOp, SlideShape } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel, ShapeBoxPx, SlideShape } from "@office-copilot/pptx-io";
+import type { PptxEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
-import { boxDraftKeyOf, draftKeyOf, pendingEdits, type SlideDraft } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, pendingEdits, SHAPE_BOX_FIELD_LABEL, type SlideDraft } from "./slideDeckModel.js";
 import "../styles/slides.css";
 
 export interface SlideDeckProps {
   /** 主进程读出来的演示文稿模型；保存成功后换成主进程重读磁盘算出的那份。 */
   deck: PresentationModel;
-  /** 当前文档路径（幻灯片还不支持新建，所以进来时一定有路径）。 */
-  path: string;
-  /** 用主进程送回的新模型刷新视图，避免再发一次读请求。 */
-  onDeck: (deck: PresentationModel) => void;
+  /** 上一次落地的那批改动还属于当前这份文件，撤销按钮才给点（前像只对那份文件有效）。 */
+  canRevert: boolean;
+  /** 落地这一批改动：与 AI 提案共用 `App.tsx` 那一个写盘口，主进程回包里带刷新后的模型。 */
+  onCommit: (edits: PptxEditRequest[]) => Promise<PptxEditOutcome | null>;
+  /** 撤销上一次落地的那批改动（逆序送回前像），回包同样带刷新后的模型。 */
+  onRevert: () => Promise<PptxEditOutcome | null>;
 }
 
 /** 颜色选择框在"这一截字的颜色继承自版式"时的显示值（不代表现场真有这个色）。 */
@@ -62,19 +65,9 @@ function numberOrUndefined(raw: string): number | undefined {
   return trimmed === "" || !Number.isFinite(value) ? undefined : value;
 }
 
-/** 四个几何字段的中文标签（输入框顺序与这里一致）。 */
-const BOX_FIELD_LABEL: Record<keyof ShapeBoxPx, string> = {
-  leftPx: "左",
-  topPx: "上",
-  widthPx: "宽",
-  heightPx: "高",
-};
-
-export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
+export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProps) {
   /** 未保存的草稿：run 级字段键见 `draftKeyOf`，几何键见 `boxDraftKeyOf`。 */
   const [drafts, setDrafts] = useState<Record<string, SlideDraft>>({});
-  /** 上一次落地那批 op 的前像；送回复用同一条撤销通道（§2.5）。 */
-  const [lastOps, setLastOps] = useState<SlideEditOp[]>([]);
   const [isBusy, setIsBusy] = useState(false);
 
   /** 把一处 run 级草稿字段并进去（同一定位键上文字/字号/颜色各存各的，互不覆盖）。 */
@@ -105,33 +98,29 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
   const saveEdits = useCallback(async () => {
     if (edits.length === 0) return;
     setIsBusy(true);
-    const saved = await window.officeCopilot.editPptx({ path, edits });
+    const saved = await onCommit(edits);
     setIsBusy(false);
-    if (!saved.ok || !saved.presentation) {
-      if (saved.message) toast(saved.message, "error");
+    if (!saved || !saved.ok || !saved.presentation) {
+      if (saved?.message) toast(saved.message, "error");
+      else toast("这份演示文稿已经不在了，改动没有写入。", "error");
       return;
     }
     setDrafts({});
-    setLastOps(saved.ops ?? []);
-    onDeck(saved.presentation);
     toast(`已保存，动了 ${(saved.changedParts ?? []).length} 张幻灯片`);
-  }, [edits, onDeck, path]);
+  }, [edits, onCommit]);
 
   const revertLastBatch = useCallback(async () => {
-    if (lastOps.length === 0) return;
     setIsBusy(true);
-    // 逆序送回：后落地的那条先写回前像，别的形状与幻灯片不受牵连（§2.5 内容寻址）。
-    const reverted = await window.officeCopilot.revertPptx({ path, ops: [...lastOps].reverse() });
+    const reverted = await onRevert();
     setIsBusy(false);
-    if (!reverted.ok || !reverted.presentation) {
-      if (reverted.message) toast(reverted.message, "error");
+    if (!reverted || !reverted.ok || !reverted.presentation) {
+      if (reverted?.message) toast(reverted.message, "error");
+      else toast("没有可撤销的批次，或这份文件已经换了。", "error");
       return;
     }
-    setLastOps([]);
     setDrafts({});
-    onDeck(reverted.presentation);
     toast("已撤销上一次保存的那批改动");
-  }, [lastOps, onDeck, path]);
+  }, [onRevert]);
 
   return (
     <div className="slide-deck">
@@ -142,7 +131,7 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
         <button type="button" onClick={() => void saveEdits()} disabled={isBusy || edits.length === 0}>
           保存
         </button>
-        <button type="button" onClick={() => void revertLastBatch()} disabled={isBusy || lastOps.length === 0}>
+        <button type="button" onClick={() => void revertLastBatch()} disabled={isBusy || !canRevert}>
           撤销上一次保存
         </button>
         {edits.length > 0 ? (
@@ -171,7 +160,7 @@ export function SlideDeck({ deck, path, onDeck }: SlideDeckProps) {
                     <div className="slide-box-fields">
                       {(["leftPx", "topPx", "widthPx", "heightPx"] as (keyof ShapeBoxPx)[]).map((field) => (
                         <label className="slide-field" key={field}>
-                          <span>{BOX_FIELD_LABEL[field]}</span>
+                          <span>{SHAPE_BOX_FIELD_LABEL[field]}</span>
                           <input
                             type="number"
                             value={drafts[boxKey]?.box?.[field] ?? shape.boxPx?.[field] ?? ""}
