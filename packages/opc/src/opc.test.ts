@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { loadPackage, parseRelationships, relativeTarget, relsPathFor, resolveTarget, unmodelledParts } from "./opc.js";
 import { newlyIntroducedIssues, type OpcAuditIssue } from "./audit.js";
-import { contentTypesWith, nextPartIndex, nextRelIdFor, relsWith } from "./write.js";
+import { contentTypesWith, nextPartIndex, nextRelIdFor, relsWith, serializePackage } from "./write.js";
 import * as xml from "./xml.js";
 
 /**
@@ -144,5 +144,36 @@ describe("newlyIntroducedIssues：闸门只对本次事务负责", () => {
 
   it("输出干净时什么都不拦", () => {
     expect(newlyIntroducedIssues([issue("declared-part-missing", "ppt/media/image1.png")], [])).toEqual([]);
+  });
+});
+
+describe("opc：序列化不写目录项（.docx/.xlsx/.pptx 三处 toBytes 共用）", () => {
+  /** 把序列化产物重新按目录项/文件项拆开列出来，`unzip -l` 的等价判据。 */
+  async function entriesOf(bytes: Uint8Array): Promise<string[]> {
+    const reloaded = await JSZip.loadAsync(bytes);
+    return Object.keys(reloaded.files).sort();
+  }
+
+  it("新增嵌套部件后产物只剩文件条目，不多出 ppt/ 与 ppt/slides/", async () => {
+    const zip = await JSZip.loadAsync(await minimalPackage());
+    // 这一步会让 JSZip 合成 ppt/ 与 ppt/slides/ 两个目录对象（实测 createFolders:false 挡不住）。
+    zip.file("ppt/slides/slide2.xml", "<p:sld>乙</p:sld>");
+
+    const bytes = await serializePackage(zip);
+    const entries = await entriesOf(bytes);
+    expect(entries.filter((name) => name.endsWith("/"))).toEqual([]);
+    // 原部件与新增部件都必须在，一个不许丢（delete dir 对象不能把子树删没）。
+    expect(entries).toContain("ppt/presentation.xml");
+    expect(entries).toContain("ppt/slides/slide1.xml");
+    expect(entries).toContain("ppt/slides/slide2.xml");
+    const reloaded = await JSZip.loadAsync(bytes);
+    expect(await reloaded.file("ppt/slides/slide2.xml")?.async("string")).toBe("<p:sld>乙</p:sld>");
+  });
+
+  it("没新增部件时，序列化不改变文件部件清单（只去目录项）", async () => {
+    const original = await minimalPackage();
+    const bytes = await serializePackage(await JSZip.loadAsync(original));
+    const before = (await entriesOf(original)).filter((name) => !name.endsWith("/"));
+    expect(await entriesOf(bytes)).toEqual(before);
   });
 });

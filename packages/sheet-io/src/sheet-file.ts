@@ -6,7 +6,7 @@
  * 2. 单位/颜色/序列号的解释只发生在本包（`AGENTS.md` §2.1 的同一条纪律，换成表格域）。
  * 3. 读不懂的东西记进 `warnings`/`unsupported` 一路带到 UI，不许静默丢弃。
  */
-import { loadPackage, readText, relsPathFor, resolveTarget, nextRelIdFor, relsWith, contentTypesWith, nextPartIndex, type OpcPackage } from "@office-copilot/opc";
+import { loadPackage, readText, relsPathFor, resolveTarget, nextRelIdFor, relsWith, contentTypesWith, nextPartIndex, serializePackage, type OpcPackage } from "@office-copilot/opc";
 import { children, isElement, parseDocument, type Element } from "./xml.js";
 import type { SheetCell, SheetModel, UnsupportedFeature, WorkbookModel } from "./model.js";
 import type { ResolvedChart } from "./chart-spec.js";
@@ -411,7 +411,7 @@ export class SheetFile {
       if (sstXml) await this.writeSharedStringsPart(sstXml);
     }
     if (this.styles.isDirty) this.pkg.zip.file("xl/styles.xml", this.styles.toXml());
-    return this.pkg.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    return serializePackage(this.pkg.zip);
   }
 
   /**

@@ -8,6 +8,7 @@
  *
  * 这些函数都只**产出文本 / 算号**，不碰任何暂存 Map——"改写还是新增"是上层写器的记账，不属于 OPC。
  */
+import JSZip from "jszip";
 import { readText, relsPathFor, relativeTarget, type OpcPackage } from "./opc.js";
 
 /** `[Content_Types].xml` 缺失时的最小骨架（实测原文件多半有，缺时整篇新建）。 */
@@ -74,4 +75,23 @@ export function nextPartIndex(takenNames: Iterable<string>, prefix: string, suff
     if (name.startsWith(prefix) && name.endsWith(suffix)) taken += 1;
   }
   return taken + 1;
+}
+
+/**
+ * 把装好部件的 JSZip 序列化成办公文档字节，并且**不写目录项**。
+ *
+ * 为什么单列这一份（`.docx`/`.xlsx`/`.pptx` 三处 `toBytes()` 共用）：写侧新增一个嵌套部件
+ * （`zip.file("ppt/slides/slide2.xml", …)`、`word/media/image1.png`）时，JSZip 会顺手把 `ppt/`、
+ * `ppt/slides/` 这类 `dir:true` 目录对象塞进 `zip.files`，`generateAsync` 再把它们写进包——于是我们产的
+ * 文件比 python-pptx 那种"只有文件条目"的原文件多出目录项。**实测**：`generateAsync({createFolders:false})`
+ * 挡不住（那些目录对象是 `file()` 当场造的，不是生成时补的），必须在生成前把 `dir` 条目删掉；删 `zip.files`
+ * 里的对象而不是 `zip.remove(name)`，因为 `remove` 按前缀递归、会把 `ppt/` 底下的真部件一起删没。
+ * 目录项对 OPC 是可选的（办公软件忽略，`unmodelledParts` 也按 `/` 结尾过滤），所以三份统一都不写最省心。
+ *
+ * @param zip 已装好全部部件的包（没改过的部件原样留着，含二进制部件）。
+ * @returns DEFLATE 压缩的 zip 字节；产物不含任何目录项，文件部件一个不少。
+ */
+export async function serializePackage(zip: JSZip): Promise<Uint8Array> {
+  for (const name of Object.keys(zip.files)) if (zip.files[name]?.dir) delete zip.files[name];
+  return zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
 }

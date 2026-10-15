@@ -5,7 +5,7 @@
  * 回写时连二进制部件（`printerSettings/*.bin`、`docProps/thumbnail.jpeg`、嵌入的 `.xlsx`）都逐字带回。
  * 只有显式 `writePartText` 改写过的文本部件才重新序列化，改一张幻灯片只重写那一张的部件。
  */
-import { loadPackage, readText, type OpcPackage } from "@office-copilot/opc";
+import { loadPackage, readText, serializePackage, type OpcPackage } from "@office-copilot/opc";
 import { readModelFromPackage, type PresentationModel } from "./read.js";
 
 export class PptxFile {
@@ -61,9 +61,10 @@ export class PptxFile {
   /**
    * 回写整包字节。
    *
-   * @returns `.pptx` 的 Uint8Array；没改过任何部件时，解包后每个部件内容与原文件逐字一致。
+   * @returns `.pptx` 的 Uint8Array；没改过任何部件时，解包后每个文件部件内容与原文件逐字一致，
+   *   且经 `serializePackage` 不写目录项（新增幻灯片/图片时不会多出 `ppt/`、`ppt/slides/`）。
    */
   async toBytes(): Promise<Uint8Array> {
-    return this.pkg.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    return serializePackage(this.pkg.zip);
   }
 }

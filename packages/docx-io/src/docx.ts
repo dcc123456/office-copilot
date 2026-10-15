@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { serializePackage } from "@office-copilot/opc";
 import {
   children,
   collectDescendants,
@@ -820,7 +821,7 @@ export class DocxFile {
 
   async toBytes(): Promise<Uint8Array> {
     this.zip.file(DOC_XML, serialize(this.root));
-    return this.zip.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    return serializePackage(this.zip);
   }
 
   // -------- Internals --------
