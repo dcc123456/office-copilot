@@ -69,12 +69,20 @@ export interface SlideOutlineEntry {
     shapeId: number;
     /** 形状名。 */
     name: string;
-    /** 大类：形状 / 图片 / 图形框 / 组合。 */
+    /** 大类：形状 / 图片 / 图形框 / 组合 / 连接线。 */
     kind: SlideShape["kind"];
     /** 占位符角色（`type` 或 `idx`），非占位符为 null。 */
     placeholderRef: string | null;
     /** 有没有自己的 `<a:xfrm>`（false＝几何继承自版式，改几何要把四个值一起给，D3）。 */
     hasOwnGeometry: boolean;
+    /**
+     * 这个形状是不是装在某个组合（`<p:grpSp>`）里面。
+     *
+     * 组里的形状只许改文字/字体/颜色与删掉，**不许改几何**：它的坐标写在组内的子坐标系里，换算回页面位置
+     * 要连着组的缩放与旋转一起算，这一档不做（引擎那条会整条拒绝并给理由）。叠放次序是"同一层内"的性质，
+     * 所以调层级照做，只是只在它所在的那个组里换序。
+     */
+    inGroup: boolean;
     /** 这一页上这个形状的文字概要（拼接串，超长已截）。 */
     text: string;
   }>;
@@ -167,6 +175,7 @@ function outlineOfSlide(slide: Slide, slideNumber: number, maxShapesPerSlide: nu
       kind: shape.kind,
       placeholderRef: shape.placeholderRef ?? null,
       hasOwnGeometry: shape.hasOwnGeometry,
+      inGroup: shape.groupShapeId !== undefined,
       text: shapeTextSummary(shape),
     })),
     shapesTruncated: slide.shapes.length > listed.length,

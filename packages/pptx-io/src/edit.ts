@@ -11,7 +11,7 @@
  * 实测：`serialize` 对本机真实幻灯片的往返**逐字一致**（仅声明后换行差异），所以重序列化不会误伤同段其它格式。
  */
 import { XML_DECLARATION, children, escapeText, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element, type XmlNode } from "@office-copilot/opc";
-import { findNotesBodyShape } from "./read.js";
+import { findNotesBodyShape, shapeIdOf } from "./read.js";
 import { PptxFile } from "./pptx-file.js";
 import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
@@ -47,7 +47,7 @@ export interface RunFontFormat {
   sizePt?: number;
 }
 
-const SHAPE_HOST_TAGS = ["p:sp", "p:pic", "p:graphicFrame", "p:grpSp"];
+const SHAPE_HOST_TAGS = ["p:sp", "p:pic", "p:graphicFrame", "p:grpSp", "p:cxnSp"];
 
 /** 目标形状的定位坐标（几何与叠放两条 op 只到形状粒度，不需要段/run）。 */
 export interface ShapeGeometryTarget {
@@ -202,6 +202,11 @@ export async function setShapeGeometry(file: PptxFile, target: ShapeGeometryTarg
   const located = await locateShape(file, target);
   if (!located.ok) return located;
   if (located.shape.name === "p:grpSp") return { ok: false, reason: "组合形状的几何暂不支持（子偏移语义不同）。" };
+  // 组里的形状：它 `<a:xfrm>` 里的数是**组内子坐标系**的，要换算回页面位置得连着组的 chOff/chExt 比例与旋转一起算，
+  // 这一档不做那个映射，所以也不接受把页面 px 写进去（那等于改了它相对组的位置）。读侧同样不给它的几何数字。
+  if (located.container !== shapeTreeOf(located.root)) {
+    return { ok: false, reason: "这个形状在一个组合里，几何那一条这一档不改（它写的坐标是组内子坐标系，换算成页面位置要连着组的缩放与旋转一起算）。" };
+  }
   const spPr = firstChild(located.shape, "p:spPr");
   const xfrm = spPr ? firstChild(spPr, "a:xfrm") : undefined;
   const missing = [
@@ -263,14 +268,13 @@ function missingPairValues(
  * @param file 已打开的读写器。
  * @param target 形状定位坐标（部件路径 + 形状号）。
  * @param direction `up`/`down` 挪一层，`top`/`bottom` 直接到两端。
- * @returns `{ ok, op }`：这一页没有形状树、找不到形状，或**已经在那一端**（再挪是一次空改动，不值得落盘）时 `{ ok:false, reason }`。
+ * @returns `{ ok, op }`：找不到形状，或**已经在要去的尽头**（再挪是一次空改动，不值得落盘）时 `{ ok:false, reason }`。
+ *   组里的形状只在它自己那一层（那个组）里换序——叠放次序本来就是"同一层内"的性质，PowerPoint 也是这么画的。
  */
 export async function moveShapeLayer(file: PptxFile, target: ShapeGeometryTarget, direction: SlideLayerDirection): Promise<SlideEditResult> {
   const located = await locateShape(file, target);
   if (!located.ok) return located;
-  const spTree = shapeTreeOf(located.root);
-  if (!spTree) return { ok: false, reason: `这一页没有形状树（<p:spTree>）：${target.partPath}` };
-  const hosts = children(spTree).filter((el) => SHAPE_HOST_TAGS.includes(el.name));
+  const hosts = children(located.container).filter((el) => SHAPE_HOST_TAGS.includes(el.name));
   const at = hosts.indexOf(located.shape);
   const order = [...hosts];
   if (direction === "up") {
@@ -290,7 +294,7 @@ export async function moveShapeLayer(file: PptxFile, target: ShapeGeometryTarget
     order.splice(at, 1);
     order.unshift(located.shape);
   }
-  rewriteShapeOrder(spTree, order);
+  rewriteShapeOrder(located.container, order);
   return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
 }
 
@@ -334,14 +338,13 @@ export async function addTextBox(file: PptxFile, target: SlidePartTarget, box: S
  *
  * @param file 已打开的读写器。
  * @param target 形状定位坐标（部件路径 + 形状号）。
- * @returns `{ ok, op }`：定位失败或这一页没有形状树时 `{ ok:false, reason }`。删掉最后一个形状是合法操作（页面变空白），照做。
+ * @returns `{ ok, op }`：定位失败时 `{ ok:false, reason }`。删掉最后一个形状是合法操作（页面变空白），照做；
+ *   组里的子形状也真能从组里摘掉（对着一层摘，不对着页面 `spTree` 摘）。
  */
 export async function removeShape(file: PptxFile, target: ShapeGeometryTarget): Promise<SlideEditResult> {
   const located = await locateShape(file, target);
   if (!located.ok) return located;
-  const spTree = shapeTreeOf(located.root);
-  if (!spTree) return { ok: false, reason: `这一页没有形状树（<p:spTree>）：${target.partPath}` };
-  removeShapeFromTree(spTree, located.shape);
+  removeShapeFromTree(located.container, located.shape);
   return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
 }
 
@@ -469,7 +472,7 @@ export async function revertSlideEdits(file: PptxFile, ops: SlideEditOp[]): Prom
 type LoadedSlidePart = { ok: true; beforeXml: string; root: Element } | { ok: false; reason: string };
 
 /** `locateShape` 的成功结果：部件原文、解析好的根与目标形状元素。 */
-type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element } | { ok: false; reason: string };
+type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element; container: Element } | { ok: false; reason: string };
 
 /** `locateRun` 的成功结果：在形状之上再给出目标 run 元素。 */
 type LocatedRun = { ok: true; beforeXml: string; root: Element; run: Element } | { ok: false; reason: string };
@@ -502,9 +505,9 @@ async function loadSlidePart(file: PptxFile, partPath: string, partLabel = "幻�
 async function locateShape(file: PptxFile, target: ShapeGeometryTarget): Promise<LocatedShape> {
   const loaded = await loadSlidePart(file, target.partPath);
   if (!loaded.ok) return loaded;
-  const shape = findShapeById(loaded.root, target.shapeId);
-  if (!shape) return { ok: false, reason: `找不到形状 id=${target.shapeId}` };
-  return { ...loaded, shape };
+  const found = findShapeById(loaded.root, target.shapeId);
+  if (!found) return { ok: false, reason: `找不到形状 id=${target.shapeId}` };
+  return { ...loaded, shape: found.shape, container: found.container };
 }
 
 /**
@@ -633,35 +636,45 @@ function shapeTreeOf(root: Element): Element | undefined {
 }
 
 /**
- * 在幻灯片根元素里按 `<p:cNvPr @id>` 找形状元素。
+ * 在幻灯片根元素里按 `<p:cNvPr @id>` 找形状元素，**并走进组合**。
+ *
+ * 为什么要递归：`<p:grpSp>` 里的形状在页面 XML 里真实存在、有自己的 `shapeId`、带着用户写的文字，
+ * 只扫顶层就是"那些文字不存在"（实测见 spec 阶段 2）。同时把**直接装着它的那一层**（页面 `spTree` 或某个组）
+ * 一起交出去——删元素与重排叠放都必须对着一层来做，对着页面 `spTree` 摘一个组里的形状会静默摘不掉
+ * 却报"成功"，那是最坏的一种失败。
  *
  * @param root 幻灯片根（`<p:sld>`）。
  * @param shapeId 形状号。
- * @returns 形状元素；找不到返回 undefined。
+ * @returns `{ shape, container }`（`container` 是直接容纳它的那一层）；找不到返回 undefined。
  */
-function findShapeById(root: Element, shapeId: number): Element | undefined {
+function findShapeById(root: Element, shapeId: number): { shape: Element; container: Element } | undefined {
   const spTree = shapeTreeOf(root);
   if (!spTree) return undefined;
-  for (const el of children(spTree)) {
-    if (!SHAPE_HOST_TAGS.includes(el.name)) continue;
-    const host = firstChild(el, "p:nvSpPr") ?? firstChild(el, "p:nvPicPr") ?? firstChild(el, "p:nvGraphicFramePr") ?? firstChild(el, "p:nvGrpSpPr");
-    const cNvPr = host ? firstChild(host, "p:cNvPr") : undefined;
-    if (cNvPr && Number(cNvPr.attributes["id"]) === shapeId) return el;
-  }
-  return undefined;
+  const walk = (container: Element): { shape: Element; container: Element } | undefined => {
+    for (const el of children(container)) {
+      if (!SHAPE_HOST_TAGS.includes(el.name)) continue;
+      if (shapeIdOf(el) === shapeId) return { shape: el, container };
+      if (el.name === "p:grpSp") {
+        const found = walk(el);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  return walk(spTree);
 }
 
 /**
- * 把 `<p:spTree>` 里的形状子元素换成给定的顺序。
+ * 重排**一层**里的形状子元素（页面的 `<p:spTree>`，或某个 `<p:grpSp>` 内部）。
  *
  * 只填形状那些槽位：`p:nvGrpSpPr`、`p:grpSpPr` 与元素之间的空白 / 注释节点原地不动，
  * 这样重序列化后除叠放顺序外一个字都不差（§2.3 不许误伤别的内容）。
  *
- * @param spTree 形状树元素。
- * @param order 新的形状顺序，长度必须等于现有形状子元素数。
+ * @param container 要重排的那一层元素（页面形状树或组合）。
+ * @param order 新的形状顺序，长度必须等于该层现有形状子元素数。
  */
-function rewriteShapeOrder(spTree: Element, order: Element[]): void {
-  const nodes = spTree.children;
+function rewriteShapeOrder(container: Element, order: Element[]): void {
+  const nodes = container.children;
   if (!nodes) return;
   const slots: number[] = [];
   nodes.forEach((node, index) => {
@@ -735,13 +748,13 @@ function appendShapeToTree(spTree: Element, shape: Element): void {
 }
 
 /**
- * 把一个形状元素从 `<p:spTree>` 里摘掉（节点间的空白留着，多一个空行不影响合法性）。
+ * 把一个形状元素从**直接装着它的那一层**里摘掉（页面 `<p:spTree>` 或某个 `<p:grpSp>`；节点间的空白留着，多一个空行不影响合法性）。
  *
- * @param spTree 形状树元素。
- * @param shape 由 `locateShape` 定位到的形状元素（同一棵树里的同一个对象，按引用比较）。
+ * @param container 由 `locateShape` 交出的那一层。对着页面 `spTree` 摘一个组里的形状会静默摘不掉却报"成功"，所以必须用它。
+ * @param shape 目标形状元素（同一棵树里的同一个对象，按引用比较）。
  */
-function removeShapeFromTree(spTree: Element, shape: Element): void {
-  const nodes = spTree.children ?? [];
+function removeShapeFromTree(container: Element, shape: Element): void {
+  const nodes = container.children ?? [];
   const at = nodes.indexOf(shape);
   if (at >= 0) nodes.splice(at, 1);
 }

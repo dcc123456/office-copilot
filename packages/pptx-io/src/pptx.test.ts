@@ -838,3 +838,119 @@ describe("pptx-io：演讲者备注的写侧（只改已存在的备注部件，
     expect(newlyIntroducedIssues(await auditPptxPackage(bytes), await auditPptxPackage(await file.toBytes()))).toEqual([]);
   });
 });
+
+/**
+ * 造一份"两个文本框成了组 + 一条连接线"的 `.pptx`，形状号与结构照本机 python-pptx 产物实测（spec §取证）。
+ *
+ * @returns zip 字节。一页四个可寻址形状：顶层标题（id=2）、组（id=9，带 chOff/chExt）、组内两个文本框
+ *   （id=3 组内甲、id=4 组内乙），以及一条顶层连接线（id=10）。
+ */
+async function groupDeck(): Promise<Uint8Array> {
+  const slideXml =
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp><p:grpSp><p:nvGrpSpPr><p:cNvPr id="9" name="Group 8"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="914400" y="1828800"/><a:ext cx="2743200" cy="1828800"/><a:chOff x="914400" y="1828800"/><a:chExt cx="2743200" cy="1828800"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="3" name="TextBox 2"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="1828800"/><a:ext cx="2743200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>组内甲</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="TextBox 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="2286000"/><a:ext cx="2743200" cy="457200"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>组内乙</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp><p:cxnSp><p:nvCxnSpPr><p:cNvPr id="10" name="Connector 9"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x="4572000" y="1828800"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="straightConnector1"><a:avLst/></a:prstGeom></p:spPr></p:cxnSp></p:spTree></p:cSld></p:sld>';
+  return minimalDeck(slideXml);
+}
+
+describe("pptx-io：组合与连接线（读侧展开 + 组内形状的写侧边界）", () => {
+  /** 页面那一层的形状名（把组内部整段挖掉，只留 `<p:grpSp>` 自己与它的邻居）。 */
+  function pageLevelNames(xml: string): string[] {
+    const start = xml.indexOf("<p:grpSp>");
+    const end = xml.indexOf("</p:grpSp>") + "</p:grpSp>".length;
+    return [...(xml.slice(0, start) + xml.slice(end)).matchAll(/<p:cNvPr id="\d+" name="([^"]*)"/g)]
+      .map((m) => m[1]!)
+      .filter((name) => name !== "");
+  }
+
+  /** 取出组内部那两格的文档顺序（组内叠放次序是"同一层内"的性质，不是整页的）。 */
+  function insideGroup(xml: string): string[] {
+    // 从 `</p:grpSpPr>` 之后取：组自己那节 `nvGrpSpPr` 里也有一个 `cNvPr`，它不算"组里的形状"。
+    const start = xml.indexOf("</p:grpSpPr>");
+    const end = xml.indexOf("</p:grpSp>");
+    return [...xml.slice(start, end).matchAll(/<p:cNvPr id="\d+" name="([^"]*)"/g)].map((m) => m[1]!);
+  }
+
+  it("组里的两个文本框与那条连接线都读得到，组内形状一个不许多一个不许少", async () => {
+    const { model } = await readPresentation(await groupDeck());
+    const shapes = model.slides[0]!.shapes;
+    expect(shapes.map((s) => [s.shapeId, s.name, s.kind])).toEqual([
+      [2, "Title 1", "shape"],
+      [9, "Group 8", "group"],
+      [3, "TextBox 2", "shape"],
+      [4, "TextBox 3", "shape"],
+      [10, "Connector 9", "connector"],
+    ]);
+    expect(shapes.find((s) => s.shapeId === 3)!.groupShapeId).toBe(9);
+    expect(shapes.find((s) => s.shapeId === 4)!.groupShapeId).toBe(9);
+    expect(shapes.find((s) => s.shapeId === 10)!.groupShapeId).toBeUndefined();
+    // 组内那两格的文字读得到（面板与 AI 画像此前根本看不见它们），连接线自己没文字就是空数组。
+    expect(shapes.find((s) => s.shapeId === 3)!.paragraphTexts).toEqual(["组内甲"]);
+    expect(shapes.find((s) => s.shapeId === 10)!.paragraphTexts).toEqual([]);
+  });
+
+  it("组内形状的几何一律留空：它写的是组内子坐标系，换算没做之前宁可不给数（与 D3 同一条线）", async () => {
+    const { model } = await readPresentation(await groupDeck());
+    const grouped = model.slides[0]!.shapes.find((s) => s.shapeId === 3)!;
+    expect(grouped.hasOwnGeometry).toBe(true); // 事实照实报：它自己确实写了 <a:xfrm>
+    expect(grouped.boxPx).toBeUndefined();
+    expect(grouped.effectiveBoxPx).toEqual({});
+    expect(grouped.boxPxSources).toEqual({});
+    // 顶层那条连接线不受影响，照常给数（4572000/9525=480，1828800/9525=192）。
+    const connector = model.slides[0]!.shapes.find((s) => s.shapeId === 10)!;
+    expect(connector.boxPx).toEqual({ leftPx: 480, topPx: 192, widthPx: 96, heightPx: 96 });
+  });
+
+  it("改组内形状的文字能落地，撤销逐字回到改前", async () => {
+    const file = await PptxFile.open(await groupDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await setShapeRunText(file, { partPath, shapeId: 4, paraIndex: 0, runIndex: 0 }, "改后的组内乙");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.op.beforeXml).toBe(original);
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toContain("<a:t>改后的组内乙</a:t>");
+    expect((await file.partText(partPath))!).toContain("<a:t>组内甲</a:t>"); // 兄弟那格一个字节没动
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("删掉组里的子形状：真从那个组里摘掉，不再静默摘不掉却报成功", async () => {
+    const file = await PptxFile.open(await groupDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await removeShape(file, { partPath, shapeId: 3 });
+    if (!result.ok) throw new Error(result.reason);
+    expect(insideGroup(result.op.afterXml)).toEqual(["TextBox 3"]);
+    expect(result.op.afterXml).toContain('id="9" name="Group 8"'); // 组本身还在
+    applySlideEdit(file, result.op);
+    expect(insideGroup((await file.partText(partPath))!)).toEqual(["TextBox 3"]);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("组内调层级只在组内换序，不会把子形状搬到页面那一层", async () => {
+    const file = await PptxFile.open(await groupDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await moveShapeLayer(file, { partPath, shapeId: 3 }, "up");
+    if (!result.ok) throw new Error(result.reason);
+    expect(insideGroup(result.op.afterXml)).toEqual(["TextBox 3", "TextBox 2"]);
+    // 整页那一层的成员与次序都没变：标题与连接线仍在原位（组自己不算在这里，只挖掉它内部那两格）
+    expect(pageLevelNames(result.op.afterXml)).toEqual(["Title 1", "Connector 9"]);
+    applySlideEdit(file, result.op);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("组内形状的几何 op 整条拒绝并给理由，页面那一层的形状照旧能改", async () => {
+    const file = await PptxFile.open(await groupDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const refused = await setShapeGeometry(file, { partPath, shapeId: 3 }, { leftPx: 40, topPx: 40, widthPx: 100, heightPx: 100 });
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain("在一个组合里");
+    const pageLevel = await setShapeGeometry(file, { partPath, shapeId: 10 }, { leftPx: 40, topPx: 40, widthPx: 100, heightPx: 100 });
+    if (!pageLevel.ok) throw new Error(pageLevel.reason);
+    expect(pageLevel.op.afterXml).toContain("<a:off x=\"381000\" y=\"381000\"/>");
+    expect((await file.partText(partPath))!).toBe(original); // 两条提案阶段都不落地
+  });
+});

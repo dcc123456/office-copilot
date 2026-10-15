@@ -18,14 +18,22 @@ import { createColorInheritance, type ColorInheritance } from "./theme.js";
 import { createTextStyleInheritance, readShapeTextStyles, type InheritedSizePt, type SizePtSource, type TextStyleInheritance } from "./text-styles.js";
 import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
-/** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
+/** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>` / `<p:cxnSp>`）的只读快照。 */
 export interface SlideShape {
   /** `<p:cNvPr @id>`，版式内寻址用的形状号。 */
   shapeId: number;
   /** `<p:cNvPr @name>`，PowerPoint 侧边栏显示的名字。 */
   name: string;
-  /** 形状大类：形状 / 图片 / 图形框（表格、图表走这个） / 组合。 */
-  kind: "shape" | "picture" | "graphicFrame" | "group";
+  /** 形状大类：形状 / 图片 / 图形框（表格、图表走这个） / 组合 / 连接线（`<p:cxnSp>`）。 */
+  kind: "shape" | "picture" | "graphicFrame" | "group" | "connector";
+  /**
+   * 这个形状在哪个组合里（父组 `<p:cNvPr @id>`）；顶层形状为 undefined。
+   *
+   * 为什么要单独报出来：组里的形状，几何写在**组的子坐标系**里（`chOff`/`chExt` 那一套映射），
+   * 这一档不做坐标映射，所以它的 `boxPx`/`effectiveBoxPx` 一律为空、几何那一条 op 整条拒绝——
+   * 宁可不给数也不给错数（与 D3 同一条线），而文字、字体颜色、删形状与组内换叠放次序都不受影响，照样能按 `shapeId` 寻址。
+   */
+  groupShapeId?: number;
   /** 是不是占位符（`<p:nvPr>` 里有 `<p:ph>`）。 */
   isPlaceholder: boolean;
   /** 占位符类型（`<p:ph @type>`）或索引（`@idx`）；非占位符时 undefined。 */
@@ -146,6 +154,7 @@ const SHAPE_TAGS: Record<string, SlideShape["kind"]> = {
   "p:pic": "picture",
   "p:graphicFrame": "graphicFrame",
   "p:grpSp": "group",
+  "p:cxnSp": "connector",
 };
 
 /**
@@ -229,11 +238,21 @@ async function readSlideShapes(
   const spTree = cSld ? firstChild(cSld, "p:spTree") : undefined;
   if (!spTree) return { shapes: [], readFailure: "no-sp-tree" };
   const shapes: SlideShape[] = [];
-  for (const el of children(spTree)) {
-    const kind = SHAPE_TAGS[el.name];
-    if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
-    shapes.push(await readShape(el, kind, partPath, inheritance, colors, texts));
-  }
+  /**
+   * 逐层收形状：`<p:grpSp>` 自己进清单，随后把它内部的形状也收进来（标上 `groupShapeId`）。
+   *
+   * 为什么要往里走：一份真文件把两个文本框组合起来后，只扫顶层就等于**那两格文字在页面上不存在**——
+   * 面板列不出、AI 画像里看不见、按 shapeId 也提不出改动（实测见 spec 阶段 2 那条「成组与连接线」）。
+   */
+  const walk = async (container: Element, withinGroup?: number): Promise<void> => {
+    for (const el of children(container)) {
+      const kind = SHAPE_TAGS[el.name];
+      if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
+      shapes.push(await readShape(el, kind, partPath, inheritance, colors, texts, withinGroup));
+      if (kind === "group") await walk(el, shapeIdOf(el));
+    }
+  };
+  await walk(spTree);
   return { shapes };
 }
 
@@ -318,8 +337,9 @@ async function readShape(
   inheritance: GeometryInheritance,
   colors: ColorInheritance,
   texts: TextStyleInheritance,
+  groupShapeId?: number,
 ): Promise<SlideShape> {
-  const nvPr = firstChild(el, "p:nvSpPr") ?? firstChild(el, "p:nvPicPr") ?? firstChild(el, "p:nvGraphicFramePr") ?? firstChild(el, "p:nvGrpSpPr");
+  const nvPr = shapeNvPrOf(el);
   const cNvPr = nvPr ? firstChild(nvPr, "p:cNvPr") : undefined;
   const phHost = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
   const ph = phHost ? firstChild(phHost, "p:ph") : undefined;
@@ -336,9 +356,10 @@ async function readShape(
   const shapeTextStyles = readShapeTextStyles(el);
   const inheritedSizeByParagraph = await Promise.all(paragraphs.map((p) => texts.resolve(slidePartPath, shapeTextStyles, paragraphSizeInput(p))));
   return {
-    shapeId: Number(cNvPr?.attributes["id"] ?? 0),
+    shapeId: shapeIdOf(el) ?? 0,
     name: String(cNvPr?.attributes["name"] ?? ""),
     kind,
+    groupShapeId,
     isPlaceholder: !!ph,
     placeholderRef: ph ? String(ph.attributes["type"] ?? ph.attributes["idx"] ?? "") : undefined,
     hasOwnGeometry: !!spPr && !!firstChild(spPr, "a:xfrm"),
@@ -352,10 +373,40 @@ async function readShape(
         return Promise.all(runs.map(async (run) => withEffectiveSize(await readRunFormat(run, colors, slidePartPath), inherited)));
       }),
     ),
-    boxPx: completeBox(ownAxes),
-    effectiveBoxPx: effective.box,
-    boxPxSources: effective.sources,
+    // 组里的形状：它的 `<a:xfrm>` 是组的子坐标系里的数（要经 chOff/chExt 与 ext 的比例映射回页面），
+    // 这一档不做那个映射，所以三个几何字段一律留空——给一个错的位置比不给更坏（与 D3 同一条线）。
+    boxPx: groupShapeId === undefined ? completeBox(ownAxes) : undefined,
+    effectiveBoxPx: groupShapeId === undefined ? effective.box : {},
+    boxPxSources: groupShapeId === undefined ? effective.sources : {},
   };
+}
+
+/**
+ * 形状自己那节非可视属性（`<p:nvSpPr>` 一类）——五种形状宿主的名字不一样，只有这一处把它们并成一条链。
+ *
+ * @param el 形状根元素（`p:sp`/`p:pic`/`p:graphicFrame`/`p:grpSp`/`p:cxnSp`）。
+ * @returns 该宿主的 `p:nv*Pr` 元素；一个都没有时 undefined（读成"没有 id/名字"，不抛错）。
+ */
+function shapeNvPrOf(el: Element): Element | undefined {
+  return (
+    firstChild(el, "p:nvSpPr") ??
+    firstChild(el, "p:nvPicPr") ??
+    firstChild(el, "p:nvGraphicFramePr") ??
+    firstChild(el, "p:nvCxnSpPr") ??
+    firstChild(el, "p:nvGrpSpPr")
+  );
+}
+
+/**
+ * 形状元素自己的 `<p:cNvPr @id>`。
+ *
+ * @param el 形状根元素。
+ * @returns 数字形状号；没有 `cNvPr`、或 id 不是数字时 undefined。
+ */
+export function shapeIdOf(el: Element): number | undefined {
+  const nvPr = shapeNvPrOf(el);
+  const raw = nvPr ? firstChild(nvPr, "p:cNvPr")?.attributes["id"] : undefined;
+  return raw !== undefined && /^\d+$/.test(raw) ? Number(raw) : undefined;
 }
 
 /**
