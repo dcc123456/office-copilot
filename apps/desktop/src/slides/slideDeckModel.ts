@@ -4,7 +4,7 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import type { BoxAxisSource, PptxEditRequest, PresentationModel, RunFontFormat, RunFormat, ShapeBoxPx, ShapeGeometryPatch, SizePtSource, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+import { notesFlattenNote, type BoxAxisSource, type PptxEditRequest, type PresentationModel, type RunFontFormat, type RunFormat, type ShapeBoxPx, type ShapeGeometryPatch, type SizePtSource, type Slide, type SlideLayerDirection, type SlideNotes, type SlideShape } from "@office-copilot/pptx-io";
 
 /**
  * 形状几何的四个字段，按视图显示的顺序（左、上、宽、高）。
@@ -241,4 +241,35 @@ function changedBoxFields(box: ShapeGeometryPatch, current: ShapeBoxPx): ShapeGe
   if (box.widthPx !== undefined && box.widthPx !== current.widthPx) patch.widthPx = box.widthPx;
   if (box.heightPx !== undefined && box.heightPx !== current.heightPx) patch.heightPx = box.heightPx;
   return patch;
+}
+
+/**
+ * 那一页的备注能不能存，不能存时说为什么。
+ *
+ * 备注住在**另一个部件**里（`ppt/notesSlides/notesSlideN.xml`），落地是整篇换掉那一格，所以这里按三段判：
+ * ① 这一页没有备注部件——新建 `notesSlide` 那一档还没做（要 §2.10 三处登记），不许凭空造一份；
+ * ② 输入框与现场逐字一样——没有要保存的东西，按钮就该是灰的；
+ * ③ 现有备注带多截格式——整篇覆盖会拍平那些格式（§2.3），这条判定与引擎共用 `notesFlattenNote` 那一份。
+ *
+ * @param slide 该页的读模型快照。
+ * @param draftText 输入框里的整段备注，一行一段（`\n` 分段，与 `paragraphTexts` 一一对应）。
+ * @returns 一句中文理由；能存时返回 null。
+ */
+export function notesSaveBlock(slide: Slide, draftText: string): string | null {
+  if (!slide.notes) return "这一页没有备注页（新建备注页这一档还没做，只能改已有的备注）。";
+  if (draftText === slide.notes.paragraphTexts.join("\n")) return "备注没有改动。";
+  return notesFlattenNote(slide.notes.paragraphRunCounts, slide.notes.styledRunCount);
+}
+
+/**
+ * 把输入框那句备注翻成主进程认的那条改动。
+ *
+ * 只在 {@link notesSaveBlock} 返回 null 时调用：备注部件路径直接用地读模型给的那份，视图不算路径也不换单位（§2.1）。
+ *
+ * @param notes 该页的备注快照（`notesSaveBlock` 已经确认这一页有备注部件）。
+ * @param draftText 输入框里的整段备注，一行一段；空行就是空串那一段。
+ * @returns 一条 `set_notes` 请求，确认后原样送 `ppt:edit` 即可落地并拿到逆操作。
+ */
+export function notesRequestOf(notes: SlideNotes, draftText: string): PptxEditRequest {
+  return { kind: "set_notes", target: { notesPartPath: notes.partPath }, paragraphTexts: draftText.split("\n") };
 }

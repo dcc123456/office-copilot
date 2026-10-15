@@ -5,8 +5,8 @@
  * 所以一条都不能靠"看起来对"——尤其那条"多条 run 的段落不许整段覆盖"（`AGENTS.md` §2.3）。
  */
 import { describe, expect, it } from "vitest";
-import type { PptxEditRequest, PresentationModel, RunFormat, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, pendingEdits, sizeFieldHint } from "./slideDeckModel.js";
+import type { PptxEditRequest, PresentationModel, RunFormat, Slide, SlideNotes, SlideShape } from "@office-copilot/pptx-io";
+import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, notesRequestOf, notesSaveBlock, pendingEdits, sizeFieldHint } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -279,5 +279,43 @@ describe("sizeFieldHint：字号框说的是「实际画多大」，写侧仍只
   it("继承值只进说明、不进输入框：草稿没敲字号时一条 op 都不交出", () => {
     const deck = deckOf([shapeOf(2, [["标题", 1, { effectiveSizePt: 40, effectiveSizeSource: "layout" }]])]);
     expect(pendingEdits(deck, { [draftKeyOf(PART, 2, 0)]: { sizePt: undefined } })).toEqual([]);
+  });
+});
+
+/** 一页只有备注这一件事的夹具：`notes` 传 null 表示这一页没有备注部件。 */
+function slideWithNotes(notes: SlideNotes | null): Slide {
+  return { partPath: PART, order: 0, slideId: 256, shapes: [], ...(notes ? { notes } : {}) };
+}
+
+describe("notesSaveBlock / notesRequestOf：备注那一格的落地范围", () => {
+  const plain: SlideNotes = {
+    partPath: "ppt/notesSlides/notesSlide1.xml",
+    paragraphTexts: ["旧备注一句", "旧备注二句"],
+    paragraphRunCounts: [1, 1],
+    styledRunCount: 0,
+  };
+
+  it("这一页没有备注部件时不给存，并说清新建那一档还没做", () => {
+    expect(notesSaveBlock(slideWithNotes(null), "随便写点")).toContain("没有备注页");
+  });
+
+  it("输入框与现场逐字一样时不给存（磁盘上就是一行一段，join 与 split 是同一份对应关系）", () => {
+    const slide = slideWithNotes(plain);
+    expect(notesSaveBlock(slide, plain.paragraphTexts.join("\n"))).toBe("备注没有改动。");
+  });
+
+  it("现有备注带多截格式时不给存，理由是会被拍平（§2.3，判定与引擎共用那一份）", () => {
+    const styled = slideWithNotes({ ...plain, paragraphRunCounts: [1, 2], styledRunCount: 1 });
+    expect(notesSaveBlock(styled, "换成一句")).toContain("压平");
+  });
+
+  it("同一种格式的备注改过就给存：坐标是现场那份备注部件路径，一行一段", () => {
+    const slide = slideWithNotes(plain);
+    expect(notesSaveBlock(slide, "新备注一句\n\n新备注三句")).toBeNull();
+    expect(notesRequestOf(plain, "新备注一句\n\n新备注三句")).toEqual({
+      kind: "set_notes",
+      target: { notesPartPath: "ppt/notesSlides/notesSlide1.xml" },
+      paragraphTexts: ["新备注一句", "", "新备注三句"],
+    });
   });
 });

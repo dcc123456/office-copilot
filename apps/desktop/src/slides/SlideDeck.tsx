@@ -1,6 +1,6 @@
 /**
  * 幻灯片视图（`docs/office-parity-spec.md` 阶段 3）：按页列出形状，改文字、字号、颜色、形状的位置尺寸与叠放次序，
- * 并在这一页加一个文本框、删掉一个形状。
+ * 在这一页加一个文本框、删掉一个形状，并把这一页**已有**的演讲者备注整篇换掉。
  *
  * 这里只做装配：草稿哪些能落地由 `slideDeckModel.ts` 说一不二，段落里有几条 run、形状有没有自己的
  * `<a:xfrm>` 都是 `@office-copilot/pptx-io` 读模型给的事实，改动一律收成 `PptxEditRequest` 交给主进程现做 op
@@ -9,7 +9,7 @@
  * 单位一律 CSS pt / px（读侧已按 `pptx-io/units.ts` 换好），视图里不再乘 100 或 9525（§2.1）。
  */
 import { useCallback, useMemo, useState } from "react";
-import type { PptxEditRequest, PresentationModel, ShapeBoxPx, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+import type { PptxEditRequest, PresentationModel, ShapeBoxPx, Slide, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
 import { describeSlideReadFailure } from "@office-copilot/shared";
 import type { PptxEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
@@ -20,6 +20,8 @@ import {
   inheritedBoxNote,
   LAYER_DIRECTION_LABEL,
   layerEdgeNote,
+  notesRequestOf,
+  notesSaveBlock,
   pendingEdits,
   SHAPE_BOX_FIELD_LABEL,
   SHAPE_BOX_FIELDS,
@@ -123,6 +125,9 @@ const NEW_TEXT_BOX_TEXT = "新文本框";
 export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProps) {
   /** 未保存的草稿：run 级字段键见 `draftKeyOf`，几何键见 `boxDraftKeyOf`。 */
   const [drafts, setDrafts] = useState<Record<string, SlideDraft>>({});
+  /** 未保存的备注草稿：键是该页的部件路径，值是输入框整句（一行一段）。它不进顶栏那个「几处待保存」的计数，
+   *  因为备注落在**另一个部件**里、也不是某个字段的绝对值，与叠放/增删那三条一样点一次当场落盘。 */
+  const [notesDrafts, setNotesDrafts] = useState<Record<string, string>>({});
   const [isBusy, setIsBusy] = useState(false);
 
   /** 把一处 run 级草稿字段并进去（同一定位键上文字/字号/颜色各存各的，互不覆盖）。 */
@@ -267,6 +272,36 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
     [commitNow],
   );
 
+  /**
+   * 把某一页的演讲者备注整篇换成输入框里的内容，点一次当场落盘。
+   *
+   * 能不能存由 `notesSaveBlock` 说一不二（没有备注部件 / 与现场一样 / 会拍平那三种都不给点），
+   * 落地走 `commitNow` 那一个口，所以存前审计、modlog、撤销前像全都复用现成那条通道（§3.4）。
+   * 成功后把这一页的备注草稿丢掉：回包里带的是主进程重读磁盘的模型，输入框该跟着新现场走。
+   *
+   * @param slide 那一页的读模型快照。
+   */
+  const saveNotes = useCallback(
+    async (slide: Slide) => {
+      if (!slide.notes) return;
+      const text = notesDrafts[slide.partPath] ?? slide.notes.paragraphTexts.join("\n");
+      const done = await commitNow(
+        notesRequestOf(slide.notes, text),
+        `改了第 ${slide.order + 1} 页的演讲者备注`,
+        "这份演示文稿已经不在了，备注没有改动。",
+        "已保存那一页的备注，要回退点「撤销上一次保存」",
+      );
+      if (done) {
+        setNotesDrafts((current) => {
+          const next = { ...current };
+          delete next[slide.partPath];
+          return next;
+        });
+      }
+    },
+    [commitNow, notesDrafts],
+  );
+
   return (
     <div className="slide-deck">
       <div className="slide-deck-bar">
@@ -403,9 +438,75 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                 </div>
               );
             })}
+            <SlideNotesField
+              slide={slide}
+              isBusy={isBusy}
+              draft={notesDrafts[slide.partPath]}
+              onPatch={(partPath, text) => setNotesDrafts((current) => ({ ...current, [partPath]: text }))}
+              onSave={saveNotes}
+            />
           </section>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 一页的演讲者备注那一格：输入框 + 「保存备注」。
+ *
+ * 三种现场各有各的说法（判据在 `notesSaveBlock`，视图不自己数段数）：有备注页就给输入框，
+ * 没备注页只给一句"这一档做不了"，现有备注带多截格式时把理由**明写在框下面**而不是只藏在 title 里——
+ * 那种页用户能看见旧备注却不能改，不写清楚像坏了。
+ *
+ * @param slide 那一页的读模型快照。
+ * @param isBusy 有落地在跑时全线禁用，避免连点排出两批。
+ * @param draft 该页还没落盘的输入；undefined 表示没动过，输入框显示磁盘上那份。
+ * @param onPatch 输入框改了字（第一参是该页部件路径）。
+ * @param onSave 点「保存备注」：整篇换掉那一格，当场落盘并拿到逆操作。
+ */
+function SlideNotesField({
+  slide,
+  isBusy,
+  draft,
+  onPatch,
+  onSave,
+}: {
+  slide: Slide;
+  isBusy: boolean;
+  draft?: string;
+  onPatch: (partPath: string, text: string) => void;
+  onSave: (slide: Slide) => Promise<void>;
+}) {
+  const text = draft ?? slide.notes?.paragraphTexts.join("\n") ?? "";
+  const block = notesSaveBlock(slide, text);
+  return (
+    <div className="slide-notes">
+      <div className="slide-notes-head">
+        <span className="slide-notes-title">演讲者备注</span>
+        <button
+          type="button"
+          className="slide-notes-save"
+          onClick={() => void onSave(slide)}
+          disabled={isBusy || block !== null}
+          title={block ?? "整篇换掉这一页的备注，点完当场落盘，可点「撤销上一次保存」回退"}
+        >
+          保存备注
+        </button>
+      </div>
+      {slide.notes ? (
+        <textarea
+          className="slide-notes-input"
+          rows={3}
+          value={text}
+          spellCheck={false}
+          disabled={isBusy}
+          onChange={(event) => onPatch(slide.partPath, event.target.value)}
+        />
+      ) : (
+        <p className="slide-notes-note">{block}</p>
+      )}
+      {slide.notes && draft !== undefined && block ? <p className="slide-notes-note">{block}</p> : null}
     </div>
   );
 }
