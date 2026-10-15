@@ -564,7 +564,7 @@ const SHEET_MODE_HINTS: Record<AiMode, string> = {
  * 幻灯片模式下三种模式各说一句人话。
  *
  * 与表格那条的差别在"能回退到哪"：幻灯片落地是直接写文件，撤销凭据是这一次批次的前像，
- * modlog 还没接（spec 阶段 4 的「modlog 落盘」仍缺），所以这里不许说"记录在修改历史里"。
+ * modlog 逐条查得到（`App.commitSlideEdits` 落一条「幻灯片改动」），但回退只在幻灯片面板整批撤。
  */
 const SLIDE_MODE_HINTS: Record<AiMode, string> = {
   chat: "聊天模式：AI 只回答与给建议，不会改动幻灯片。",
@@ -608,7 +608,7 @@ const TOOL_CARD_COPY: Record<
     checking: "正在核对文稿…",
     confirm: "应用到幻灯片",
     landed: "已写入文稿",
-    historyEntry: false,
+    historyEntry: true,
   },
   pdf: {
     label: "AI PDF 提案",
