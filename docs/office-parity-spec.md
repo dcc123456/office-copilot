@@ -180,6 +180,22 @@ Type 0 + `Identity-H` 时"要显示的串是成对字节表示的 CID"，所以*
 真 12 页文件实测：**前 163 205 字节逐字不变 + 追加 20 160 字节**，`/Prev 162756`，24 个流被重写；
 MuPDF、Apple PDFKit（`multI=12 Multi=0`）、QuickLook 三方渲染一致。对照：pdf-lib 的**全量** `save()` 会把 163 205 字节重写成 790 601 字节——那就是"改一个字动整份文件"，不可接受。
 
+**W1 落地后的两条实测补充（2026-10-15，`packages/pdf-io` 13 条 + 两份真文件）**：
+
+1. **`/FlateDecode` 是 zlib 框，不是 raw deflate**（`ISO 32000-1 7.4.4` + 本机实测）。第一版按 raw deflate 解，
+   两份真实文件都读出 **0 条 run**，而未压缩夹具那 11 条测试照样全绿——只有压缩夹具能抓住这种"对真实文件全瞎"的缺陷，
+   所以 `flateWinAnsiFixturePdf()`（literal + hex 两条串都在压缩流里）已固化为回归网。
+2. **真实中文产物是一条 run 一个字**：WPS 那份简历 6 页 5196 条 run，**全部**长度为 1（每字形一次 `Tj`，为了字距调整），
+   没有一条 ≥3 字。所以 W1 那档"整条同长度替换"在真实中文文件上只能**重排同一 `Tj` 内的几个字形**
+   （`tmp/ps-cols-OLD.pdf` 实测：把"段：这是"改成"是这：段"，前缀 33 706 字节逐字不变 + delta 1 657 字节，
+   Apple PDFKit 读回新文字、QuickLook 出的 PNG 肉眼核对只有那四个字变了、第二栏一字未动）。
+   → **W2 的前置不是字体子集化，而是把逐字形的 run 拼成逻辑文本行**（按 `Tm`/`Td` 与字体缩放判行），
+   否则任何"改一句话"的需求都会在 W1 这一层就退化成"改一个字"。
+
+**A10 那条既有缺陷今日未复现**：本次探针的两份真实文件字体名都是合规的 `AAAAAA+PingFangSC-Regular` /
+`DIXAAP+Arial-BoldMT`，当初那份 `-6087` 产物已不在 `tmp/`。A10 保持 `[ ]`，但下次动 `print:pdf` 通路时要
+现跑一遍再判，不要沿用旧结论。
+
 **分档（都要做，只是排队）**：
 - **W1 · 同框同字体同长度替换**：按 hex/字面量两种串形态定位，**必须递归进 Form XObject**（我们的表格里就在那儿），
   改完走增量更新。判据：前缀字节逐字不变、体积只增 delta、MuPDF + PDFKit + pdf.js 文本层三方读回新文字、QuickLook 出 PNG 肉眼核对。
@@ -468,10 +484,12 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
 
-### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[ ]`
+### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[~] 读模型（两种串形态 / Form XObject 递归 / CID+ToUnicode / 压缩流）+ W1 同长度替换 + 增量更新已落（两份真文件 + QuickLook 肉眼核对）；撤销与 modlog 接线、`print:pdf` 旁路模型、AI 工具面、`oc pdf check`、逻辑行拼接仍缺`
 `packages/pdf-io` 读页/文本块/字体/内容流偏移，`print:pdf` 通路带旁路模型。
 **完成判定**：本仓自产的 PDF 改一处正文 → pdf.js 读回新文字、其他页字节不动、能撤销；对无 ToUnicode/扫描件/签名文件
 **给出中文拒绝理由而不是静默改坏**（逐条有单测）。
+**现状**：拒绝理由已是引擎错误码（`length-mismatch` / `char-outside-subset` / `run-not-found`，各有一条单测，
+失败时整批不产出字节，符合 §2.4），中文文案要等装配层；撤销那一半还没接。
 
 ### 阶段 8 · 收口：CLI、文档、规则落地 — `[~] oc ppt info / oc ppt check 与 README 的 PPT 事实已落；`oc pdf check`、AGENTS.md 更新仍缺`
 **完成判定**：`oc ppt check`/`oc pdf check` 可用；`README.md` 与 `AGENTS.md` 里四类格式的既有事实更新；
@@ -577,6 +595,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | `7e271ff` | 3（视图 + 打开分派） | `pnpm build` EXIT=0（含 `tsc --noEmit`，抓到一处联合类型窄化缺陷）；`pnpm test` EXIT=0，逐包：pptx-io 27 / opc 15 / desktop 462 / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1093 条 / 76 个文件**（`packages/shared` 仍无测试文件，已知假绿源） | `oc ppt info` 读磁盘：第一页是新标题、第二页原样；`oc ppt check` 退出码 0；`.bak` 生成；撤销后磁盘回原字。**Keynote 导出两页 PNG 肉眼看过**：第一页居中黑字「Keynote 要看到的第一页标题」+ 灰色「正文一行」，第二页「第二页标题」；`tmp/multi-run.pptx` 在视图里 0 个输入框（§2.3） | `[~]` 文字那条闭环，字号/颜色/几何的入口仍缺 |
 | `fb5b4f9` | 3（字号 / 颜色 / 几何入口 + D4 换算单点） | `pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包：pptx-io **30** / opc 15 / desktop **466** / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1300 条**（`packages/shared` 仍无测试文件） | 真 app（`dist` + CDP）打开 python-pptx 现生成的两页 deck：继承几何的占位符**没有**几何输入框、三 run 段落 0 个输入框、文本框四数 `96/384/288/96` 逐 px 对上；改文字+字号 32+`#00cc00`+左 150+宽 300 → 「4 处待保存」→ 保存 toast「动了 1 张幻灯片」→ **python-pptx 独立读回** `150/192/300/96`px、`32.0pt`、`rgb=00CC00`、`bold=None`（没连带写粗体），第 1 页三 run「正文丙/粗/细 18pt」原样 → `oc ppt check` 退出码 0 → 撤销后 40 个部件**内容不同的 0 个**。**画面效果仍 BLOCKED**（Keynote 只给文字与位置的 PNG，字体渲染未比对） | `[x]` 四类改动（文字/字号/颜色/几何）在真 app 里闭环；画布拖拽与继承链解析归入下批 |
 | 本次（D3 几何继承链） | 4（`inherit.ts` + 读模型两字段 + 视图那句只读说明） | `pnpm build` EXIT=0（含 `tsc --noEmit`，抓到一处 `key` 窄化与三处夹具字面量缺字段）；`pnpm test` EXIT=0，逐包：pptx-io **74**（+16 条：逐轴读取 4 + 读模型的继承链 7 + 解析器的类型映射与容忍 3 + 落盘面 2）/ opc 15 / desktop **503**（+5 条 `inheritedBoxNote`）/ sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1186 条**（`packages/shared` 仍无测试文件） | 新夹具三层链上 **python-pptx 独立读回三格逐轴与我们 `effectiveBoxPx×9525` 全等**；真实 38 部件 deck 同样全等（仅 `top` 差一个亚像素，是 D4 的显示取整）；真 app（`dist`+CDP）标题行念出"继承自母版：左 96 · 上 48 · 宽 768 · 高 120 px"且**零输入框**，改文字保存后磁盘仍是 `<p:spPr/>`、模型重读后说明不变。**画面位置 BLOCKED**：Keynote 的 AppleScript 拿不到对象 `position`/`size`（`-1700`/`-1728`） | `[x]` D3 几何那一档落到读模型与视图；字号/颜色两档与 notes 归入下批 |
+| 本次（pdf 线第一档：`packages/pdf-io` W1） | 7（读模型 + 同长度替换 + 增量更新） | `pnpm build` EXIT=0（`tsc` 抓到 `test-pdf.ts` 漏 `deflateSync` 导入——vitest 不做类型检查，所以只有 build 能抓到）；`pnpm test` EXIT=0，逐包：**pdf-io 13（新包）** / pptx-io 74 / opc 15 / desktop 503 / sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1199 条**（`packages/shared` 仍无测试文件） | 两份真实文件读回：WPS 简历 6 页 **5196 条 run 全解出**、`printToPDF` 产物 1 页 1113 条（932 条有文字，缺 ToUnicode 那 181 条如实给 `null` 而不是猜）。改→存→读回：`ps-cols-OLD.edited.pdf` **前缀 33 706 字节逐字不变 + delta 1 657 字节**，Apple **PDFKit** 抽取到"第 1 是这：段"且第二栏文字一字未动，**QuickLook 出的 PNG 肉眼核对**只有那四个 CID 字形换位、无豆腐块；自造 Helvetica 两页文件同样只改第一页。**依赖只有 `@cantoo/pdf-lib`（MIT），无原生模块** | `[~]` W1 那一档闭环（同长度、同框、同字体）；真实中文产物一条 run 一个字，"改一句话"要先拼逻辑行 → 归 W2 前置 |
 
 ---
 
