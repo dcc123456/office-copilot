@@ -301,7 +301,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
               </button>
             </h3>
             {slide.readFailure ? (
-              <p className="slide-para-locked">这一页读不动：{describeSlideReadFailure(slide.readFailure)}</p>
+              <p className="slide-para-locked">{describeSlideReadFailure(slide.readFailure)}</p>
             ) : slide.shapes.length === 0 ? (
               <p className="slide-para-locked">这张幻灯片没有形状。</p>
             ) : null}
