@@ -1,5 +1,6 @@
 import type { ResolvedChart, SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
 import type { PptxEditPayload, PptxRevertPayload, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
+import type { PdfAppliedEdit, PdfEditFailure, PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
 
 /** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
 export interface SheetOpenResult {
@@ -135,6 +136,36 @@ export interface PptxEditOutcome {
   presentation?: PresentationModel;
 }
 
+/**
+ * 打开 `.pdf` 的结果：跨界只有页号 + 定位键 + 解出的文字，内容流原文留在主进程。
+ */
+export interface PdfOpenOutcome {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+  document?: PdfReadModel;
+}
+
+/**
+ * PDF 保存 / 撤销的结果。
+ *
+ * `applied` 是这次真正落地的改动（含改前的文字）：渲染层拿不到内容流原文，撤销要把它们原样送回 `pdf:revert`（§2.5）。
+ * `failures` 是引擎的结构化理由，整批不写盘；文案在这里组装，不进引擎（§5.7）。
+ * `document` 是主进程写盘后重读的那份，视图直接用它刷新，不必再发一次读请求。
+ */
+export interface PdfEditOutcome {
+  ok: boolean;
+  canceled?: boolean;
+  message?: string;
+  path?: string;
+  applied?: PdfAppliedEdit[];
+  /** 追加的那段增量的字节数；原文件前缀一字未动，这是"没有重排"的那项证据。 */
+  deltaBytes?: number;
+  failures?: PdfEditFailure[];
+  document?: PdfReadModel;
+}
+
 /** 打开对话框的选择结果：只有路径，读 docx 还是 xlsx 由渲染层按扩展名分派。 */
 export interface OpenPickResult {
   ok: boolean;
@@ -151,6 +182,10 @@ interface OfficeCopilotAPI {
   editPptx: (payload: PptxEditPayload) => Promise<PptxEditOutcome>;
   revertPptx: (payload: PptxRevertPayload) => Promise<PptxEditOutcome>;
   savePptxAs: (payload: PptxEditPayload) => Promise<PptxEditOutcome>;
+  readPdf: (filePath: string) => Promise<PdfOpenOutcome>;
+  editPdf: (payload: { path: string; edits: PdfTextEdit[] }) => Promise<PdfEditOutcome>;
+  revertPdf: (payload: { path: string; applied: PdfAppliedEdit[] }) => Promise<PdfEditOutcome>;
+  savePdfAs: (payload: { path: string; edits: PdfTextEdit[] }) => Promise<PdfEditOutcome>;
   saveSheet: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveSheetAs: (payload: SheetSaveRequest) => Promise<SheetSaveResult>;
   saveFile: (payload: {

@@ -1,0 +1,127 @@
+/* PDF 视图（spec 阶段 7）。
+   页数、字节预算、编码规则都不在这份样式表里：那些是文档内容与 pdf-io 的事实，
+   CSS 只管颜色、边框、滚动与对齐（AGENTS.md §5.4）。变量一律取 tokens.css / themes.css。 */
+
+.pdf-view {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.pdf-view-bar,
+.pdf-view-foot {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-muted);
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: no-drag;
+}
+
+.pdf-view-foot {
+  border-bottom: none;
+  border-top: 1px solid var(--border);
+}
+
+.pdf-view-bar button,
+.pdf-view-foot button {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+}
+
+.pdf-view-bar button:disabled,
+.pdf-view-foot button:disabled {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.pdf-view-foot .pdf-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.pdf-view-page {
+  font-variant-numeric: tabular-nums;
+}
+
+.pdf-view-count {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-muted);
+}
+
+.pdf-runs {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-2);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pdf-run {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+}
+
+.pdf-run.changed {
+  border-color: var(--accent-border);
+  background: var(--accent-tint);
+}
+
+.pdf-run-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.pdf-run-tag {
+  padding: 0 6px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-muted);
+  color: var(--text-muted);
+}
+
+.pdf-run-budget {
+  margin-left: auto;
+}
+
+.pdf-run-input {
+  width: 100%;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.pdf-run-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}

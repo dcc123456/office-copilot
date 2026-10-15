@@ -35,8 +35,8 @@ const recent = makeRecentFiles();
 // ---- 从 Finder「打开方式」/ 双击 / 拖到 Dock 打开文档 ----
 // macOS 走 open-file 事件，Windows/Linux 把路径塞在 argv 里。
 // 冷启动时事件可能早于 whenReady，所以先暂存，等窗口就绪后由渲染进程来取。
-// 渲染进程按扩展名分派：docx 走 fileHandlers，xlsx 走 sheetHandlers，pptx 走 pptxHandlers。
-const OPENABLE_EXT = /\.(docx|xlsx|pptx)$/i;
+// 渲染进程按扩展名分派：docx 走 fileHandlers，xlsx 走 sheetHandlers，pptx 走 pptxHandlers，pdf 走 pdfHandlers。
+const OPENABLE_EXT = /\.(docx|xlsx|pptx|pdf)$/i;
 let pendingOpenPath: string | null = null;
 
 function openableFromArgv(argv: string[]): string | null {

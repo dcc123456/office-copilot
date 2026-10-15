@@ -51,9 +51,12 @@ import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
 import type { PptxEditRequest, PresentationModel } from "@office-copilot/pptx-io";
+import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
 import { SlideDeck } from "./slides/SlideDeck.js";
+import { PdfView } from "./pdf/PdfView.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
 import { pickLatestSlideEdit, slideEditRecordOf } from "./slides/slideHistory.js";
+import { pdfEditRecordOf, pickLatestPdfEdit } from "./pdf/pdfHistory.js";
 import { DialogHost, confirmDialog } from "./components/ui/Dialog.js";
 import { ToastHost, toast } from "./components/ui/Toast.js";
 import { usePanelResize } from "./hooks/usePanelResize.js";
@@ -80,8 +83,8 @@ type PMDoc = Record<string, unknown>;
 /**
  * 编辑区当前是哪一个格式（`docs/office-parity-spec.md` D7）。
  *
- * `"pdf"` 还没有分支会赋到它，列在这里是 D7 定下的扩展点：pdf 线进来时加一个成员与一条分派，
- * 而不是再叠一层 `!isSheet && !isDeck && !isPdf` 这种布尔组合。
+ * 加一个新格式就加一个成员与一条分派（pdf 那条即此先例），而不是再叠一层
+ * `!isSheet && !isDeck && !isPdf` 这种布尔组合——文档专属的面板一律按 `mode === "doc"` 出现。
  */
 export type EditorMode = "doc" | "sheet" | "slide" | "pdf";
 
@@ -150,6 +153,14 @@ export function App() {
    * 所以关掉重开这份文件也还能撤销，按钮可用态同样是从历史里问出来的。
    */
   const [hasSlideUndo, setHasSlideUndo] = useState(false);
+  /**
+   * 打开的 `.pdf` 读模型；null 表示当前不是 pdf 那条路。
+   *
+   * 与幻灯片同口径：内容流原文只在主进程，这里只有页号 + 定位键 + 解出的文字（spec 阶段 7）。
+   */
+  const [pdfDoc, setPdfDoc] = useState<PdfReadModel | null>(null);
+  /** pdf 面板「撤销上一次保存」的可用态：这份文件的历史里还有没撤销的 pdf 批次才给点（凭据在 modlog，不在内存）。 */
+  const [hasPdfUndo, setHasPdfUndo] = useState(false);
   const [showFind, setShowFind] = useState(false);
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [stylePaneOpen, setStylePaneOpen] = useState(false);
@@ -207,6 +218,18 @@ export function App() {
     setHasSlideUndo(Boolean(pickLatestSlideEdit(await window.officeCopilot.listModifications(docKey))));
   }, []);
 
+  /**
+   * 重读修改历史，刷新 pdf 面板「撤销上一次保存」的可用态：还有没撤销的 pdf 批次才给点。
+   *
+   * 与上面那条同一个套路（`AGENTS.md` §3.1 按能力复用）：可用态从 modlog 问出来，不在渲染层另攒一份内存批次，
+   * 所以关掉重开这份 `.pdf` 也还能接着撤销（spec 阶段 7 的 modlog 落盘）。
+   *
+   * @param docKey 当前文档键（打开的 `.pdf` 路径）。
+   */
+  const refreshPdfUndo = useCallback(async (docKey: string) => {
+    setHasPdfUndo(Boolean(pickLatestPdfEdit(await window.officeCopilot.listModifications(docKey))));
+  }, []);
+
   // 打开/另存/新建都会换 docKey，历史记录跟着文档走，所以按 docKey 重查一次。
   useEffect(() => {
     void refreshCanRevert(filePath ?? "未命名文档");
@@ -218,6 +241,12 @@ export function App() {
     if (!deck) return;
     void refreshSlideUndo(filePath ?? "未命名文档");
   }, [filePath, refreshSlideUndo]);
+
+  // pdf 那条同样只在换文件时重查：`pdfDoc` 不进依赖数组（每次落地都会换它），理由与幻灯片那条一样。
+  useEffect(() => {
+    if (!pdfDoc) return;
+    void refreshPdfUndo(filePath ?? "未命名文档");
+  }, [filePath, refreshPdfUndo]);
 
   useEffect(() => {
     const open = () => setSettingsOpen(true);
@@ -302,6 +331,7 @@ export function App() {
     setSheetWorkbook(null);
     setPendingCharts([]);
     setDeck(null);
+    setPdfDoc(null);
   }, [editor, stopTracking]);
 
   /**
@@ -415,6 +445,23 @@ export function App() {
         if (!ok) return;
       }
       // 拖入 / 最近文件进来的路径也按扩展名分派，跟「打开」对话框一个口径。
+      if (/\.pdf$/i.test(p)) {
+        const opened = await window.officeCopilot.readPdf(p);
+        if (!opened.ok || !opened.document) {
+          if (opened.message) toast(opened.message, "error");
+          return;
+        }
+        stopTracking();
+        setSheetWorkbook(null);
+        setPendingCharts([]);
+        setDeck(null);
+        setPdfDoc(opened.document);
+        setFilePath(opened.path ?? p);
+        setDirty(false);
+        setStarted(true);
+        window.officeCopilot.addRecent(p);
+        return;
+      }
       if (/\.pptx$/i.test(p)) {
         const opened = await window.officeCopilot.readPptx(p);
         if (!opened.ok || !opened.presentation) {
@@ -425,6 +472,7 @@ export function App() {
         setSheetWorkbook(null);
         setPendingCharts([]);
         setDeck(opened.presentation);
+        setPdfDoc(null);
         setFilePath(opened.path ?? p);
         setDirty(false);
         setStarted(true);
@@ -438,6 +486,7 @@ export function App() {
           return;
         }
         setDeck(null);
+        setPdfDoc(null);
         openSheetPayload(sheet.workbook, sheet.path ?? p);
         return;
       }
@@ -450,6 +499,7 @@ export function App() {
       setSheetWorkbook(null);
       setPendingCharts([]);
       setDeck(null);
+      setPdfDoc(null);
       editor.commands.setContent(r.doc as never);
       setHeaderDoc((r.header as never) ?? null);
       setFooterDoc((r.footer as never) ?? null);
@@ -506,10 +556,10 @@ export function App() {
       dragDepthRef.current = 0;
       setDropActive(false);
       const file = Array.from(e.dataTransfer.files).find((f) =>
-        /\.(docx|json|xlsx|pptx)$/i.test(f.name),
+        /\.(docx|json|xlsx|pptx|pdf)$/i.test(f.name),
       );
       if (!file) {
-        toast("只能打开 .docx 文档、.xlsx 表格或 .pptx 演示文稿。", "error");
+        toast("只能打开 .docx 文档、.xlsx 表格、.pptx 演示文稿或 .pdf。", "error");
         return;
       }
       const p = window.officeCopilot.pathForFile(file);
@@ -631,10 +681,63 @@ export function App() {
     return reverted;
   }, [deck, filePath, refreshSlideUndo]);
 
+  /**
+   * PDF 改动的唯一落地口（spec 阶段 7）：把视图里的草稿批交给主进程，落地走增量更新。
+   *
+   * 主进程只把"原字节 + delta"写回，改不动的批次一个字都不动（§2.4），并把这批改动回带的
+   * `applied`（含旧文字）当作下一次撤销的凭据写进 modlog（§2.5）。视图不自己开第二条写盘通道（§3.2）。
+   *
+   * @param edits 要落地的一批改动，坐标取自当前读模型。
+   * @param summary 一句中文说明这次改了什么，随凭据一起进历史。
+   * @returns 主进程的回包（含刷新后的读模型与追加字节数）；当前没有打开的 PDF 时 null。
+   */
+  const commitPdfEdits = useCallback(
+    async (edits: PdfTextEdit[], summary: string) => {
+      if (!filePath || !pdfDoc || edits.length === 0) return null;
+      const saved = await window.officeCopilot.editPdf({ path: filePath, edits });
+      if (saved.ok && saved.document) {
+        setPdfDoc(saved.document);
+        setHasPdfUndo(true);
+        void window.officeCopilot
+          .appendModification({ docKey: filePath, record: pdfEditRecordOf(saved.applied ?? [], summary) })
+          .then((recorded) => {
+            // 历史没写进去不回滚用户已经落盘的改动，只说一声——与表格、幻灯片那条同口径。
+            if (!recorded.ok) toast(`改动已落盘，但历史记录保存失败：${recorded.message ?? "未知错误"}`, "error");
+          });
+      }
+      return saved;
+    },
+    [filePath, pdfDoc],
+  );
+
+  /**
+   * 撤销最近一次落地的 pdf 改动：从历史里取最新一条没撤销的 pdf 记录，把凭据送回主进程。
+   *
+   * 现场核对在引擎做：那条 run 后来又被改过就回 `text-drifted` 并整批不写，绝不拿旧文字覆盖用户后来的编辑（§2.5）。
+   *
+   * @returns 主进程的回包（含刷新后的读模型）；历史里没有可撤销的 pdf 批次时回 ok:false + 一句理由。
+   */
+  const revertPdfEdits = useCallback(async () => {
+    if (!filePath || !pdfDoc) return { ok: false, message: "当前没有打开的 PDF，没有可撤销的改动。" };
+    const record = pickLatestPdfEdit(await window.officeCopilot.listModifications(filePath));
+    if (!record) return { ok: false, message: "这份文件还没有可撤销的改动。" };
+    const reverted = await window.officeCopilot.revertPdf({ path: filePath, applied: record.applied });
+    if (!reverted.ok || !reverted.document) return reverted;
+    setPdfDoc(reverted.document);
+    await window.officeCopilot.patchModification({ docKey: filePath, id: record.id, patch: { undone: true, undoneAt: Date.now() } });
+    await refreshPdfUndo(filePath);
+    return reverted;
+  }, [filePath, pdfDoc, refreshPdfUndo]);
+
   const handleSave = useCallback(async () => {
     // 幻灯片那条路自己带「保存」：待保存的草稿在 SlideDeck 里，不走这两个全局入口（spec 阶段 3）。
     if (deck) {
       toast("幻灯片的改动请在幻灯片面板里点「保存」。");
+      return;
+    }
+    // pdf 同一条纪律：草稿在 PdfView 里攒，落地只认 commitPdfEdits 这一个口。
+    if (pdfDoc) {
+      toast("PDF 的改动请在 PDF 面板里点「保存」。");
       return;
     }
     if (sheetWorkbook) {
@@ -1239,9 +1342,9 @@ export function App() {
 
   if (!editor) return <div className="app">启动中…</div>;
 
-  // 表格、幻灯片与文档是三套视图：打开前两者时隐藏的都是文档专属的面板（大纲、样式、脚注、批注）。
-  // 判定收成一处模式（D7）：pdf 线进来时只多一个分支，不再往下叠 `!isSheet && !isDeck` 这种布尔组合。
-  const mode: EditorMode = deck !== null ? "slide" : sheetWorkbook !== null ? "sheet" : "doc";
+  // 文档、表格、幻灯片、PDF 是四套视图：打开后三者时隐藏的都是文档专属的面板（大纲、样式、脚注、批注）。
+  // 判定收成一处模式（D7）：新格式只多一个分支与一个 bridge，不再往下叠布尔组合。
+  const mode: EditorMode = pdfDoc !== null ? "pdf" : deck !== null ? "slide" : sheetWorkbook !== null ? "sheet" : "doc";
   // AI 面板两套都要：表格模式下代理只读这张表的载荷，写入仍然只有 commitSheetOps 这一个口（spec 决策 D6）。
   const activeSheet = sheetWorkbook?.sheets[sheetIndex] ?? null;
   const sheetBridge = activeSheet
@@ -1254,6 +1357,15 @@ export function App() {
         canRevert: hasSlideUndo,
         onCommit: commitSlideEdits,
         onRevert: revertSlideEdits,
+      }
+    : undefined;
+  // pdf 也只有一条落地口：手工草稿与以后的 AI 提案都交给 commitPdfEdits，撤销凭据同样只有一份。
+  const pdfBridge = pdfDoc
+    ? {
+        document: pdfDoc,
+        canRevert: hasPdfUndo,
+        onCommit: commitPdfEdits,
+        onRevert: revertPdfEdits,
       }
     : undefined;
 
@@ -1348,6 +1460,15 @@ export function App() {
               onRevert={slideBridge.onRevert}
             />
           ) : null}
+          {pdfBridge ? (
+            <PdfView
+              key={filePath ?? "pdf"}
+              document={pdfBridge.document}
+              canRevert={pdfBridge.canRevert}
+              onCommit={pdfBridge.onCommit}
+              onRevert={pdfBridge.onRevert}
+            />
+          ) : null}
           {/* 文档作用域的样式表：这份 .docx 的 styles.xml 合并结果，只命中编辑器里的段落。 */}
           {mode === "doc" && docStyleCss ? <style>{docStyleCss}</style> : null}
           {mode === "doc" && started ? (
@@ -1417,7 +1538,7 @@ export function App() {
             onOpenHistory={() => setHistoryOpen(true)}
             onChanged={() => {
               // 幻灯片那条落地就写盘了（与手工「保存」同一条通道），内存里没有待存的改动。
-              if (mode === "slide") return;
+              if (mode === "slide" || mode === "pdf") return;
               setDirty(true);
             }}
           />
@@ -1476,7 +1597,7 @@ export function App() {
         <div className="drop-overlay">
           <div className="drop-overlay-card">
             <FileDown size={28} />
-            松开以打开 .docx / .xlsx / .pptx
+            松开以打开 .docx / .xlsx / .pptx / .pdf
           </div>
         </div>
       )}
