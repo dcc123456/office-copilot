@@ -7,8 +7,8 @@
  * ③ 落地走增量更新：原文件的前缀字节一字不动，只追加 delta（§7.5.6）。
  */
 import { describe, expect, it } from "vitest";
-import { readPdfModel, applyPdfTextEdits, type PdfTextTarget } from "./pdf-file.js";
-import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
+import { readPdfModel, applyPdfTextEdits, revertPdfTextEdits, type PdfTextTarget } from "./pdf-file.js";
+import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, cidNoToUnicodeFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
 
 /** 按解出来的文字找定位键。 */
 function targetOfText(runs: Awaited<ReturnType<typeof readPdfModel>>["runs"], text: string): PdfTextTarget {
@@ -109,6 +109,18 @@ describe("applyPdfTextEdits：同长度替换 + 增量更新", () => {
     expect(result.failures[0]?.reason).toBe("length-mismatch");
   });
 
+  it("CID 字体没带 /ToUnicode 时读侧给 null、写侧整批拒绝，不许猜一个字上来", async () => {
+    const bytes = await cidNoToUnicodeFixturePdf();
+    const model = await readPdfModel(bytes);
+    const run = model.runs[0];
+    expect(run?.text).toBeNull();
+    if (!run?.streamRef) throw new Error("夹具的内容流该是间接对象");
+    const result = await applyPdfTextEdits(bytes, [{ target: { pageIndex: run.pageIndex, streamRef: run.streamRef, withinForm: run.withinForm, start: run.start }, text: "文中题标" }]);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.failures.map((failure) => failure.reason)).toEqual(["no-encoding"]);
+  });
+
   it("子集里没有这个字给 char-outside-subset，不许拿别的字顶上", async () => {
     const bytes = await cidIdentityHFixturePdf();
     const model = await readPdfModel(bytes);
@@ -136,5 +148,50 @@ describe("applyPdfTextEdits：同长度替换 + 增量更新", () => {
     const target = targetOfText(model.runs, "Quarterly Report 2026");
     const result = await applyPdfTextEdits(bytes, [{ target: { ...target, start: target.start + 1 }, text: "Quarterly Budget 2026" }]);
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("revertPdfTextEdits：按内容寻址撤销，不牵连后来的编辑（§2.5）", () => {
+  it("撤销把那条换回原文，撤销这一次同样是前缀逐字不变 + 只追加 delta", async () => {
+    const bytes = await simpleWinAnsiFixturePdf();
+    const model = await readPdfModel(bytes);
+    const edited = await applyPdfTextEdits(bytes, [{ target: targetOfText(model.runs, "Quarterly Report 2026"), text: "Quarterly Budget 2026" }]);
+    if (!edited.ok) throw new Error("该改成功的：" + JSON.stringify(edited.failures));
+    expect(edited.applied.map((entry) => [entry.fromText, entry.toText])).toEqual([["Quarterly Report 2026", "Quarterly Budget 2026"]]);
+
+    const reverted = await revertPdfTextEdits(edited.bytes, edited.applied);
+    if (!reverted.ok) throw new Error("该撤成功的：" + JSON.stringify(reverted.failures));
+    expect(Buffer.compare(Buffer.from(edited.bytes.subarray(0, edited.bytes.length)), Buffer.from(reverted.bytes.subarray(0, edited.bytes.length))) === 0).toBe(true);
+    expect(reverted.bytes.length).toBeGreaterThan(edited.bytes.length);
+    expect((await readPdfModel(reverted.bytes)).runs.map((run) => run.text)).toEqual(["Quarterly Report 2026", "Inner Form Text", "Appendix A stays put"]);
+  });
+
+  it("撤销只回那一条：别处后来的编辑一字不动", async () => {
+    const bytes = await simpleWinAnsiFixturePdf();
+    const model = await readPdfModel(bytes);
+    const first = await applyPdfTextEdits(bytes, [{ target: targetOfText(model.runs, "Quarterly Report 2026"), text: "Quarterly Budget 2026" }]);
+    if (!first.ok) throw new Error("该改成功的：" + JSON.stringify(first.failures));
+    const afterFirst = await readPdfModel(first.bytes);
+    const second = await applyPdfTextEdits(first.bytes, [{ target: targetOfText(afterFirst.runs, "Appendix A stays put"), text: "Appendix A stays hot" }]);
+    if (!second.ok) throw new Error("该改成功的：" + JSON.stringify(second.failures));
+
+    const reverted = await revertPdfTextEdits(second.bytes, first.applied);
+    if (!reverted.ok) throw new Error("该撤成功的：" + JSON.stringify(reverted.failures));
+    expect((await readPdfModel(reverted.bytes)).runs.map((run) => run.text)).toEqual(["Quarterly Report 2026", "Inner Form Text", "Appendix A stays hot"]);
+  });
+
+  it("那条又被后面的批次改过时给 text-drifted，整批不写而不是把新改动冲掉", async () => {
+    const bytes = await simpleWinAnsiFixturePdf();
+    const model = await readPdfModel(bytes);
+    const target = targetOfText(model.runs, "Quarterly Report 2026");
+    const first = await applyPdfTextEdits(bytes, [{ target, text: "Quarterly Budget 2026" }]);
+    if (!first.ok) throw new Error("该改成功的：" + JSON.stringify(first.failures));
+    const second = await applyPdfTextEdits(first.bytes, [{ target, text: "Quarterly Profit 2026" }]);
+    if (!second.ok) throw new Error("该改成功的：" + JSON.stringify(second.failures));
+
+    const reverted = await revertPdfTextEdits(second.bytes, first.applied);
+    expect(reverted.ok).toBe(false);
+    if (reverted.ok) return;
+    expect(reverted.failures.map((failure) => failure.reason)).toEqual(["text-drifted"]);
   });
 });

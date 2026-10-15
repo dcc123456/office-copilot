@@ -60,6 +60,27 @@ export async function simpleWinAnsiFixturePdf(): Promise<Uint8Array> {
  * @returns 完整的 `.pdf` 字节。
  */
 export async function cidIdentityHFixturePdf(): Promise<Uint8Array> {
+  return cidFixture(true);
+}
+
+/**
+ * 同一份 CID 夹具，但**没有 `/ToUnicode`**——这是 P11 实测的真实常态（2 个嵌入字体只有 1 个带）。
+ *
+ * 钉两件事：读侧这条 run 的文字必须是 `null`（不知道原文就不许猜一个字上来），
+ * 写侧对它的改写必须整批拒绝（§2.4），因为换回去的字节我们无法验证念作什么。
+ *
+ * @returns 完整的 `.pdf` 字节。
+ */
+export async function cidNoToUnicodeFixturePdf(): Promise<Uint8Array> {
+  return cidFixture(false);
+}
+
+/**
+ * CID/Identity-H 夹具的共用构造：`withToUnicode` 决定字体字典里挂不挂 `/ToUnicode` CMap。
+ *
+ * @param withToUnicode 是否登记那四条 `1→中`、`2→文`、`3→标`、`4→题`。
+ */
+async function cidFixture(withToUnicode: boolean): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const page = doc.addPage([595, 842]);
   const cmap = [
@@ -115,7 +136,7 @@ export async function cidIdentityHFixturePdf(): Promise<Uint8Array> {
       BaseFont: PDFName.of("SourceHanSansCN-Regular"),
       Encoding: PDFName.of("Identity-H"),
       DescendantFonts: [descendantRef],
-      ToUnicode: cmapRef,
+      ...(withToUnicode ? { ToUnicode: cmapRef } : {}),
     }) as PDFDict,
   );
   await addContent(doc, page.node, "BT /F2 16 Tf 60 760 Tm <0001000200030004> Tj ET\n", { F2: fontRef });

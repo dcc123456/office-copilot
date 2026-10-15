@@ -484,12 +484,14 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
 
-### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[~] 读模型（两种串形态 / Form XObject 递归 / CID+ToUnicode / 压缩流）+ W1 同长度替换 + 增量更新已落（两份真文件 + QuickLook 肉眼核对）；撤销与 modlog 接线、`print:pdf` 旁路模型、AI 工具面、`oc pdf check`、逻辑行拼接仍缺`
+### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[~] 读模型（两种串形态 / Form XObject 递归 / CID+ToUnicode / 压缩流）+ W1 同长度替换 + 增量更新 + 引擎侧按内容寻址撤销已落（两份真文件 + QuickLook 肉眼核对）；modlog 落盘与桌面装配、`print:pdf` 旁路模型、AI 工具面、`oc pdf check`、逻辑行拼接仍缺`
 `packages/pdf-io` 读页/文本块/字体/内容流偏移，`print:pdf` 通路带旁路模型。
 **完成判定**：本仓自产的 PDF 改一处正文 → pdf.js 读回新文字、其他页字节不动、能撤销；对无 ToUnicode/扫描件/签名文件
 **给出中文拒绝理由而不是静默改坏**（逐条有单测）。
-**现状**：拒绝理由已是引擎错误码（`length-mismatch` / `char-outside-subset` / `run-not-found`，各有一条单测，
-失败时整批不产出字节，符合 §2.4），中文文案要等装配层；撤销那一半还没接。
+**现状**：拒绝理由已是引擎错误码（`length-mismatch` / `char-outside-subset` / `run-not-found` /
+`no-encoding`（看不出这段文字念作什么，含缺 `/ToUnicode` 那格，有专门的夹具钉住）/ 撤销时的 `text-drifted`），
+失败时整批不产出字节，符合 §2.4；中文文案要等装配层。撤销走 `revertPdfTextEdits`，与写入共用同一份实现，
+先按**内容**比对再动手，所以撤那一条不会把用户后来的手工编辑一起冲掉（§2.5）；modlog 落盘与真 app 那条通道仍缺。
 
 ### 阶段 8 · 收口：CLI、文档、规则落地 — `[~] oc ppt info / oc ppt check 与 README 的 PPT 事实已落；`oc pdf check`、AGENTS.md 更新仍缺`
 **完成判定**：`oc ppt check`/`oc pdf check` 可用；`README.md` 与 `AGENTS.md` 里四类格式的既有事实更新；
@@ -596,6 +598,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 | `fb5b4f9` | 3（字号 / 颜色 / 几何入口 + D4 换算单点） | `pnpm build` EXIT=0（含 `tsc --noEmit`）；`pnpm test` EXIT=0，逐包：pptx-io **30** / opc 15 / desktop **466** / sheet-io 245 / docx-io 296 / pptx-tools 15 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1300 条**（`packages/shared` 仍无测试文件） | 真 app（`dist` + CDP）打开 python-pptx 现生成的两页 deck：继承几何的占位符**没有**几何输入框、三 run 段落 0 个输入框、文本框四数 `96/384/288/96` 逐 px 对上；改文字+字号 32+`#00cc00`+左 150+宽 300 → 「4 处待保存」→ 保存 toast「动了 1 张幻灯片」→ **python-pptx 独立读回** `150/192/300/96`px、`32.0pt`、`rgb=00CC00`、`bold=None`（没连带写粗体），第 1 页三 run「正文丙/粗/细 18pt」原样 → `oc ppt check` 退出码 0 → 撤销后 40 个部件**内容不同的 0 个**。**画面效果仍 BLOCKED**（Keynote 只给文字与位置的 PNG，字体渲染未比对） | `[x]` 四类改动（文字/字号/颜色/几何）在真 app 里闭环；画布拖拽与继承链解析归入下批 |
 | 本次（D3 几何继承链） | 4（`inherit.ts` + 读模型两字段 + 视图那句只读说明） | `pnpm build` EXIT=0（含 `tsc --noEmit`，抓到一处 `key` 窄化与三处夹具字面量缺字段）；`pnpm test` EXIT=0，逐包：pptx-io **74**（+16 条：逐轴读取 4 + 读模型的继承链 7 + 解析器的类型映射与容忍 3 + 落盘面 2）/ opc 15 / desktop **503**（+5 条 `inheritedBoxNote`）/ sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1186 条**（`packages/shared` 仍无测试文件） | 新夹具三层链上 **python-pptx 独立读回三格逐轴与我们 `effectiveBoxPx×9525` 全等**；真实 38 部件 deck 同样全等（仅 `top` 差一个亚像素，是 D4 的显示取整）；真 app（`dist`+CDP）标题行念出"继承自母版：左 96 · 上 48 · 宽 768 · 高 120 px"且**零输入框**，改文字保存后磁盘仍是 `<p:spPr/>`、模型重读后说明不变。**画面位置 BLOCKED**：Keynote 的 AppleScript 拿不到对象 `position`/`size`（`-1700`/`-1728`） | `[x]` D3 几何那一档落到读模型与视图；字号/颜色两档与 notes 归入下批 |
 | 本次（pdf 线第一档：`packages/pdf-io` W1） | 7（读模型 + 同长度替换 + 增量更新） | `pnpm build` EXIT=0（`tsc` 抓到 `test-pdf.ts` 漏 `deflateSync` 导入——vitest 不做类型检查，所以只有 build 能抓到）；`pnpm test` EXIT=0，逐包：**pdf-io 13（新包）** / pptx-io 74 / opc 15 / desktop 503 / sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1199 条**（`packages/shared` 仍无测试文件） | 两份真实文件读回：WPS 简历 6 页 **5196 条 run 全解出**、`printToPDF` 产物 1 页 1113 条（932 条有文字，缺 ToUnicode 那 181 条如实给 `null` 而不是猜）。改→存→读回：`ps-cols-OLD.edited.pdf` **前缀 33 706 字节逐字不变 + delta 1 657 字节**，Apple **PDFKit** 抽取到"第 1 是这：段"且第二栏文字一字未动，**QuickLook 出的 PNG 肉眼核对**只有那四个 CID 字形换位、无豆腐块；自造 Helvetica 两页文件同样只改第一页。**依赖只有 `@cantoo/pdf-lib`（MIT），无原生模块** | `[~]` W1 那一档闭环（同长度、同框、同字体）；真实中文产物一条 run 一个字，"改一句话"要先拼逻辑行 → 归 W2 前置 |
+| 本次（pdf 线 W1 的撤销那一半） | 7（`revertPdfTextEdits` + `text-drifted` + 无 `/ToUnicode` 夹具） | `pnpm build` EXIT=0（`tsc` 抓到一处 `run.text` 可能为 null 就写进 `fromText` 的缺陷——不是类型洁癖：那条 run 我们**不知道原文念作什么**，现在改成 `no-encoding` 整批拒绝）；`pnpm test` EXIT=0，逐包：**pdf-io 17（+4：撤销回原文且那次也只追加 delta 1、别处后来的编辑一字不动、对不上内容给 `text-drifted` 且不产出字节、缺 ToUnicode 的读+拒）** / pptx-io 74 / opc 15 / desktop 503 / sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1 203 条** | 真文件（`tmp/ps-cols-OLD.pdf`）改→撤→读回：撤销那一次同样**前缀 35 363 字节逐字不变 + 再追加 1 644 字节**，新读模型里旧句"段：这是"回来了、改过的"是这：段"一条不剩，**Apple PDFKit 抽取第一句就是原文"第 1 段：这是一段足够长的中文正文"**；再拿一条对不上内容的 `applied` 去撤，只回 `text-drifted` 且不产出字节 | `[~]` §2.5 那一半在引擎侧闭环；modlog 落盘与真 app 通道归下一批 |
 
 ---
 

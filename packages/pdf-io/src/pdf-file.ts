@@ -74,16 +74,30 @@ export interface PdfTextEdit {
   text: string;
 }
 
+/** 一处已落地的改动：撤销要靠它把旧文字换回去，所以旧文字必须随结果一起交出去（§2.5）。 */
+export interface PdfAppliedEdit {
+  /** 改的那条 run 的定位键。 */
+  target: PdfTextTarget;
+  /** 改之前的文字。 */
+  fromText: string;
+  /** 改之后的文字。 */
+  toText: string;
+}
+
 /** 一处改不了的原因（结构化，文案由调用方组装，`AGENTS.md` §5.7）。 */
 export interface PdfEditFailure {
   /** 失败的那一条定位键。 */
   target: PdfTextTarget;
-  /** 原因码：找不到这条 run / 字体认不出 / 子集里没有这个字 / 新串装不回原字节数。 */
-  reason: "run-not-found" | "no-encoding" | "char-outside-subset" | "length-mismatch";
+  /**
+   * 原因码：找不到这条 run / 看不出这段文字念作什么（字体认不出、缺 `/ToUnicode` 或码表覆盖不到，
+   * 不知道原文就不许改） / 子集里没有这个字 / 新串装不回原字节数 /
+   * 撤销时那条已经不是我写出去的样子（内容寻址，不牵连后来的编辑，§2.5）。
+   */
+  reason: "run-not-found" | "no-encoding" | "char-outside-subset" | "length-mismatch" | "text-drifted";
 }
 
 /** 改写结果：要么给出新的完整字节，要么给出全部失败项且不产出任何改动（§2.4 整批语义）。 */
-export type PdfEditResult = { ok: true; bytes: Uint8Array; deltaBytes: number } | { ok: false; failures: PdfEditFailure[] };
+export type PdfEditResult = { ok: true; bytes: Uint8Array; deltaBytes: number; applied: PdfAppliedEdit[] } | { ok: false; failures: PdfEditFailure[] };
 
 /** 内部：一条 run 附带它的码表与内容流对象，改写时要再编码一次，故不丢。 */
 interface LocatedRun extends PdfTextRun {
@@ -119,10 +133,47 @@ export async function readPdfModel(bytes: Uint8Array): Promise<PdfReadModel> {
  *   其中 bytes 是"原文件逐字节 + 追加的 delta"，原前缀一字未动（§7.5.6）。
  */
 export async function applyPdfTextEdits(bytes: Uint8Array, edits: PdfTextEdit[]): Promise<PdfEditResult> {
+  return writeEdits(bytes, edits, null);
+}
+
+/**
+ * 撤销一批已落地的文字改写：把每条的旧文字换回去，整批语义与写入侧同一条路（§2.5）。
+ *
+ * 按**内容**寻址而不是按位置：那条 run 现在的文字若已经不是这批写出去的样子（用户后来手工改过、
+ * 或又被别批改动覆盖），这一条就判 `text-drifted` 并整批不写，绝不把后来的编辑一起冲掉。
+ * 同长度替换使 `start` 与 `streamRef` 在增量存回后仍然稳定，所以定位键能直接复用。
+ *
+ * @param bytes 当前磁盘上的 `.pdf` 字节（必须是 {@link applyPdfTextEdits} 成功后的那份）。
+ * @param applied 那次成功返回的 `applied`。
+ * @returns 全成时给出新的字节（同样是"原前缀 + delta"）；任一条对不上时 `{ ok: false, failures }` 且不写任何东西。
+ */
+export async function revertPdfTextEdits(bytes: Uint8Array, applied: PdfAppliedEdit[]): Promise<PdfEditResult> {
+  const expected = new Map(applied.map((entry) => [targetKey(entry.target), entry.toText]));
+  return writeEdits(
+    bytes,
+    applied.map((entry) => ({ target: entry.target, text: entry.fromText })),
+    expected,
+  );
+}
+
+/** 定位键的稳定写法：四个字段拼成一句，供撤销时比对"同一条 run"。 */
+function targetKey(target: PdfTextTarget): string {
+  return `${target.pageIndex}|${target.streamRef}|${target.withinForm ?? ""}|${target.start}`;
+}
+
+/**
+ * 写入侧的唯一实现：改与撤都走这一条（§3.2 同一逻辑不许出现第二份）。
+ *
+ * @param bytes 原始 `.pdf` 字节。
+ * @param edits 待落地改动。
+ * @param expected 撤销时传入"这条 run 现在该长什么样"；为 null 表示这是新改动，不比对。
+ */
+async function writeEdits(bytes: Uint8Array, edits: PdfTextEdit[], expected: Map<string, string> | null): Promise<PdfEditResult> {
   const doc = await PDFDocument.load(bytes, { forIncrementalUpdate: true });
   const snapshot = doc.takeSnapshot();
   const runs = collectRuns(doc);
   const failures: PdfEditFailure[] = [];
+  const applied: PdfAppliedEdit[] = [];
   /** 每条待改内容流的解压文本与逐条替换。 */
   const patches = new Map<PDFRawStream, { decoded: string; flate: boolean; splices: Splice[] }>();
 
@@ -138,7 +189,11 @@ export async function applyPdfTextEdits(bytes: Uint8Array, edits: PdfTextEdit[])
       failures.push({ target: edit.target, reason: "run-not-found" });
       continue;
     }
-    if (!run.codes) {
+    if (expected && expected.get(targetKey(edit.target)) !== run.text) {
+      failures.push({ target: edit.target, reason: "text-drifted" });
+      continue;
+    }
+    if (!run.codes || run.text === null) {
       failures.push({ target: edit.target, reason: "no-encoding" });
       continue;
     }
@@ -154,6 +209,7 @@ export async function applyPdfTextEdits(bytes: Uint8Array, edits: PdfTextEdit[])
     }
     patches.set(run.stream, entry);
     entry.splices.push({ start: run.start, end: run.start + run.tokenLength, token: encoded.token });
+    applied.push({ target: edit.target, fromText: run.text, toText: edit.text });
   }
 
   if (failures.length > 0) return { ok: false, failures };
@@ -165,7 +221,7 @@ export async function applyPdfTextEdits(bytes: Uint8Array, edits: PdfTextEdit[])
     if (located?.ref) snapshot.markRefForSave(located.ref);
   }
   const delta = await doc.saveIncremental(snapshot);
-  return { ok: true, bytes: new Uint8Array(Buffer.concat([Buffer.from(bytes), Buffer.from(delta)])), deltaBytes: delta.length };
+  return { ok: true, bytes: new Uint8Array(Buffer.concat([Buffer.from(bytes), Buffer.from(delta)])), deltaBytes: delta.length, applied };
 }
 
 /** 一处替换：内容流文本里的 `[start, end)` 换成 `token`。 */
