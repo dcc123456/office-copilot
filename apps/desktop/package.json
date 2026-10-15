@@ -18,6 +18,7 @@
   "dependencies": {
     "@office-copilot/docx-io": "workspace:*",
     "@office-copilot/opc": "workspace:*",
+    "@office-copilot/pdf-io": "workspace:*",
     "@office-copilot/pptx-io": "workspace:*",
     "@office-copilot/pptx-tools": "workspace:*",
     "@office-copilot/sheet-io": "workspace:*",

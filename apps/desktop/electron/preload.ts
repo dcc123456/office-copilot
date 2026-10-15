@@ -6,6 +6,8 @@ import type { PptxEditPayload, PptxRevertPayload } from "@office-copilot/pptx-io
 // 结果形状与 electron/pptxHandlers.ts 的 PptxOpenResult / PptxEditResult 一致；
 // 那两处带着主进程组装的中文文案（§5.7），不属于引擎契约，所以这里就地镜像一份。
 import type { PptxEditResult, PptxOpenResult } from "./pptxHandlers.js";
+// pdf 那条同形：载荷与回包的结构留在主进程模块里，结果带着组装好的中文，跨界只镜像类型。
+import type { PdfEditPayload, PdfEditResult, PdfOpenResult, PdfRevertPayload } from "./pdfHandlers.js";
 
 interface AITransformPayload {
   action: string;
@@ -113,6 +115,13 @@ const api = {
   revertPptx: (payload: PptxRevertPayload): Promise<PptxEditResult> => ipcRenderer.invoke("ppt:revert", payload),
   savePptxAs: (payload: PptxEditPayload): Promise<PptxEditResult> =>
     ipcRenderer.invoke("ppt:save-as", payload),
+
+  // PDF（.pdf）：跨界 only 页号 + 定位键 + 解出的文字，内容流原文与增量 delta 都留在主进程（spec 阶段 7）。
+  readPdf: (filePath: string): Promise<PdfOpenResult> => ipcRenderer.invoke("pdf:read", filePath),
+  editPdf: (payload: PdfEditPayload): Promise<PdfEditResult> => ipcRenderer.invoke("pdf:edit", payload),
+  revertPdf: (payload: PdfRevertPayload): Promise<PdfEditResult> => ipcRenderer.invoke("pdf:revert", payload),
+  savePdfAs: (payload: PdfEditPayload): Promise<PdfEditResult> =>
+    ipcRenderer.invoke("pdf:save-as", payload),
   /** Electron 32: File.path is removed; resolve a dropped File to its disk path. */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
   writeDocx: (payload: { path: string; doc: unknown }): Promise<SaveResult> =>

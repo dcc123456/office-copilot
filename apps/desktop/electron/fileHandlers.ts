@@ -149,8 +149,8 @@ export function registerFileHandlers(
   /**
    * 只弹打开对话框，把选中的路径交回渲染层。
    *
-   * 三种文件共用一个对话框：读哪一套由渲染层按扩展名分派（`file:read-docx` /
-   * `sheet:read` / `ppt:read`），于是拖入、最近文件与对话框三条入口走同一套读取逻辑。
+   * 四种文件共用一个对话框：读哪一套由渲染层按扩展名分派（`file:read-docx` /
+   * `sheet:read` / `ppt:read` / `pdf:read`），于是拖入、最近文件与对话框三条入口走同一套读取逻辑。
    */
   ipc.handle("file:open", async (): Promise<OpenPickResult> => {
     const win = getWindow();
@@ -158,7 +158,7 @@ export function registerFileHandlers(
       title: "打开文档",
       properties: ["openFile"],
       filters: [
-        { name: "Word / Excel / PowerPoint 文档", extensions: ["docx", "xlsx", "pptx"] },
+        { name: "Word / Excel / PowerPoint / PDF 文档", extensions: ["docx", "xlsx", "pptx", "pdf"] },
         { name: "所有文件", extensions: ["*"] },
       ],
     });
@@ -167,8 +167,8 @@ export function registerFileHandlers(
     }
     const filePath = result.filePaths[0]!;
     // "所有文件"那条筛选项允许选到别的东西，这里挡住，别让 docx 解析器去啃它。
-    if (!/\.(docx|xlsx|pptx)$/i.test(filePath)) {
-      return { ok: false, message: "只能打开 .docx 文档、.xlsx 表格或 .pptx 演示文稿。" };
+    if (!/\.(docx|xlsx|pptx|pdf)$/i.test(filePath)) {
+      return { ok: false, message: "只能打开 .docx 文档、.xlsx 表格、.pptx 演示文稿或 .pdf。" };
     }
     return { ok: true, path: filePath };
   });

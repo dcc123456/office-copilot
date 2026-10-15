@@ -3,6 +3,7 @@ import path from "node:path";
 import { registerFileHandlers } from "./fileHandlers.js";
 import { registerSheetHandlers } from "./sheetHandlers.js";
 import { registerPptxHandlers } from "./pptxHandlers.js";
+import { registerPdfHandlers } from "./pdfHandlers.js";
 import { registerAIHandlers } from "./aiHandlers.js";
 import { registerSettingsHandlers } from "./settingsStore.js";
 import { registerSnapshotHandlers } from "./snapshotStore.js";
@@ -285,6 +286,7 @@ app.whenReady().then(async () => {
   registerFileHandlers(ipcMain, () => mainWindow);
   registerSheetHandlers(ipcMain, () => mainWindow);
   registerPptxHandlers(ipcMain, () => mainWindow);
+  registerPdfHandlers(ipcMain, () => mainWindow);
   registerAIHandlers(ipcMain);
   registerSettingsHandlers(ipcMain);
   registerSnapshotHandlers(ipcMain);
