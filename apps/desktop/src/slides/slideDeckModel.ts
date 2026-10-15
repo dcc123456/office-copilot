@@ -4,7 +4,43 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import type { PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+import type { BoxAxisSource, PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+
+/**
+ * 形状几何的四个字段，按视图显示的顺序（左、上、宽、高）。
+ *
+ * 视图的输入框与 {@link inheritedBoxNote} 都要按同一顺序遍历，写两份就会漂移（§3.2）。单位 CSS px。
+ */
+export const SHAPE_BOX_FIELDS: (keyof ShapeBoxPx)[] = ["leftPx", "topPx", "widthPx", "heightPx"];
+
+/** 几何继承来源层的中文叫法（`pptx-io` 给的是英文层名，文案在本层组装，§5.7）。 */
+const BOX_SOURCE_LABEL: Record<BoxAxisSource, string> = {
+  shape: "本形状",
+  layout: "版式",
+  master: "母版",
+};
+
+/**
+ * 形状没有自己的 `<a:xfrm>` 时，视图上那句几何说明。
+ *
+ * 数字来自读模型算完继承链的 `effectiveBoxPx`（spec D3 要求"有效值 + 来源层"两个都给，视图不许自己猜），
+ * 但**只读**：这一格的写侧入口仍然要求形状自己写了几何（见 {@link pushGeometryEdits}），
+ * 把继承值烤进 slide 就永久切断了版式/母版联动。
+ *
+ * @param shape 一个形状快照（`boxPx` 应为 undefined，即自己没写几何）。
+ * @returns 一句中文：继承来的四数与来源层；三层都没写几何或非占位符时说明"没写"，不给猜测值。
+ */
+export function inheritedBoxNote(shape: SlideShape): string {
+  const fields = SHAPE_BOX_FIELDS.filter((field) => shape.effectiveBoxPx[field] !== undefined);
+  if (fields.length === 0) {
+    return shape.isPlaceholder
+      ? "位置与尺寸：版式与母版都没给这一格写几何，本视图不写死（spec D3）。"
+      : "位置与尺寸：这个形状自己没写几何，本视图不写死（spec D3）。";
+  }
+  const numbers = fields.map((field) => `${SHAPE_BOX_FIELD_LABEL[field]} ${shape.effectiveBoxPx[field]}`).join(" · ");
+  const layers = [...new Set(fields.map((field) => shape.boxPxSources[field]).filter((source) => source !== undefined).map((source) => BOX_SOURCE_LABEL[source]))].join("、");
+  return `位置与尺寸继承自${layers}：${numbers} px（写死就切断版式联动，本视图只读，spec D3）。`;
+}
 
 /**
  * 形状几何四个字段的中文标签（单位是 CSS px，非 pt、非 EMU）。

@@ -31,6 +31,9 @@ function sampleDeck(): PresentationModel {
             paragraphRunCounts: [1],
             paragraphRunTexts: [["标题甲"]],
             paragraphRunFormats: [[{}]],
+            // 自己没写几何（`boxPx` 留空），数从版式来：代理那条"要给就给全四轴"的守卫看的是 `boxPx`，不是这份只读的有效值。
+            effectiveBoxPx: { leftPx: 88, topPx: 60, widthPx: 576, heightPx: 72 },
+            boxPxSources: { leftPx: "layout", topPx: "layout", widthPx: "layout", heightPx: "layout" },
           },
           {
             shapeId: 4,
@@ -43,6 +46,8 @@ function sampleDeck(): PresentationModel {
             paragraphRunTexts: [["粗", "细"]],
             paragraphRunFormats: [[{ bold: true }, { sizePt: 18 }]],
             boxPx: { leftPx: 96, topPx: 384, widthPx: 288, heightPx: 96 },
+            effectiveBoxPx: { leftPx: 96, topPx: 384, widthPx: 288, heightPx: 96 },
+            boxPxSources: { leftPx: "shape", topPx: "shape", widthPx: "shape", heightPx: "shape" },
           },
           {
             shapeId: 7,
@@ -55,6 +60,8 @@ function sampleDeck(): PresentationModel {
             paragraphRunTexts: [],
             paragraphRunFormats: [],
             boxPx: { leftPx: 0, topPx: 0, widthPx: 100, heightPx: 100 },
+            effectiveBoxPx: { leftPx: 0, topPx: 0, widthPx: 100, heightPx: 100 },
+            boxPxSources: { leftPx: "shape", topPx: "shape", widthPx: "shape", heightPx: "shape" },
           },
         ],
       },

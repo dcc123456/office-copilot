@@ -16,10 +16,12 @@ import {
   boxDraftKeyOf,
   draftKeyOf,
   dropShapeDrafts,
+  inheritedBoxNote,
   LAYER_DIRECTION_LABEL,
   layerEdgeNote,
   pendingEdits,
   SHAPE_BOX_FIELD_LABEL,
+  SHAPE_BOX_FIELDS,
   type SlideDraft,
 } from "./slideDeckModel.js";
 import "../styles/slides.css";
@@ -332,7 +334,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                   </div>
                   {shape.boxPx ? (
                     <div className="slide-box-fields">
-                      {(["leftPx", "topPx", "widthPx", "heightPx"] as (keyof ShapeBoxPx)[]).map((field) => (
+                      {SHAPE_BOX_FIELDS.map((field) => (
                         <label className="slide-field" key={field}>
                           <span>{SHAPE_BOX_FIELD_LABEL[field]}</span>
                           <input
@@ -344,7 +346,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                       ))}
                     </div>
                   ) : (
-                    <p className="slide-box-note">位置与尺寸继承自版式，本视图不写死（写死就切断母版联动，spec D3）。</p>
+                    <p className="slide-box-note">{inheritedBoxNote(shape)}</p>
                   )}
                   {shape.paragraphTexts.map((paragraphText, paraIndex) => {
                     const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;

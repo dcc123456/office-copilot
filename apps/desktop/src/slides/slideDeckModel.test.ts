@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PptxEditRequest, PresentationModel, RunFormat, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -56,6 +56,8 @@ function shapeOf(shapeId: number, paragraphs: [string, number, RunFormat?][]): S
     paragraphRunCounts: paragraphs.map(([, runCount]) => runCount),
     paragraphRunTexts: paragraphs.map(([paragraphText]) => [paragraphText]),
     paragraphRunFormats: paragraphs.map(([, , runFormat]) => [runFormat ?? {}]),
+    effectiveBoxPx: {},
+    boxPxSources: {},
   };
 }
 
@@ -213,5 +215,50 @@ describe("dropShapeDrafts：删掉的形状不留未保存的草稿", () => {
   it("这一页这个形状压根没草稿时原对象返回，不白造一份新状态", () => {
     const drafts = { [draftKeyOf(PART, 2, 0)]: { text: "留着" } };
     expect(dropShapeDrafts(drafts, "ppt/slides/slide2.xml", 9)).toBe(drafts);
+  });
+});
+
+/**
+ * 没有自己几何的那一格显示什么（`inheritedBoxNote`）。
+ *
+ * 数字来自读模型算完继承链的 `effectiveBoxPx`（spec D3 要求"有效值 + 来源层"两个都给），
+ * 但这一句必须**只读**：草稿照样不交出几何字段，否则就是把继承值烤进 slide。
+ */
+describe("inheritedBoxNote：继承来的几何如实报数，但一个字都不写", () => {
+  /**
+   * 造一个"自己没写几何"的占位符快照。
+   *
+   * @param sources 每一轴的来源层（读模型给的那份）。
+   * @returns 一个形状快照；`boxPx` 留空，与真夹具里那个空 `<p:spPr/>` 同形。
+   */
+  function inheritedShape(sources: SlideShape["boxPxSources"], box: SlideShape["effectiveBoxPx"] = { leftPx: 96, topPx: 48, widthPx: 768, heightPx: 120 }): SlideShape {
+    return { ...shapeOf(2, [["标题", 1]]), isPlaceholder: true, placeholderRef: "ctrTitle", effectiveBoxPx: box, boxPxSources: sources };
+  }
+
+  it("四轴都来自母版时句子念出四个数与「母版」", () => {
+    const note = inheritedBoxNote(inheritedShape({ leftPx: "master", topPx: "master", widthPx: "master", heightPx: "master" }));
+    expect(note).toContain("继承自母版");
+    expect(note).toContain("左 96 · 上 48 · 宽 768 · 高 120 px");
+  });
+
+  it("左上来自版式、宽高来自母版时两个层都点名（逐轴回退是 python-pptx 那套，不许只说一个层）", () => {
+    const note = inheritedBoxNote(inheritedShape({ leftPx: "layout", topPx: "layout", widthPx: "master", heightPx: "master" }));
+    expect(note).toContain("继承自版式、母版");
+  });
+
+  it("三层都没写几何时不给数字，只说没写（视图不许造值）", () => {
+    const note = inheritedBoxNote(inheritedShape({}, {}));
+    expect(note).toContain("版式与母版都没给这一格写几何");
+    expect(note).not.toContain("px"); // 一个数都不许出现：带数就得带单位
+  });
+
+  it("非占位符又没写自己的几何时说的是「自己没写」，不拿版式那格的数来凑", () => {
+    const note = inheritedBoxNote({ ...shapeOf(4, [["正文", 1]]), effectiveBoxPx: {}, boxPxSources: {} });
+    expect(note).toContain("这个形状自己没写几何");
+  });
+
+  it("报告了继承数之后，草稿里填几轴仍然一个字段都不交出（只读这条是红线）", () => {
+    const deck = deckOf([inheritedShape({ leftPx: "master" }, { leftPx: 96 })]);
+    expect(pendingEdits(deck, { [boxDraftKeyOf(PART, 2)]: { box: { leftPx: 500 } } })).toEqual([]);
   });
 });

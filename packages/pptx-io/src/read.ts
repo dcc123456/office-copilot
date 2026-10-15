@@ -8,10 +8,13 @@
  * 溯源红线（spec D3）：占位符（title / body 等）在幻灯片里 `<p:spPr/>` 常是**空的**，它的位置、字体、
  * 颜色全部从版式/母版继承。我们只记录"这格自己有没有写几何（`hasOwnGeometry`）"，绝不把继承来的坐标
  * 烘焙进形状——一烘焙就切断了 PowerPoint 自己的继承链，改母版时不再联动，也违反 §2.3"不许拍平"。
+ * 继承值本身由 `inherit.ts` 现算成 `effectiveBoxPx` + `boxPxSources`（有效值 + 来源层两个都给，视图不许猜），
+ * 它们是只读事实，不进任何写侧入参。
  */
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
+import { createGeometryInheritance, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance, type PlaceholderKey } from "./inherit.js";
 import { PRESENTATION_PART } from "./parts.js";
-import { emuToPx, halfPointToPt, type ShapeBoxPx } from "./units.js";
+import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
 /** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
 export interface SlideShape {
@@ -42,6 +45,16 @@ export interface SlideShape {
   paragraphRunFormats: RunFormat[][];
   /** 形状自己写的 `<a:xfrm>`（CSS px @96DPI）；没有写（几何继承自版式）时 undefined，禁止烘焙（D3）。 */
   boxPx?: ShapeBoxPx;
+  /**
+   * 算完继承链的**有效**几何（CSS px @96DPI，逐轴，允许只有其中几轴）。
+   *
+   * 与 `boxPx` 的分工：那份是"这格自己写了什么"（写侧只许照它判断要不要覆盖，D3 不许烘焙），
+   * 这份是" PowerPoint 实际会画在哪"（视图与 AI 要显示/回答位置时用这份，别再自己猜）。
+   * 非占位符不继承，所以就是自己写的那几轴；三层都没写的轴不在表里。
+   */
+  effectiveBoxPx: ShapeGeometryPatch;
+  /** `effectiveBoxPx` 每一轴的来源层，键与它一一对应（spec D3 要求的 `src`）。 */
+  boxPxSources: Partial<Record<keyof ShapeBoxPx, BoxAxisSource>>;
 }
 
 /** 一条 run 自己的字符格式（读侧已换算成 pt 与 `#rrggbb`）。 */
@@ -110,6 +123,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
   const rels = pkg.relsBySourcePart.get(PRESENTATION_PART) ?? [];
   const idList = firstChild(root, "p:sldIdLst");
   const sldIds = idList ? findChildren(idList, "p:sldId") : [];
+  const inheritance = createGeometryInheritance(pkg);
   const slides: Slide[] = [];
   for (const [order, sldId] of sldIds.entries()) {
     const relId = sldId.attributes["r:id"];
@@ -120,7 +134,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
       partPath,
       order,
       slideId: Number(sldId.attributes["id"] ?? 0),
-      shapes: await readSlideShapes(pkg, partPath),
+      shapes: await readSlideShapes(pkg, partPath, inheritance),
     });
   }
   return { slideSizeEmu, slides };
@@ -131,9 +145,10 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
  *
  * @param pkg 已加载的包。
  * @param partPath 幻灯片部件路径。
+ * @param inheritance 整份 deck 共用一个的几何继承解析器（版式/母版只解析一次）。
  * @returns 顶层形状数组；部件缺失或解析失败返回空数组（读不动不等于崩，交给上层提示）。
  */
-async function readSlideShapes(pkg: OpcPackage, partPath: string): Promise<SlideShape[]> {
+async function readSlideShapes(pkg: OpcPackage, partPath: string, inheritance: GeometryInheritance): Promise<SlideShape[]> {
   const xml = await readText(pkg.zip, partPath);
   if (xml === undefined) return [];
   let slideRoot: Element;
@@ -149,7 +164,7 @@ async function readSlideShapes(pkg: OpcPackage, partPath: string): Promise<Slide
   for (const el of children(spTree)) {
     const kind = SHAPE_TAGS[el.name];
     if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
-    shapes.push(readShape(el, kind));
+    shapes.push(await readShape(el, kind, partPath, inheritance));
   }
   return shapes;
 }
@@ -159,9 +174,11 @@ async function readSlideShapes(pkg: OpcPackage, partPath: string): Promise<Slide
  *
  * @param el 形状根元素（`<p:sp>` 等）。
  * @param kind 已在 `readSlideShapes` 里判定的大类。
- * @returns 只读快照。
+ * @param slidePartPath 所属幻灯片的部件路径，用来找它自己的版式（只有占位符会用到）。
+ * @param inheritance 几何继承解析器。
+ * @returns 只读快照：自己写的事实（`boxPx`/`hasOwnGeometry`）与算完继承的事实（`effectiveBoxPx`/`boxPxSources`）。
  */
-function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
+async function readShape(el: Element, kind: SlideShape["kind"], slidePartPath: string, inheritance: GeometryInheritance): Promise<SlideShape> {
   const nvPr = firstChild(el, "p:nvSpPr") ?? firstChild(el, "p:nvPicPr") ?? firstChild(el, "p:nvGraphicFramePr") ?? firstChild(el, "p:nvGrpSpPr");
   const cNvPr = nvPr ? firstChild(nvPr, "p:cNvPr") : undefined;
   const phHost = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
@@ -171,6 +188,12 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
   const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
   // 一次扫描拿到每段的 `<a:r>`，条数 / 文字 / 格式三份都从它派生（扫三遍是同一件事重复做，§3.2）。
   const runsByParagraph = paragraphs.map((p) => findChildren(p, "a:r"));
+  const ownAxes = readExplicitBoxAxes(spPr);
+  // 非占位符没有继承这一说（PowerPoint 不给它查版式），key 传 undefined 让解析器只回自己写的那几轴。
+  const key: PlaceholderKey | undefined = ph
+    ? { idx: Number(ph.attributes["idx"] ?? 0), type: String(ph.attributes["type"] ?? "obj") }
+    : undefined;
+  const effective = await inheritance.resolve(slidePartPath, key, ownAxes);
   return {
     shapeId: Number(cNvPr?.attributes["id"] ?? 0),
     name: String(cNvPr?.attributes["name"] ?? ""),
@@ -182,7 +205,9 @@ function readShape(el: Element, kind: SlideShape["kind"]): SlideShape {
     paragraphRunCounts: runsByParagraph.map((runs) => runs.length),
     paragraphRunTexts: runsByParagraph.map((runs) => runs.map((run) => text(run))),
     paragraphRunFormats: runsByParagraph.map((runs) => runs.map(readRunFormat)),
-    boxPx: readBoxPx(spPr),
+    boxPx: completeBox(ownAxes),
+    effectiveBoxPx: effective.box,
+    boxPxSources: effective.sources,
   };
 }
 
@@ -209,18 +234,13 @@ function readRunFormat(run: Element): RunFormat {
 }
 
 /**
- * 读形状自己写的 `<a:xfrm>`（EMU→px 走 `units.ts`）。
+ * 把逐轴的几何轴收成"四个都齐"的 `ShapeBoxPx`。
  *
- * @param spPr 形状的 `<p:spPr>`，可以不存在。
- * @returns 四个值都齐才给；只写了 `off` 或只写了 `ext`、或数字读不出来时 undefined（不猜继承值）。
+ * @param axes `readExplicitBoxAxes` 读出的轴（单位 px）；可以只有一两轴。
+ * @returns 四个轴都在时给整份盒子；缺任何一个时 undefined——视图与写侧都按"这格没写几何"处理（D3 不许拿继承值来凑齐）。
  */
-function readBoxPx(spPr: Element | undefined): ShapeBoxPx | undefined {
-  const xfrm = spPr ? firstChild(spPr, "a:xfrm") : undefined;
-  const off = xfrm ? firstChild(xfrm, "a:off") : undefined;
-  const ext = xfrm ? firstChild(xfrm, "a:ext") : undefined;
-  if (!off || !ext) return undefined;
-  const values = [off.attributes["x"], off.attributes["y"], ext.attributes["cx"], ext.attributes["cy"]].map(Number);
-  if (!values.every(Number.isFinite)) return undefined;
-  const [x, y, cx, cy] = values as [number, number, number, number];
-  return { leftPx: emuToPx(x), topPx: emuToPx(y), widthPx: emuToPx(cx), heightPx: emuToPx(cy) };
+function completeBox(axes: ShapeGeometryPatch): ShapeBoxPx | undefined {
+  const { leftPx, topPx, widthPx, heightPx } = axes;
+  if (leftPx === undefined || topPx === undefined || widthPx === undefined || heightPx === undefined) return undefined;
+  return { leftPx, topPx, widthPx, heightPx };
 }
