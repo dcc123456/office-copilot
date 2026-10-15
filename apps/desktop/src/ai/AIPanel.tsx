@@ -55,17 +55,23 @@ import { ChartPreview } from "../sheet/ChartPreview.js";
 import { sheetCommitTally } from "../sheet/sheetHistory.js";
 import { runSheetAgent } from "./sheetAgent.js";
 import { runSlideAgent } from "./slideAgent.js";
+import { runPdfAgent } from "./pdfAgent.js";
 import type { SheetAgentOutcome } from "./sheetAgent.js";
 import type { SlideAgentOutcome } from "./slideAgent.js";
+import type { PdfAgentOutcome } from "./pdfAgent.js";
 import { formatA1 } from "@office-copilot/sheet-io";
 import type { ChartKind, ResolvedChart, SheetCoreOp, SheetOpsResult, SheetPayload } from "@office-copilot/sheet-io";
 import type { SheetEditT } from "@office-copilot/sheet-tools";
 import type { PptxEditRequest, PresentationModel, ShapeBoxPx } from "@office-copilot/pptx-io";
 import type { PptxEditT } from "@office-copilot/pptx-tools";
+import type { PdfEditT } from "@office-copilot/pdf-tools";
+import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
+import { pdfFailureText } from "../pdf/pdfRuns.js";
 import { LAYER_DIRECTION_LABEL, SHAPE_BOX_FIELD_LABEL } from "../slides/slideDeckModel.js";
 import type {
   AppSettings,
   PptxEditOutcome,
+  PdfEditOutcome,
   ProviderConfig,
   SessionSummary,
   SessionTurn,
@@ -131,10 +137,12 @@ type ToolLand =
   | { kind: "sheet-ops"; ops: SheetCoreOp[] }
   /** 图表不是 op：它随保存写进 `.xlsx`，撤销栈管不到，卡片要如实说这句（§2.5 的边界）。 */
   | { kind: "chart"; chart: ResolvedChart }
-  | { kind: "slide"; requests: PptxEditRequest[] };
+  | { kind: "slide"; requests: PptxEditRequest[] }
+  /** PDF 的批次就是视图「保存」用的那批改动：确认后原样送同一条 `pdf:edit`，落地口只有一份。 */
+  | { kind: "pdf"; edits: PdfTextEdit[] };
 
 /** 工具回合卡的格式：一次任务只可能问一个代理，卡片靠它挑文案与代理。 */
-type ToolFormat = "sheet" | "slide";
+type ToolFormat = "sheet" | "slide" | "pdf";
 
 /** 一次工具回合的调用形状：用户那句诉求、供应商、续跑的 transcript 与暂停位。 */
 type ToolRunner = (input: {
@@ -145,7 +153,7 @@ type ToolRunner = (input: {
 }) => Promise<ToolAskOutcome>;
 
 /**
- * 工具回合提案卡：表格与幻灯片共用这一张（`AGENTS.md` §3.2：同一逻辑不许长第三套装配）。
+ * 工具回合提案卡：表格、幻灯片与 PDF 共用这一张（`AGENTS.md` §3.2：同一逻辑不许长第三套装配）。
  *
  * 与文档那张的差别只在"没有逐字流式"：工具回合是一整轮一整轮回来的，
  * 中途能展示的只有"正在核对"，所以 `status` 停在 streaming 时不显示正文。
@@ -167,7 +175,7 @@ interface ToolPlanCard {
   messages: ToolTurnMessage[];
 }
 
-/** 一次工具回合的归一化结果：两个代理各说各的话，卡片只看这一种形状。 */
+/** 一次工具回合的归一化结果：三个代理各说各的话，卡片只看这一种形状。 */
 type ToolAskOutcome =
   | { kind: "answer"; text: string; messages: ToolTurnMessage[] }
   | { kind: "paused"; messages: ToolTurnMessage[] }
@@ -285,6 +293,22 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
 }
 
 /**
+ * PDF 提案条目 → 卡片上的一行中文。
+ *
+ * 坐标用的是模型视角（页号 1 基、页内 run 序号 0 基），与 `pdf_read_page_text` 回给模型的编号一致，
+ * 用户能对着 PDF 面板上那一条核对（`AGENTS.md` §5.7）。
+ *
+ * @param edits `pdf_submit_proposal` 校验过的条目。
+ * @returns 与条目同序的中文行；长文字截到 40 字，清单要能一眼扫完。
+ */
+function pdfEditLines(edits: readonly PdfEditT[]): string[] {
+  return edits.map((edit) => {
+    const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
+    return `第 ${edit.pageNumber} 页 · 第 ${edit.runIndex} 条文字改为「${value}」`;
+  });
+}
+
+/**
  * 卡片头部与"已写入"那句要报的条数。
  *
  * @param land 这张卡的落地出口。
@@ -298,6 +322,8 @@ function toolLandTally(land: ToolLand): { count: number; label: string } {
       return { count: 1, label: "1 张图表" };
     case "slide":
       return { count: land.requests.length, label: `${land.requests.length} 处改动` };
+    case "pdf":
+      return { count: land.edits.length, label: `${land.edits.length} 处改动` };
     case "idle":
       return { count: 0, label: "0 处改动" };
   }
@@ -352,6 +378,24 @@ function slideToolOutcome(outcome: SlideAgentOutcome): ToolAskOutcome {
   };
 }
 
+/**
+ * PDF 代理的结果 → 同一种形状。
+ *
+ * @param outcome `runPdfAgent` 的回包；`edits` 已是引擎坐标（内容流引用 + 起始下标），`proposed` 是模型视角的条目。
+ * @returns 归一化后的 `ToolAskOutcome`（清单给人看页号与 run 序号，落地用引擎坐标）。
+ */
+function pdfToolOutcome(outcome: PdfAgentOutcome): ToolAskOutcome {
+  if (outcome.kind !== "proposal") return outcome;
+  return {
+    kind: "proposal",
+    summary: outcome.summary,
+    lines: pdfEditLines(outcome.proposed),
+    notes: outcome.notes,
+    land: { kind: "pdf", edits: outcome.edits },
+    messages: outcome.messages,
+  };
+}
+
 const uid = () => crypto.randomUUID();
 
 /** 每个新会话开头的那句引导语：不进会话正文，存盘时要跳过。 */
@@ -383,16 +427,27 @@ const SLIDE_WELCOME_ITEM: Item = {
     "直接说要改这份文稿的哪里，比如「把第 1 页标题改成 Q3 复盘」「第 2 页那个文本框往下挪 60 像素」「把标题那截字加粗改成 32 磅」「在第 1 页加一个写着『谢谢观看』的文本框」。页号从 1 数起，形状号与段/run 号由幻灯片引擎从现场文件列出来，不是我估的；能改的是某一截字的文字/粗体/字号/颜色、形状的位置尺寸与叠放次序，也能加文本框和删形状（新文本框的形状号由引擎落地时分配，所以同一份提案里改不到它）。改版式与母版、删整页现在做不了。每次改动都要你点「应用到幻灯片」才落地，落地会直接写文件，能在幻灯片面板点「撤销上一次保存」回退。",
 };
 
+/** 打开 .pdf 时的引导语：说的是这份 PDF 能改什么，重点是"不回流所以只能等长替换"。 */
+const PDF_WELCOME_ITEM: Item = {
+  id: WELCOME_ID,
+  t: "msg",
+  role: "assistant",
+  text:
+    "直接说要改这份 PDF 的哪一处，比如「把第 1 页标题里的 2026 换成 2027」「第 2 页那行署名换个说法」。页号从 1 数起，页内第几条显示文字由 PDF 引擎从现场文件列出来，不是我估的。PDF 没有回流，所以一次只能整条换掉一条显示文字，而且新文字的字数必须与原文完全相同——短了就删字、要留白就用空格补位，凑不出等长的说法就只能做不了；文件里的字体是子集，没带的那个字也补不出来。改字体、改颜色、挪位置、删页现在做不了。每次改动都要你点「应用到 PDF」才落地，落地是往文件末尾追加一段增量（原来的字节不重排），能在 PDF 面板点「撤销上一次保存」回退，也会记进修改历史。",
+};
+
 /**
- * 按当前打开的格式挑那句引导语：一份文件只会是一种格式，所以三段互斥。
+ * 按当前打开的格式挑那句引导语：一份文件只会是一种格式，所以这几种互斥。
  *
  * @param isSheet 打开的是 `.xlsx`。
  * @param isSlide 打开的是 `.pptx`。
- * @returns 挂在线程开头的那条引导语；两者都不是就是文档那句。
+ * @param isPdf 打开的是 `.pdf`。
+ * @returns 挂在线程开头的那条引导语；三者都不是就是文档那句。
  */
-function welcomeItemOf(isSheet: boolean, isSlide: boolean): Item {
+function welcomeItemOf(isSheet: boolean, isSlide: boolean, isPdf: boolean): Item {
   if (isSheet) return SHEET_WELCOME_ITEM;
-  return isSlide ? SLIDE_WELCOME_ITEM : WELCOME_ITEM;
+  if (isSlide) return SLIDE_WELCOME_ITEM;
+  return isPdf ? PDF_WELCOME_ITEM : WELCOME_ITEM;
 }
 
 /** 会话历史浮层宽度（px），须与 `styles/aiPanel.css` 的 `.ai-session-pop` 一致。 */
@@ -518,10 +573,22 @@ const SLIDE_MODE_HINTS: Record<AiMode, string> = {
 };
 
 /**
+ * PDF 模式下三种模式各说一句人话。
+ *
+ * 与幻灯片那条的差别在"能回退到哪"：PDF 落地走增量更新，撤销凭据是这一批的前像，
+ * 面板上的按钮只撤最近一次落地的那批，逐条的 diff 在修改历史里查。
+ */
+const PDF_MODE_HINTS: Record<AiMode, string> = {
+  chat: "聊天模式：AI 只回答与给建议，不会改动 PDF。",
+  semi: "半自动：AI 给出提案卡，你点「应用到 PDF」才写文件，之后可在 PDF 面板点「撤销上一次保存」回退。",
+  auto: "全自动：AI 给出提案就直接写文件，回退同样用 PDF 面板上那一个撤销按钮（只撤最近一次落地的那批）。",
+};
+
+/**
  * 工具回合卡上那几句按格式组装的中文（`AGENTS.md` §5.7：引擎只给结构化条目，文案在渲染层）。
  *
- * `historyEntry` 说的是"这次落地能不能在修改历史里查到"：表格的 op 逐条进了 modlog，
- * 幻灯片那条还没接（spec 阶段 4 仍缺），所以它的卡片不给那个链接，只指幻灯片面板的撤销按钮。
+ * `historyEntry` 说的是"这次落地能不能在修改历史里逐条查到"，查得到才给那个链接，
+ * 点了打不开的历史入口不如不给；回退口径另说（表格逐条撤销，幻灯片与 PDF 撤最近一次落地的那批）。
  */
 const TOOL_CARD_COPY: Record<
   ToolFormat,
@@ -542,6 +609,14 @@ const TOOL_CARD_COPY: Record<
     confirm: "应用到幻灯片",
     landed: "已写入文稿",
     historyEntry: false,
+  },
+  pdf: {
+    label: "AI PDF 提案",
+    target: "这份 PDF",
+    checking: "正在核对 PDF…",
+    confirm: "应用到 PDF",
+    landed: "已写入 PDF",
+    historyEntry: true,
   },
 };
 
@@ -613,11 +688,31 @@ export interface SlidePanelBridge {
   onCommit: (edits: PptxEditRequest[], summary: string) => Promise<PptxEditOutcome | null>;
 }
 
+/**
+ * PDF 面板要接的东西：当前这份 PDF 的读模型（只读）与唯一的落地口。
+ *
+ * `onCommit` 就是 `App.tsx` 的 `commitPdfEdits`，与 PDF 面板手工「保存」同一条 `pdf:edit` 通道：
+ * 增量写盘、撤销凭据、修改历史都只有一份（spec 阶段 7、`AGENTS.md` §3.2）。
+ */
+export interface PdfPanelBridge {
+  /** 主进程读出来的 PDF 模型；代理只读它，写入一律经 `onCommit`。 */
+  document: PdfReadModel;
+  /**
+   * 落地这一批改动（引擎坐标：页下标 + 内容流引用 + Form 链 + 起始下标）。
+   *
+   * @param edits 提案里能变成改动的条目，顺序即落地顺序；整批要么全写要么一个字都不写（§2.4）。
+   * @param summary 一句中文说明这次改了什么，与这批改动的前像一起进修改历史（§2.5）。
+   * @returns 主进程的回包（含刷新后的模型、`applied` 凭据与失败项）；当前没有打开的 PDF 时 null。
+   */
+  onCommit: (edits: PdfTextEdit[], summary: string) => Promise<PdfEditOutcome | null>;
+}
+
 export function AIPanel({
   editor,
   docKey,
   sheet,
   slides,
+  pdf,
   collapsed,
   onToggle,
   onOpenHistory,
@@ -629,12 +724,14 @@ export function AIPanel({
   sheet?: SheetPanelBridge;
   /** 打开 .pptx 时给；与 `sheet` 互斥（一份文件只会是一种格式）。 */
   slides?: SlidePanelBridge;
+  /** 打开 .pdf 时给；与上面两个互斥，走同一张工具回合卡。 */
+  pdf?: PdfPanelBridge;
   collapsed: boolean;
   onToggle: () => void;
   onOpenHistory?: () => void;
   onChanged: () => void;
 }) {
-  const [items, setItems] = useState<Item[]>(() => [welcomeItemOf(Boolean(sheet), Boolean(slides))]);
+  const [items, setItems] = useState<Item[]>(() => [welcomeItemOf(Boolean(sheet), Boolean(slides), Boolean(pdf))]);
   const [input, setInput] = useState("");
   const [mode, setMode] = useState<AiMode>("semi");
   const modeRef = useRef<AiMode>("semi");
@@ -676,8 +773,8 @@ export function AIPanel({
     setBusy(v);
   }, []);
 
-  /** 新会话开头那句引导语：表格、幻灯片与文档说的不是一回事。 */
-  const welcomeItem = welcomeItemOf(Boolean(sheet), Boolean(slides));
+  /** 新会话开头那句引导语：表格、幻灯片、PDF 与文档说的不是一回事。 */
+  const welcomeItem = welcomeItemOf(Boolean(sheet), Boolean(slides), Boolean(pdf));
 
   const refreshSettings = useCallback(async () => {
     const s = (await window.officeCopilot.getSettings()) as AppSettings;
@@ -1046,10 +1143,31 @@ export function AIPanel({
         onChanged();
         return;
       }
+      if (card.land.kind === "pdf") {
+        const result = await pdf?.onCommit(card.land.edits, card.summary);
+        // 一批要么全写要么一个字都不写（§2.4）：引擎回 failures 时磁盘上没动过，卡片如实说"没写入"。
+        if (!result || !result.ok || !result.document) {
+          patchToolCard(id, (c) => ({
+            ...c,
+            status: "failed",
+            message:
+              (result?.failures?.length ? pdfFailureText(result.failures) : result?.message) ||
+              "这份 PDF 已经不在了，改动没有写入。",
+          }));
+          return;
+        }
+        patchToolCard(id, (c) => ({
+          ...c,
+          status: "applied",
+          message: `已写入 ${(result.applied ?? []).length} 处文字：追加 ${result.deltaBytes ?? 0} 字节增量，原来的字节没重排。要回退请在 PDF 面板点「撤销上一次保存」。`,
+        }));
+        onChanged();
+        return;
+      }
       // idle 只挂在还在等提案的卡上，那种卡没有落地按钮；真被点到时如实报，不假装写入了。
       patchToolCard(id, (c) => ({ ...c, status: "failed", message: "这份提案里还没有能落地的改动。" }));
     },
-    [onChanged, patchToolCard, sheet, slides],
+    [onChanged, patchToolCard, sheet, slides, pdf],
   );
 
   /**
@@ -1061,6 +1179,7 @@ export function AIPanel({
   function autoToastOf(land: ToolLand): string {
     if (land.kind === "chart") return "全自动：图表已排进待写清单，保存后写进文件。";
     if (land.kind === "slide") return "全自动：已直接写入演示文稿，可在幻灯片面板撤销上一次保存。";
+    if (land.kind === "pdf") return "全自动：已直接写入这份 PDF（追加一段增量），可在 PDF 面板撤销上一次保存。";
     return "全自动：已直接写入表格，可在修改历史里撤销这次改动。";
   }
 
@@ -1068,7 +1187,7 @@ export function AIPanel({
    * 按格式挑那一个代理：桥不在（文件已关）就不给，卡片此时也没有地方可落。
    *
    * @param format 卡片格式。
-   * @returns 交给 `runToolAsk` 的那一个调用；两个代理的结果都在这里折成同一种形状（§3.2）。
+   * @returns 交给 `runToolAsk` 的那一个调用；三个代理的结果都在这里折成同一种形状（§3.2）。
    */
   const toolRunnerOf = useCallback(
     (format: ToolFormat): ToolRunner | null =>
@@ -1085,25 +1204,38 @@ export function AIPanel({
                 }),
               )
           : null
-        : slides
-          ? async (input) =>
-              slideToolOutcome(
-                await runSlideAgent({
-                  deck: slides.deck,
-                  instruction: input.instruction,
-                  providerId: input.providerId,
-                  messages: input.messages,
-                  isPaused: input.isPaused,
-                }),
-              )
-          : null,
-    [sheet, slides],
+        : format === "slide"
+          ? slides
+            ? async (input) =>
+                slideToolOutcome(
+                  await runSlideAgent({
+                    deck: slides.deck,
+                    instruction: input.instruction,
+                    providerId: input.providerId,
+                    messages: input.messages,
+                    isPaused: input.isPaused,
+                  }),
+                )
+            : null
+          : pdf
+            ? async (input) =>
+                pdfToolOutcome(
+                  await runPdfAgent({
+                    doc: pdf.document,
+                    instruction: input.instruction,
+                    providerId: input.providerId,
+                    messages: input.messages,
+                    isPaused: input.isPaused,
+                  }),
+                )
+            : null,
+    [sheet, slides, pdf],
   );
 
   /**
    * 跑一次工具任务：转工具回合，结果落到指定或新建的提案卡上。
    *
-   * 表格代理与幻灯片代理各说各的话，但卡片装配、暂停续跑、聊天模式不动文件这三段只有一份（§3.2）。
+   * 表格、幻灯片与 PDF 三个代理各说各的话，但卡片装配、暂停续跑、聊天模式不动文件这三段只有一份（§3.2）。
    *
    * @param opts.format 当前格式；标题、"没动它"说的对象与跑哪一个代理都从它取。
    * @param opts.instruction 用户原话；点「继续」时还是这一句。
@@ -1215,7 +1347,7 @@ export function AIPanel({
   /**
    * 用户那句诉求 → 当前格式的工具回合。
    *
-   * @param format 表格还是幻灯片；一句 `sheet`/`slides` 的说法都写在 `TOOL_CARD_COPY` 里。
+   * @param format 表格、幻灯片还是 PDF；一句 `sheet`/`slides`/`pdf` 的说法都写在 `TOOL_CARD_COPY` 里。
    * @param instruction 原话（首尾空白会被去掉）。
    */
   const askTool = useCallback(
@@ -1553,7 +1685,7 @@ export function AIPanel({
     async (raw: string) => {
       const text = raw.trim();
       if (!text || busyRef.current) return;
-      // 表格与幻灯片都没有"选区改写"这条路：分析、整理、计算都交给代理决定出不出提案。
+      // 表格、幻灯片与 PDF 都没有"选区改写"这条路：分析、整理、计算都交给代理决定出不出提案。
       if (sheet) {
         await askTool("sheet", text);
         return;
@@ -1562,13 +1694,17 @@ export function AIPanel({
         await askTool("slide", text);
         return;
       }
+      if (pdf) {
+        await askTool("pdf", text);
+        return;
+      }
       if (modeRef.current !== "chat") {
         await askAgent(text);
         return;
       }
       await runChat({ prompt: text });
     },
-    [askAgent, askTool, runChat, sheet, slides],
+    [askAgent, askTool, runChat, sheet, slides, pdf],
   );
 
   const stopStream = useCallback(() => {
@@ -2120,8 +2256,8 @@ export function AIPanel({
                 </>
               )}
             </div>
-            {/* 快捷指令全是文档动作（改写、排版），表格与幻灯片模式下都不给出来。 */}
-            {!sheet && !slides && mode !== "chat" && (
+            {/* 快捷指令全是文档动作（改写、排版），表格、幻灯片与 PDF 模式下都不给出来——点了会去打编辑器，不是这份文件。 */}
+            {!sheet && !slides && !pdf && mode !== "chat" && (
               <div className="ai-pop-wrap">
                 <button
                   type="button"
@@ -2195,7 +2331,9 @@ export function AIPanel({
                 ? SHEET_MODE_HINTS[mode]
                 : slides
                   ? SLIDE_MODE_HINTS[mode]
-                  : MODES.find((m) => m.id === mode)?.hint}
+                  : pdf
+                    ? PDF_MODE_HINTS[mode]
+                    : MODES.find((m) => m.id === mode)?.hint}
             </div>
           )}
           <textarea
@@ -2213,9 +2351,11 @@ export function AIPanel({
                 ? "说要对这张表做什么，⌘/Ctrl+Enter 发送。例如：按区域汇总销售额，再删掉重复的行。"
                 : slides
                   ? "说要对这份文稿改哪里，⌘/Ctrl+Enter 发送。例如：把第 1 页标题改成 Q3 复盘，第 2 页那个文本框往下挪 60 像素。"
-                  : mode === "chat"
-                    ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
-                    : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
+                  : pdf
+                    ? "说要对这份 PDF 改哪里，⌘/Ctrl+Enter 发送。例如：把第 1 页标题里的 2026 换成 2027（字数得跟原文一样）。"
+                    : mode === "chat"
+                      ? "和 AI 聊聊这份文档，⌘/Ctrl+Enter 发送。"
+                      : "描述要怎么改这份文档，⌘/Ctrl+Enter 发送。例如：在第三节后加一张要点汇总表。"
             }
           />
           <div className="composer-row">

@@ -1359,7 +1359,7 @@ export function App() {
         onRevert: revertSlideEdits,
       }
     : undefined;
-  // pdf 也只有一条落地口：手工草稿与以后的 AI 提案都交给 commitPdfEdits，撤销凭据同样只有一份。
+  // pdf 也只有一条落地口：面板里的手工草稿与 AI 提案都交给 commitPdfEdits，撤销凭据与修改历史同样只有一份。
   const pdfBridge = pdfDoc
     ? {
         document: pdfDoc,
@@ -1533,6 +1533,7 @@ export function App() {
             docKey={filePath ?? "未命名文档"}
             sheet={sheetBridge}
             slides={slideBridge}
+            pdf={pdfBridge}
             collapsed={aiCollapsed}
             onToggle={() => setAiCollapsed((v) => !v)}
             onOpenHistory={() => setHistoryOpen(true)}
