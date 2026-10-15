@@ -51,7 +51,7 @@ import { Welcome } from "./components/Welcome.js";
 import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
 import type { PptxEditRequest, PresentationModel } from "@office-copilot/pptx-io";
-import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
+import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io/pure";
 import { SlideDeck } from "./slides/SlideDeck.js";
 import { PdfView } from "./pdf/PdfView.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";

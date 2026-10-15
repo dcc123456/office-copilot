@@ -6,7 +6,7 @@
  * 什么算一条 PDF 改动、怎么挑出最近一条没撤销的。回滚的真身不在这里——记录里的 `applied` 送回主进程，
  * 由 `pdf-io` 的 `revertPdfTextEdits` 对着现场核对旧文字再写回（§2.5）。
  */
-import type { PdfAppliedEdit } from "@office-copilot/pdf-io";
+import type { PdfAppliedEdit } from "@office-copilot/pdf-io/pure";
 
 /**
  * 一次 PDF 改动在历史里的样子。

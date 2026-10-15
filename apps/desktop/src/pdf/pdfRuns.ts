@@ -14,7 +14,7 @@ import {
   type PdfReadModel,
   type PdfTextEdit,
   type PdfTextRun,
-} from "@office-copilot/pdf-io";
+} from "@office-copilot/pdf-io/pure";
 
 /** 一条草稿在渲染层里的样子：`key` 用引擎的 `pdfTargetKey`，`text` 是用户敲的新文字。 */
 export type PdfDrafts = Record<string, string>;

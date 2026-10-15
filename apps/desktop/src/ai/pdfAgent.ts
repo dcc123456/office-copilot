@@ -19,7 +19,7 @@ import {
   targetOfRun,
   type PdfReadModel,
   type PdfTextEdit,
-} from "@office-copilot/pdf-io";
+} from "@office-copilot/pdf-io/pure";
 import { parseToolArguments, PDF_TOOLS, type PdfEditT, type PdfToolName, type SubmitProposalArgsT } from "@office-copilot/pdf-tools";
 import type { ToolCall, ToolTurnMessage, ToolTurnRequest, ToolTurnResult } from "../global.js";
 import { readOnlyReason, runsOfPage } from "../pdf/pdfRuns.js";

@@ -7,7 +7,7 @@
  * **内容流引用与起始下标只能由代理按现场模型填**，模型自己报的坐标一律不进请求。
  */
 import { describe, expect, it } from "vitest";
-import type { PdfReadModel, PdfTextRun } from "@office-copilot/pdf-io";
+import type { PdfReadModel, PdfTextRun } from "@office-copilot/pdf-io/pure";
 import type { ToolTurnRequest, ToolTurnResult } from "../global.js";
 import { pdfContextOf, pdfRequestsOfProposal, runPdfAgent } from "./pdfAgent.js";
 

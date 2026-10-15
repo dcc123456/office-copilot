@@ -6,7 +6,7 @@
  * （§2.1），所以只把引擎的错误码翻成中文。
  */
 import { describe, expect, it } from "vitest";
-import { isRunEditable, pdfTargetKey, type PdfReadModel, type PdfTextRun, type PdfTextTarget } from "@office-copilot/pdf-io";
+import { isRunEditable, pdfTargetKey, type PdfReadModel, type PdfTextRun, type PdfTextTarget } from "@office-copilot/pdf-io/pure";
 import { byteBudgetNote, pdfFailureText, pendingPdfEdits, readOnlyReason, runsOfPage } from "./pdfRuns.js";
 
 /** 造一条可读的 run。 */

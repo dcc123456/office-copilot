@@ -6,7 +6,7 @@
  * 不按数组顺序；③ 记录只存改动本身，不存整包字节。
  */
 import { describe, expect, it } from "vitest";
-import type { PdfAppliedEdit } from "@office-copilot/pdf-io";
+import type { PdfAppliedEdit } from "@office-copilot/pdf-io/pure";
 import { isPdfEditRecord, pdfEditRecordOf, pickLatestPdfEdit } from "./pdfHistory.js";
 
 const EDIT: PdfAppliedEdit = {

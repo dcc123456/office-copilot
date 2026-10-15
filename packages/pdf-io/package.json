@@ -11,6 +11,11 @@
       "import": "./dist/index.js",
       "default": "./src/index.ts"
     },
+    "./pure": {
+      "types": "./dist/pure.d.ts",
+      "import": "./dist/pure.js",
+      "default": "./src/pure.ts"
+    },
     "./testing": {
       "types": "./dist/test-pdf.d.ts",
       "import": "./dist/test-pdf.js",

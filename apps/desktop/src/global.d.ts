@@ -1,6 +1,6 @@
 import type { ResolvedChart, SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
 import type { PptxEditPayload, PptxRevertPayload, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
-import type { PdfAppliedEdit, PdfEditFailure, PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
+import type { PdfAppliedEdit, PdfEditFailure, PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io/pure";
 
 /** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
 export interface SheetOpenResult {

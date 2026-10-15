@@ -9,15 +9,10 @@
 import { describe, expect, it } from "vitest";
 import {
   applyPdfTextEdits,
-  isRunEditable,
-  pdfTargetKey,
   readPdfModel,
   revertPdfTextEdits,
-  runEditBlock,
-  targetOfRun,
-  type PdfTextRun,
-  type PdfTextTarget,
 } from "./pdf-file.js";
+import { isRunEditable, pdfTargetKey, runEditBlock, targetOfRun, type PdfTextRun, type PdfTextTarget } from "./pdf-model.js";
 import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, cidNoToUnicodeFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
 
 /** 按解出来的文字找定位键。 */

@@ -7,7 +7,7 @@
  * 所以改长了交给引擎回 `length-mismatch`，这里只把它翻成中文（§5.7）。
  */
 import { useCallback, useMemo, useState } from "react";
-import { isRunEditable, pdfTargetKey, targetOfRun, type PdfReadModel, type PdfTextEdit } from "@office-copilot/pdf-io";
+import { isRunEditable, pdfTargetKey, targetOfRun, type PdfReadModel, type PdfTextEdit } from "@office-copilot/pdf-io/pure";
 import type { PdfEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
 import { byteBudgetNote, pdfFailureText, pendingPdfEdits, readOnlyReason, runsOfPage, type PdfDrafts } from "./pdfRuns.js";

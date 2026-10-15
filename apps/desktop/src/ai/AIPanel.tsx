@@ -65,7 +65,7 @@ import type { SheetEditT } from "@office-copilot/sheet-tools";
 import type { PptxEditRequest, PresentationModel, ShapeBoxPx } from "@office-copilot/pptx-io";
 import type { PptxEditT } from "@office-copilot/pptx-tools";
 import type { PdfEditT } from "@office-copilot/pdf-tools";
-import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io";
+import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io/pure";
 import { pdfFailureText } from "../pdf/pdfRuns.js";
 import { LAYER_DIRECTION_LABEL, SHAPE_BOX_FIELD_LABEL } from "../slides/slideDeckModel.js";
 import type {

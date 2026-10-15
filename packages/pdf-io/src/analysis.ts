@@ -14,7 +14,7 @@
  * `pagesTruncated` / `runsTruncated` / `textTruncated`，让模型接着加大上限往下读，而不是误以为那就是全部。
  */
 import { clipText } from "@office-copilot/shared";
-import { isRunEditable, runEditBlock, type PdfReadModel, type PdfRunBlock, type PdfTextRun } from "./pdf-file.js";
+import { isRunEditable, runEditBlock, type PdfReadModel, type PdfRunBlock, type PdfTextRun } from "./pdf-model.js";
 
 /** 单条 run 文字上送的上限（字数；与幻灯侧 `RUN_TEXT_LIMIT`、表格侧单格 120 字同一口径，§2.9）。 */
 const RUN_TEXT_LIMIT = 120;
