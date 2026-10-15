@@ -175,6 +175,89 @@ export function inheritanceDeckParts(): DeckParts {
 }
 
 /**
+ * 一份把**字号继承链五档**各占一格的 deck（在 {@link inheritanceDeckParts} 的链上加母版 `p:txStyles`），
+ * 给 `text-styles.ts` 与读模型的 `effectiveSizePt` 用。
+ *
+ * 每一档挑一个互不相同的数，且**下层也全都写了值**——这样"少问一层"或"问错层"都会答出一个看得出错在哪的数字，
+ * 而不是恰好撞对：
+ * - `id=2` 标题（`ph type="ctrTitle"`）两段：段一自己写了 `a:pPr/a:defRPr sz="2000"` → **paragraph** 20pt；
+ *   段二什么都没写，落到版式那一格的 `a:lstStyle` `sz="4000"` → **layout** 40pt（母版 `titleStyle` 写的 44pt 必须输）。
+ * - `id=3` 正文（`body idx="1"`）：版式那一格 `lstStyle` 是空的，母版 `body` 那格写了 `sz="2400"` → **master-list** 24pt
+ *   （母版 `bodyStyle` 的 32pt 必须输）；另一段 run 自己写了 `sz="1000"` → **run** 10pt，`sizePt` 同时有值（写侧靠它）。
+ * - `id=4` 文本框（无 `<p:ph>`）自己写了 `a:lstStyle` `sz="1400"` → **shape-list** 14pt；
+ *   它第二段是 `lvl="1"`，而链上只写了 `lvl1pPr` 那一档 → 两格都必须 undefined（**不许拿 18pt 凑**）。
+ * - `id=5` 文本框（无 `<p:ph>`、没写 `lstStyle`）整条链只剩母版 `p:txStyles/otherStyle` `sz="1800"` → **master-text-styles** 18pt。
+ *
+ * `p:txStyles` 的元素名与位置按真文件核过（`AGENTS.md` §6.2）：本机 python-pptx 默认模板与 WPS 模板的母版
+ * 顶层子元素顺序都是 `cSld`、`clrMap`、`sldLayoutIdLst`、`txStyles`，三档都**不带** `@phType` / `@styleId`。
+ *
+ * @returns 直接传给 {@link buildDeckBytes} 的部件表。
+ */
+export function textStyleDeckParts(): DeckParts {
+  return {
+    ...inheritanceDeckParts(),
+    "ppt/slides/slide1.xml":
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/>" +
+      '<a:p><a:pPr><a:defRPr sz="2000"/></a:pPr><a:r><a:t>段一</a:t></a:r></a:p>' +
+      "<a:p><a:r><a:t>段二</a:t></a:r></a:p>" +
+      "</p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="952500" y="1143000"/><a:ext cx="2857500" cy="762000"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/>" +
+      "<a:p><a:r><a:t>正文甲</a:t></a:r></a:p>" +
+      '<a:p><a:r><a:rPr sz="1000"/><a:t>正文乙</a:t></a:r></a:p>' +
+      "</p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="4" name="TextBox 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="476250" y="476250"/><a:ext cx="1905000" cy="952500"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/>" +
+      '<a:lstStyle><a:lvl1pPr><a:defRPr sz="1400"/></a:lvl1pPr></a:lstStyle>' +
+      "<a:p><a:r><a:t>文本一</a:t></a:r></a:p>" +
+      '<a:p><a:pPr lvl="1"/><a:r><a:t>文本二</a:t></a:r></a:p>' +
+      "</p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="5" name="TextBox 4"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="476250" y="1714500"/><a:ext cx="1905000" cy="952500"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>文本三</a:t></a:r></a:p></p:txBody></p:sp>" +
+      "</p:spTree></p:cSld></p:sld>",
+    // 版式：`ctrTitle` 那一格写 40pt（layout 档），`body idx="1"` 那格留空（让链继续问母版那一格）。
+    "ppt/slideLayouts/slideLayout1.xml":
+      '<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" type="titleOnly" name="Title Only">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/>" +
+      '<a:lstStyle><a:lvl1pPr><a:defRPr sz="4000"/></a:lvl1pPr></a:lstStyle>' +
+      "<a:p><a:endParaRPr/></a:p></p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="685800" y="1828800"/><a:ext cx="4572000" cy="2743200"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>" +
+      "</p:spTree></p:cSld>" +
+      '<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>',
+    // 母版：`body` 那格的 `lstStyle` 写 24pt（master-list 档），末尾 `p:txStyles` 三档各写一个数（最后一档）。
+    "ppt/slideMasters/slideMaster1.xml":
+      '<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="914400" y="457200"/><a:ext cx="7315200" cy="1143000"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="762000" y="1524000"/><a:ext cx="3810000" cy="1905000"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/>" +
+      '<a:lstStyle><a:lvl1pPr><a:defRPr sz="2400"/></a:lvl1pPr></a:lstStyle>' +
+      "<a:p><a:endParaRPr/></a:p></p:txBody></p:sp>" +
+      "</p:spTree></p:cSld>" +
+      '<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>' +
+      "<p:sldLayoutIdLst><p:sldLayoutId id=\"2147483649\" r:id=\"rId1\"/></p:sldLayoutIdLst>" +
+      "<p:txStyles>" +
+      '<p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>' +
+      '<p:bodyStyle><a:lvl1pPr><a:defRPr sz="3200"/></a:lvl1pPr><a:lvl2pPr><a:defRPr sz="2800"/></a:lvl2pPr></p:bodyStyle>' +
+      '<p:otherStyle><a:defPPr/><a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr></p:otherStyle>' +
+      "</p:txStyles></p:sldMaster>",
+  };
+}
+
+/**
  * 一份带**主题色**的 deck（在 {@link inheritanceDeckParts} 的继承链上再接一层 `theme1.xml`），给 `theme.ts` 的解色用例用。
  *
  * 色板刻意挑成一眼能核对的三个值，并按 `p:clrMap` 的映射错位一次，防止"按同名回退"蒙对：

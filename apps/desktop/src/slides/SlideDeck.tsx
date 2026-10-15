@@ -23,6 +23,7 @@ import {
   pendingEdits,
   SHAPE_BOX_FIELD_LABEL,
   SHAPE_BOX_FIELDS,
+  sizeFieldHint,
   type SlideDraft,
 } from "./slideDeckModel.js";
 import "../styles/slides.css";
@@ -381,6 +382,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                             type="number"
                             min={1}
                             step={0.5}
+                            title={sizeFieldHint(currentFormat)}
                             placeholder={currentFormat.sizePt === undefined ? "继承" : ""}
                             value={draft?.sizePt ?? currentFormat.sizePt ?? ""}
                             onChange={(event) => patchDraft(key, { sizePt: numberOrUndefined(event.target.value) })}

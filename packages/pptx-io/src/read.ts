@@ -12,9 +12,10 @@
  * 它们是只读事实，不进任何写侧入参。
  */
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
-import { createGeometryInheritance, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance, type PlaceholderKey } from "./inherit.js";
+import { createGeometryInheritance, placeholderKeyOf, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance } from "./inherit.js";
 import { PRESENTATION_PART, isNotesSlideRelationship } from "./parts.js";
 import { createColorInheritance, type ColorInheritance } from "./theme.js";
+import { createTextStyleInheritance, readShapeTextStyles, type InheritedSizePt, type SizePtSource, type TextStyleInheritance } from "./text-styles.js";
 import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
 /** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
@@ -60,8 +61,18 @@ export interface SlideShape {
 
 /** 一条 run 自己的字符格式（读侧已换算成 pt 与 `#rrggbb`）。 */
 export interface RunFormat {
-  /** 字号 pt；该 run 没写 `sz`（从版式/母版继承）时 undefined——继承值不许猜（D3）。 */
+  /** 字号 pt；**只表示这条 run 自己写了 `sz`**（从版式/母版继承时 undefined，写侧只认这一格，D3 不许烘焙）。 */
   sizePt?: number;
+  /**
+   * PowerPoint 实际画多大的**有效**字号（pt）：自己写了 `sz` 就用它，没写则沿
+   * 段落 `a:pPr/a:defRPr` → 形状 `a:lstStyle` → 版式那一格 → 母版那一格 → 母版 `p:txStyles` 逐层算出来。
+   *
+   * 与几何的 `boxPx` / `effectiveBoxPx` 同一分工：这份只读，**绝不烤回 `<a:rPr sz>`**（一烤就永久切断母版联动，`AGENTS.md` §2.12）。
+   * 整条链都没写时 undefined，不许拿 18pt 这类"常见默认"凑。
+   */
+  effectiveSizePt?: number;
+  /** `effectiveSizePt` 来自哪一层；与它成对出现，视图那句"这个字号继承自…"靠它，不许自己猜。 */
+  effectiveSizeSource?: SizePtSource;
   /** 粗体；只有显式写了 `b` 才给值，没写给 undefined（同样是继承）。 */
   bold?: boolean;
   /** 文字颜色 `#rrggbb`（§2.2）：`srgbClr` 直接要，`schemeClr` 沿母版 `p:clrMap` 与主题 `a:clrScheme` 解出来；带变换的、`phClr` 与继承来的都给 undefined。 */
@@ -159,13 +170,14 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
   const sldIds = idList ? findChildren(idList, "p:sldId") : [];
   const inheritance = createGeometryInheritance(pkg);
   const colors = createColorInheritance(pkg);
+  const texts = createTextStyleInheritance(pkg);
   const slides: Slide[] = [];
   for (const [order, sldId] of sldIds.entries()) {
     const relId = sldId.attributes["r:id"];
     const rel = rels.find((entry) => entry.id === relId);
     if (!rel) continue; // 关系解析不到：跳过这张，宁可少读也不凭空造一张空幻灯片
     const partPath = resolveTarget(PRESENTATION_PART, rel.target);
-    const { shapes, readFailure } = await readSlideShapes(pkg, partPath, inheritance, colors);
+    const { shapes, readFailure } = await readSlideShapes(pkg, partPath, inheritance, colors, texts);
     slides.push({
       partPath,
       order,
@@ -185,6 +197,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
  * @param partPath 幻灯片部件路径。
  * @param inheritance 整份 deck 共用一个的几何继承解析器（版式/母版只解析一次）。
  * @param colors 整份 deck 共用一个的主题色解析器（母版 `clrMap` 与 theme 的 `clrScheme` 只解析一次）。
+ * @param texts 整份 deck 共用一个的字号继承解析器（版式/母版的 `lstStyle` 与母版 `p:txStyles` 只解析一次）。
  * @returns 形状数组 + 失败码：部件缺失 `missing-part`、XML 解析失败 `invalid-xml`、没有 `cSld > spTree` `no-sp-tree`；
  *          读得动时 `readFailure` 为 undefined，**这时空数组就是"这一页真的没有形状"**。
  */
@@ -193,6 +206,7 @@ async function readSlideShapes(
   partPath: string,
   inheritance: GeometryInheritance,
   colors: ColorInheritance,
+  texts: TextStyleInheritance,
 ): Promise<{ shapes: SlideShape[]; readFailure?: SlideReadFailure }> {
   const xml = await readText(pkg.zip, partPath);
   if (xml === undefined) return { shapes: [], readFailure: "missing-part" };
@@ -209,7 +223,7 @@ async function readSlideShapes(
   for (const el of children(spTree)) {
     const kind = SHAPE_TAGS[el.name];
     if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
-    shapes.push(await readShape(el, kind, partPath, inheritance, colors));
+    shapes.push(await readShape(el, kind, partPath, inheritance, colors, texts));
   }
   return { shapes };
 }
@@ -261,7 +275,8 @@ async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<S
  * @param slidePartPath 所属幻灯片的部件路径，用来找它自己的版式（只有占位符会用到）。
  * @param inheritance 几何继承解析器。
  * @param colors 主题色解析器（run 上只写了 `a:schemeClr` 时用它解成 hex）。
- * @returns 只读快照：自己写的事实（`boxPx`/`hasOwnGeometry`）与算完继承的事实（`effectiveBoxPx`/`boxPxSources`）。
+ * @param texts 字号继承解析器（run 没写 `sz` 时沿段落→形状→版式→母版→`p:txStyles` 求有效字号）。
+ * @returns 只读快照：自己写的事实（`boxPx`/`hasOwnGeometry`/`sizePt`）与算完继承的事实（`effectiveBoxPx`/`boxPxSources`/`effectiveSizePt`）。
  */
 async function readShape(
   el: Element,
@@ -269,6 +284,7 @@ async function readShape(
   slidePartPath: string,
   inheritance: GeometryInheritance,
   colors: ColorInheritance,
+  texts: TextStyleInheritance,
 ): Promise<SlideShape> {
   const nvPr = firstChild(el, "p:nvSpPr") ?? firstChild(el, "p:nvPicPr") ?? firstChild(el, "p:nvGraphicFramePr") ?? firstChild(el, "p:nvGrpSpPr");
   const cNvPr = nvPr ? firstChild(nvPr, "p:cNvPr") : undefined;
@@ -281,10 +297,11 @@ async function readShape(
   const runsByParagraph = paragraphs.map((p) => findChildren(p, "a:r"));
   const ownAxes = readExplicitBoxAxes(spPr);
   // 非占位符没有继承这一说（PowerPoint 不给它查版式），key 传 undefined 让解析器只回自己写的那几轴。
-  const key: PlaceholderKey | undefined = ph
-    ? { idx: Number(ph.attributes["idx"] ?? 0), type: String(ph.attributes["type"] ?? "obj") }
-    : undefined;
+  const key = placeholderKeyOf(el);
   const effective = await inheritance.resolve(slidePartPath, key, ownAxes);
+  // 每段一档继承字号（链上要读版式/母版部件，形状那一档读一次就够）。
+  const shapeTextStyles = readShapeTextStyles(el);
+  const inheritedSizeByParagraph = await Promise.all(paragraphs.map((p) => texts.resolve(slidePartPath, shapeTextStyles, paragraphSizeInput(p))));
   return {
     shapeId: Number(cNvPr?.attributes["id"] ?? 0),
     name: String(cNvPr?.attributes["name"] ?? ""),
@@ -295,12 +312,47 @@ async function readShape(
     paragraphTexts: paragraphs.map((p) => text(p)),
     paragraphRunCounts: runsByParagraph.map((runs) => runs.length),
     paragraphRunTexts: runsByParagraph.map((runs) => runs.map((run) => text(run))),
-    // run 格式可能要吃一次继承链（schemeClr 解色要读母版与主题），所以逐 run 异步算、并发读，顺序不变。
-    paragraphRunFormats: await Promise.all(runsByParagraph.map((runs) => Promise.all(runs.map((run) => readRunFormat(run, colors, slidePartPath))))),
+    // run 格式可能要吃两次继承链（解色要读母版与主题，字号要读版式与 `p:txStyles`），所以逐 run 异步算、并发读，顺序不变。
+    paragraphRunFormats: await Promise.all(
+      runsByParagraph.map(async (runs, paragraphIndex) => {
+        const inherited = inheritedSizeByParagraph[paragraphIndex];
+        return Promise.all(runs.map(async (run) => withEffectiveSize(await readRunFormat(run, colors, slidePartPath), inherited)));
+      }),
+    ),
     boxPx: completeBox(ownAxes),
     effectiveBoxPx: effective.box,
     boxPxSources: effective.sources,
   };
+}
+
+/**
+ * 读一个段落的字号链输入：层级与这一段自己写的 `defRPr @sz`。
+ *
+ * @param paragraph 段落元素 `<a:p>`。
+ * @returns `level` 是 `<a:pPr @lvl>`（0 基，没写按 0）；`sizePt` 只在 `<a:pPr><a:defRPr @sz>` 真写了才给（半磅已换成 pt，§2.1）。
+ */
+function paragraphSizeInput(paragraph: Element): { level: number; sizePt?: number } {
+  const pPr = firstChild(paragraph, "a:pPr");
+  const rawLvl = Number(pPr?.attributes["lvl"]);
+  const rawSz = pPr ? firstChild(pPr, "a:defRPr")?.attributes["sz"] : undefined;
+  const halfPoints = Number(rawSz);
+  return {
+    level: Number.isFinite(rawLvl) ? rawLvl : 0,
+    ...(rawSz !== undefined && Number.isFinite(halfPoints) ? { sizePt: halfPointToPt(halfPoints) } : {}),
+  };
+}
+
+/**
+ * 给一条 run 的格式补上"实际画多大"那一档，**一个字都不碰 `sizePt`**。
+ *
+ * @param format `readRunFormat` 读出的显式格式（写侧只看这份）。
+ * @param inherited 这一段在继承链上的字号；整条链都没写时 undefined。
+ * @returns `sizePt` 有值时有效字号就是它自己（来源记 `run`）；否则用链上那一档；两边都没有时原样返回。
+ */
+function withEffectiveSize(format: RunFormat, inherited: InheritedSizePt | undefined): RunFormat {
+  if (format.sizePt !== undefined) return { ...format, effectiveSizePt: format.sizePt, effectiveSizeSource: "run" };
+  if (!inherited) return format;
+  return { ...format, effectiveSizePt: inherited.sizePt, effectiveSizeSource: inherited.source };
 }
 
 /**

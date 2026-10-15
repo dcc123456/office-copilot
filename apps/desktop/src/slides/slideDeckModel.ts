@@ -4,7 +4,7 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import type { BoxAxisSource, PptxEditRequest, PresentationModel, RunFontFormat, ShapeBoxPx, ShapeGeometryPatch, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+import type { BoxAxisSource, PptxEditRequest, PresentationModel, RunFontFormat, RunFormat, ShapeBoxPx, ShapeGeometryPatch, SizePtSource, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
 
 /**
  * 形状几何的四个字段，按视图显示的顺序（左、上、宽、高）。
@@ -40,6 +40,37 @@ export function inheritedBoxNote(shape: SlideShape): string {
   const numbers = fields.map((field) => `${SHAPE_BOX_FIELD_LABEL[field]} ${shape.effectiveBoxPx[field]}`).join(" · ");
   const layers = [...new Set(fields.map((field) => shape.boxPxSources[field]).filter((source) => source !== undefined).map((source) => BOX_SOURCE_LABEL[source]))].join("、");
   return `位置与尺寸继承自${layers}：${numbers} px（写死就切断版式联动，本视图只读，spec D3）。`;
+}
+
+/**
+ * 字号继承来源层的中文叫法（`pptx-io` 给的是英文层名，文案在本层组装，§5.7）。
+ * 六档与 `RunFormat.effectiveSizeSource` 一一对应，少写一档 TS 会报错——这正是我们要的兜底。
+ */
+const SIZE_SOURCE_LABEL: Record<SizePtSource, string> = {
+  run: "这条 run 自己写的",
+  paragraph: "这一段自己的段落默认字号",
+  "shape-list": "这个形状的文本样式",
+  layout: "版式那一格",
+  "master-list": "母版那一格",
+  "master-text-styles": "母版的文本样式",
+};
+
+/**
+ * 字号输入框上的 hover 说明：显式值与继承值说的是两件事。
+ *
+ * 输入框的 **value 只放显式值**（`RunFormat.sizePt`）：把继承来的 40pt 填进框里，用户一个字没敲也会产出一条
+ * `sz="4000"`，从此改母版字号不再联动——spec D3 那条红线。所以继承值只出现在这句说明里。
+ *
+ * @param format 这一格第一条 run 的读模型格式。
+ * @returns 中文一句：自己写了就说"当前 Xpt"；没写但链上算得出就说"当前 Xpt，继承自…"；整条链都没有才承认"未写"。
+ */
+export function sizeFieldHint(format: RunFormat): string {
+  if (format.sizePt !== undefined) return `当前 ${format.sizePt}pt（${SIZE_SOURCE_LABEL.run}）`;
+  const { effectiveSizePt, effectiveSizeSource } = format;
+  if (effectiveSizePt !== undefined && effectiveSizeSource !== undefined) {
+    return `当前 ${effectiveSizePt}pt，继承自${SIZE_SOURCE_LABEL[effectiveSizeSource]}（本形状没写字号，写死就切断母版联动）`;
+  }
+  return "这一格没写字号，继承链上也没找到（视图不写死，spec D3）";
 }
 
 /**

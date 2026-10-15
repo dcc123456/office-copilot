@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PptxEditRequest, PresentationModel, RunFormat, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, pendingEdits } from "./slideDeckModel.js";
+import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, pendingEdits, sizeFieldHint } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -260,5 +260,24 @@ describe("inheritedBoxNote：继承来的几何如实报数，但一个字都不
   it("报告了继承数之后，草稿里填几轴仍然一个字段都不交出（只读这条是红线）", () => {
     const deck = deckOf([inheritedShape({ leftPx: "master" }, { leftPx: 96 })]);
     expect(pendingEdits(deck, { [boxDraftKeyOf(PART, 2)]: { box: { leftPx: 500 } } })).toEqual([]);
+  });
+});
+
+describe("sizeFieldHint：字号框说的是「实际画多大」，写侧仍只看显式 sz（spec D3）", () => {
+  it("自己写了 sz 时只说自己写的，一句不提继承", () => {
+    expect(sizeFieldHint({ sizePt: 18, effectiveSizePt: 18, effectiveSizeSource: "run" })).toBe("当前 18pt（这条 run 自己写的）");
+  });
+
+  it("没写 sz 时给出链上算出来的数与来源层，单位写着 pt", () => {
+    expect(sizeFieldHint({ effectiveSizePt: 40, effectiveSizeSource: "layout" })).toBe("当前 40pt，继承自版式那一格（本形状没写字号，写死就切断母版联动）");
+  });
+
+  it("整条链都没写时一个数都不给，不许拿 18pt 这种常见默认凑", () => {
+    expect(sizeFieldHint({})).toBe("这一格没写字号，继承链上也没找到（视图不写死，spec D3）");
+  });
+
+  it("继承值只进说明、不进输入框：草稿没敲字号时一条 op 都不交出", () => {
+    const deck = deckOf([shapeOf(2, [["标题", 1, { effectiveSizePt: 40, effectiveSizeSource: "layout" }]])]);
+    expect(pendingEdits(deck, { [draftKeyOf(PART, 2, 0)]: { sizePt: undefined } })).toEqual([]);
   });
 });

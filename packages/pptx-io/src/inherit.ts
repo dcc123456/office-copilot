@@ -38,7 +38,7 @@ interface PlaceholderCell {
 }
 
 /** 版式那一格的类型 → 母版那一格的类型（`LayoutPlaceholder._base_placeholder` 的那张表，键是 XML 里的类型串）。 */
-const MASTER_TYPE_OF_LAYOUT_TYPE: Record<string, string> = {
+export const MASTER_TYPE_OF_LAYOUT_TYPE: Record<string, string> = {
   title: "title",
   ctrTitle: "title",
   body: "body",
@@ -178,7 +178,7 @@ async function readPlaceholderCells(pkg: OpcPackage, partPath: string): Promise<
   const cells: PlaceholderCell[] = [];
   for (const el of xml.children(spTree)) {
     if (localName(el.name) !== "sp") continue; // 只认顶层形状：组合里的子形状不参与这套匹配
-    const ph = placeholderOf(el);
+    const ph = placeholderKeyOf(el);
     if (!ph) continue;
     cells.push({ key: ph, axes: readExplicitBoxAxes(firstChild(el, "p:spPr")) });
   }
@@ -188,10 +188,12 @@ async function readPlaceholderCells(pkg: OpcPackage, partPath: string): Promise<
 /**
  * 取一个形状元素的 `<p:ph>` 匹配键。
  *
+ * 几何链、字号链与读模型三处都要"这格是不是占位符、按什么键匹配"，所以只有这一份（§3.2）。
+ *
  * @param shapeEl `<p:sp>` 元素。
  * @returns 占位符键（idx 缺省 0、type 缺省 `obj`）；不是占位符时 undefined。
  */
-function placeholderOf(shapeEl: xml.Element): PlaceholderKey | undefined {
+export function placeholderKeyOf(shapeEl: xml.Element): PlaceholderKey | undefined {
   const nvPr = firstChild(shapeEl, "p:nvSpPr") ?? firstChild(shapeEl, "p:nvGrpSpPr");
   const inner = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
   const ph = inner ? firstChild(inner, "p:ph") : undefined;

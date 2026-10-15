@@ -9,6 +9,7 @@
 export * from "./parts.js";
 export * from "./units.js";
 export * from "./inherit.js";
+export * from "./text-styles.js";
 export * from "./read.js";
 export * from "./analysis.js";
 export * from "./pptx-file.js";

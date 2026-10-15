@@ -3,7 +3,7 @@ import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
 import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
 import { auditPptxPackage } from "./audit.js";
-import { buildDeckBytes, colorDeckParts } from "./test-deck.js";
+import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, textStyleDeckParts } from "./test-deck.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -96,7 +96,8 @@ describe("pptx-io：读模型", () => {
     expect(title.paragraphTexts).toEqual(["标题甲副"]);
     expect(title.paragraphRunCounts).toEqual([2]);
     // 逐 run 的格式照实给：run0 只写了 b，run1 只写了 sz（半磅 1800 → 18pt），都没写颜色。
-    expect(title.paragraphRunFormats).toEqual([[{ bold: true }, { sizePt: 18 }]]);
+    // run0 两格字号都没有（这份夹具的链上没人写字号），run1 的 effective 就是它自己那一档 → 来源记 run。
+    expect(title.paragraphRunFormats).toEqual([[{ bold: true }, { sizePt: 18, effectiveSizePt: 18, effectiveSizeSource: "run" }]]);
   });
 });
 
@@ -640,7 +641,8 @@ describe("pptx-io：写进去再读回来，单位与颜色形态原样对上（
     const { model } = await readPresentation(await file.toBytes());
     const title = model.slides[0]!.shapes.find((s) => s.shapeId === 2)!;
     // 24.5pt → sz=2450 → 24.5pt；颜色大写落盘、小写读回（编辑器内一律 #rrggbb，§2.2）。
-    expect(title.paragraphRunFormats).toEqual([[{ sizePt: 24.5, bold: true, hex: "#3cb371" }]]);
+    // effective 两格同来：自己写了 sz 就是 run 那一档，视图不用再乘一次 100（§2.1 换算单点）。
+    expect(title.paragraphRunFormats).toEqual([[{ sizePt: 24.5, effectiveSizePt: 24.5, effectiveSizeSource: "run", bold: true, hex: "#3cb371" }]]);
     expect(title.boxPx).toEqual({ leftPx: 120, topPx: 60, widthPx: 500, heightPx: 250 });
     expect(title.hasOwnGeometry).toBe(true); // 用户明示覆盖后，这份几何就是形状自己的了
   });
@@ -659,7 +661,8 @@ describe("pptx-io：主题色 a:schemeClr 解成 hex（母版 p:clrMap + theme a
     expect(await auditPptxPackage(await buildDeckBytes(colorDeckParts()))).toEqual([]);
   });
 
-  it("带 lumMod/lumOff 的主题色与 phClr 都不给 hex，同段的 srgbClr 照旧直接要（不算错色）", async () => {    const { model } = await readPresentation(await buildDeckBytes(colorDeckParts()));
+  it("带 lumMod/lumOff 的主题色与 phClr 都不给 hex，同段的 srgbClr 照旧直接要（不算错色）", async () => {
+    const { model } = await readPresentation(await buildDeckBytes(colorDeckParts()));
     const body = model.slides[0]!.shapes.find((s) => s.shapeId === 3)!;
     // 变换的 HSL 语义本机没有能核对 PowerPoint 画面的通道，回 undefined 让视图显示"继承/未知"，
     // 而不是交一份猜的色；phClr 要由继承上下文定，单独一层同样解不出来。
@@ -680,5 +683,54 @@ describe("pptx-io：主题色 a:schemeClr 解成 hex（母版 p:clrMap + theme a
     const after = await (await PptxFile.open(await file.toBytes())).partText(partPath);
     expect(after).toBe(before);
     expect(before).not.toContain("#ffffff"); // 解析结果是只读事实，不是新写进部件的颜色
+  });
+});
+
+describe("pptx-io：有效字号的继承链（run → 段落 → 形状 lstStyle → 版式 → 母版 lstStyle → 母版 p:txStyles）", () => {
+  it("五档各占一格时每档都赢在自己那一格，下层写了值也不许越过去", async () => {
+    const shapes = (await readPresentation(await buildDeckBytes(textStyleDeckParts()))).model.slides[0]!.shapes;
+    // 夹具里四层全都写了字号（44 / 40 / 24 / 32 / 18 各不相同），所以"少问一层"或"问错层"都答得出一个错数。
+    expect(shapes.find((s) => s.shapeId === 2)!.paragraphRunFormats).toEqual([
+      [{ effectiveSizePt: 20, effectiveSizeSource: "paragraph" }],
+      [{ effectiveSizePt: 40, effectiveSizeSource: "layout" }],
+    ]);
+    expect(shapes.find((s) => s.shapeId === 3)!.paragraphRunFormats).toEqual([
+      [{ effectiveSizePt: 24, effectiveSizeSource: "master-list" }],
+      [{ sizePt: 10, effectiveSizePt: 10, effectiveSizeSource: "run" }],
+    ]);
+    expect(shapes.find((s) => s.shapeId === 5)!.paragraphRunFormats).toEqual([[{ effectiveSizePt: 18, effectiveSizeSource: "master-text-styles" }]]);
+  });
+
+  it("run 自己写了 sz 时 sizePt 与 effectiveSizePt 同时有值（写侧只认前者，D3 不许把继承值当显式值覆盖）", async () => {
+    const shapes = (await readPresentation(await buildDeckBytes(textStyleDeckParts()))).model.slides[0]!.shapes;
+    const own = shapes.find((s) => s.shapeId === 3)!.paragraphRunFormats[1]![0]!;
+    expect(own).toMatchObject({ sizePt: 10, effectiveSizeSource: "run" });
+    // 没写 sz 的那条只有 effective，sizePt 必须留空——字体编辑那批 op 全靠这一格判断"这算不算显式字号"。
+    const inherited = shapes.find((s) => s.shapeId === 3)!.paragraphRunFormats[0]![0]!;
+    expect(inherited.sizePt).toBeUndefined();
+    expect(inherited.effectiveSizePt).toBe(24);
+  });
+
+  it("形状自己写的 lstStyle 只覆盖了 lvl1：lvl=\"1\" 那段整条链都没有对应档时两格都不给，不许拿 18pt 凑", async () => {
+    const shapes = (await readPresentation(await buildDeckBytes(textStyleDeckParts()))).model.slides[0]!.shapes;
+    const textBox = shapes.find((s) => s.shapeId === 4)!.paragraphRunFormats;
+    expect(textBox).toEqual([[{ effectiveSizePt: 14, effectiveSizeSource: "shape-list" }], [{}]]);
+  });
+
+  it("夹具过了结构审计，且母版没有 p:txStyles 的那份 deck 一个继承字号都不给", async () => {
+    expect(await auditPptxPackage(await buildDeckBytes(textStyleDeckParts()))).toEqual([]);
+    const withoutTxStyles = (await readPresentation(await buildDeckBytes(inheritanceDeckParts()))).model.slides[0]!.shapes;
+    // 同一套链、只是母版少了 p:txStyles 与各格 lstStyle：这时每个 run 两格都是空的，视图念"未知"而不是 18pt。
+    expect(withoutTxStyles.map((s) => s.paragraphRunFormats)).toEqual([[[{}]], [[{}]], [[{}]]]);
+  });
+
+  it("继承来的字号只读不烤：读完原样回写，幻灯片与母版部件都逐字不变", async () => {
+    const file = await PptxFile.open(await buildDeckBytes(textStyleDeckParts()));
+    const slidePath = file.model.slides[0]!.partPath;
+    const before = (await file.partText(slidePath))!;
+    const reopened = await PptxFile.open(await file.toBytes());
+    expect(await reopened.partText(slidePath)).toBe(before);
+    expect(await reopened.partText("ppt/slideMasters/slideMaster1.xml")).toBe((await file.partText("ppt/slideMasters/slideMaster1.xml"))!);
+    expect(before).not.toContain('sz="4400"'); // 母版 titleStyle 那一档只进模型，不进部件
   });
 });
