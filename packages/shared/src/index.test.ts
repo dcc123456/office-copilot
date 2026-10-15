@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describePdfAuditIssue, summarizePdfAudit, type PdfAuditIssue } from "./index.js";
+import { describePdfAuditIssue, describeSlideReadFailure, summarizePdfAudit, type PdfAuditIssue } from "./index.js";
 
 describe("PDF 体检结论的那份文案", () => {
   it("整份文件级别的问题不带页号，页级的那条必须带「第 N 页」", () => {
@@ -36,5 +36,19 @@ describe("PDF 体检结论的那份文案", () => {
     expect(summarizePdfAudit([broken, limited, broken])).toBe("结构体检：2 处可能让阅读器打不开或丢内容，1 处能打开但有一部分改不了。");
     // 只有一档时不能把另一档写成「0 处」，那句是给终端与面板读的，不是给机器解析的
     expect(summarizePdfAudit([limited])).toBe("结构体检：1 处能打开但有一部分改不了。");
+  });
+});
+
+describe("shared：幻灯片那一页读不懂的三种说法", () => {
+  it("三种失败码各念各的，且都不说成\"这一页是空的\"", () => {
+    const sentences = (["missing-part", "invalid-xml", "no-sp-tree"] as const).map(describeSlideReadFailure);
+    expect(new Set(sentences).size).toBe(3);
+    for (const sentence of sentences) {
+      expect(sentence).not.toContain("没有形状。");
+      expect(sentence.length).toBeGreaterThan(0);
+    }
+    expect(sentences[0]).toContain("不在文件里");
+    expect(sentences[1]).toContain("解析失败");
+    expect(sentences[2]).toContain("形状树");
   });
 });

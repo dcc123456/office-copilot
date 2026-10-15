@@ -8,8 +8,8 @@
  * 上送内容默认截断（§2.9）：页数、每页形状数、每段 run 数各有上限，单条 run 文字 ≤120 字，
  * 被截掉的部分如实标 `truncated`，让模型接着调 `readSlideText` 往下读，而不是误以为那就是全部。
  */
-import { clipText } from "@office-copilot/shared";
-import { type PresentationModel, type RunFormat, type Slide, type SlideShape } from "./read.js";
+import { clipText, describeSlideReadFailure } from "@office-copilot/shared";
+import { type PresentationModel, type RunFormat, type Slide, type SlideReadFailure, type SlideShape } from "./read.js";
 import { emuToPx } from "./units.js";
 
 /** 单条 run 文字上送的上限（字数，含被截断的省略号；§2.9 的表格侧同名单格 120 字）。 */
@@ -80,6 +80,12 @@ export interface SlideOutlineEntry {
   }>;
   /** 形状清单是否被 `maxShapesPerSlide` 截断。 */
   shapesTruncated: boolean;
+  /**
+   * 这一页**读不懂**的码（`missing-part` / `invalid-xml` / `no-sp-tree`），读得懂时 null。
+   *
+   * 与 `shapeCount: 0` 的区别必须让模型看得见：后者才是"这页真的没形状"，前者要说成"这页读不动"。
+   */
+  readFailure: SlideReadFailure | null;
 }
 
 /** `describeDeck` 的结果。 */
@@ -155,6 +161,7 @@ function outlineOfSlide(slide: Slide, slideNumber: number, maxShapesPerSlide: nu
       text: shapeTextSummary(shape),
     })),
     shapesTruncated: slide.shapes.length > listed.length,
+    readFailure: slide.readFailure ?? null,
   };
 }
 
@@ -164,7 +171,8 @@ function outlineOfSlide(slide: Slide, slideNumber: number, maxShapesPerSlide: nu
  * @param model 主进程读出来的模型。
  * @param slideNumber 页号（1 基；越界时返回 `ok:false` 与给模型看的中文理由，不抛异常）。
  * @param maxRunsPerParagraph 每段最多列多少条 run（超出置 `runsTruncated`）。
- * @returns 该页的文字报告，或一句中文失败理由（页号越界）。
+ * @returns 该页的文字报告，或一句中文失败理由（页号越界；或那一页我们**读不动**——这时绝不回一份空形状，
+ *          免得模型把"读不懂"当成"这一页是空的"）。
  */
 export function readSlideText(
   model: PresentationModel,
@@ -173,6 +181,9 @@ export function readSlideText(
 ): { ok: true; report: SlideTextReport } | { ok: false; reason: string } {
   const slide = model.slides.find((entry) => entry.order + 1 === slideNumber);
   if (!slide) return { ok: false, reason: `没有第 ${slideNumber} 页：这份演示文稿一共 ${model.slides.length} 页，先用 ppt_describe 看页号。` };
+  if (slide.readFailure) {
+    return { ok: false, reason: `第 ${slideNumber} 页读不动：${describeSlideReadFailure(slide.readFailure)}这一页不是"空的"，别对它提改动。` };
+  }
   const shapes: SlideShapeTextSnapshot[] = [];
   let runsTruncated = false;
   for (const shape of slide.shapes) {

@@ -10,6 +10,7 @@
  */
 import { useCallback, useMemo, useState } from "react";
 import type { PptxEditRequest, PresentationModel, ShapeBoxPx, SlideLayerDirection, SlideShape } from "@office-copilot/pptx-io";
+import { describeSlideReadFailure } from "@office-copilot/shared";
 import type { PptxEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
 import {
@@ -293,12 +294,16 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                 type="button"
                 className="slide-add-textbox"
                 onClick={() => addTextBox(slide.partPath, slide.order)}
-                disabled={isBusy}
+                disabled={isBusy || slide.readFailure !== undefined}
               >
                 加文本框
               </button>
             </h3>
-            {slide.shapes.length === 0 ? <p className="slide-para-locked">这张幻灯片没有可读出的形状。</p> : null}
+            {slide.readFailure ? (
+              <p className="slide-para-locked">这一页读不动：{describeSlideReadFailure(slide.readFailure)}</p>
+            ) : slide.shapes.length === 0 ? (
+              <p className="slide-para-locked">这张幻灯片没有形状。</p>
+            ) : null}
             {slide.shapes.map((shape) => {
               const boxKey = boxDraftKeyOf(slide.partPath, shape.shapeId);
               return (

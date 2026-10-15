@@ -10,6 +10,7 @@ import pc from "picocolors";
 import fs from "node:fs";
 import path from "node:path";
 import { auditPptxPackage, readPresentation, type PresentationModel, type PptxAuditIssue } from "@office-copilot/pptx-io";
+import { describeSlideReadFailure } from "@office-copilot/shared";
 import { clip, emit, fail, log, warn } from "./fsutil.js";
 
 /**
@@ -62,6 +63,7 @@ export function registerPptCommands(program: Command): void {
         log(`${pc.bold(path.basename(abs))}：${model.slides.length} 张幻灯片，页面 ${model.slideSizeEmu.cx}×${model.slideSizeEmu.cy} EMU`);
         for (const slide of model.slides) {
           log(pc.dim(`  #${slide.order + 1} ${slide.partPath}`));
+          if (slide.readFailure) warn(`    ${describeSlideReadFailure(slide.readFailure)}`);
           for (const shape of slide.shapes) {
             const tags = [shape.kind, shape.isPlaceholder ? `占位符:${shape.placeholderRef ?? "?"}` : null]
               .filter(Boolean)

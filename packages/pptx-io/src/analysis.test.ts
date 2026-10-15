@@ -112,4 +112,22 @@ describe("readSlideText：逐 run 的文字与格式", () => {
     expect(read.ok).toBe(false);
     if (!read.ok) expect(read.reason).toContain("一共 1 页");
   });
+
+  it("**这一页读不动**时回理由而不是回一份空形状清单（spec line 439）", async () => {
+    const parts = minimalDeckParts();
+    delete parts["ppt/slides/slide1.xml"]; // 关系表还指向它，部件本身不在包里
+    const { model } = await readPresentation(await buildDeckBytes(parts));
+    const read = readSlideText(model, 1, 50);
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.reason).toContain("读不动");
+    if (!read.ok) expect(read.reason).toContain("部件");
+    const outline = describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 });
+    expect(outline.slides[0]!.readFailure).toBe("missing-part");
+    expect(outline.slides[0]!.shapeCount).toBe(0);
+  });
+
+  it("读得动的那一页画像里失败码是 null（空形状才真的是没形状）", async () => {
+    const { model } = await readPresentation(await analysisDeck());
+    expect(describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 }).slides[0]!.readFailure).toBeNull();
+  });
 });

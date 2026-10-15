@@ -208,3 +208,27 @@ export function summarizePdfAudit(issues: PdfAuditIssue[]): string {
   const parts = [broken > 0 ? `${broken} 处可能让阅读器打不开或丢内容` : null, limited > 0 ? `${limited} 处能打开但有一部分改不了` : null].filter(Boolean);
   return `结构体检：${parts.join("，")}。`;
 }
+
+/**
+ * `.pptx` 里**一页**读不懂的三种原因（与 `@office-copilot/pptx-io` 的 `SlideReadFailure` 同一套码）。
+ *
+ * 为什么要和"这页没有形状"分开：`shapes: []` 有两种来历，折成一句会把"我们读不动"说成"你的第 3 页是空的"。
+ */
+export type SlideReadFailure = "missing-part" | "invalid-xml" | "no-sp-tree";
+
+/**
+ * 把"这一页读不懂"念成一句中文。
+ *
+ * @param failure 引擎给的失败码（不含"读得懂"那种情况——那压根没有失败码）。
+ * @returns 点名是哪一种的中文句子；装配层（桌面面板 / `oc ppt` / 上送给模型的 `reason`）共用这一份（§3.2）。
+ */
+export function describeSlideReadFailure(failure: SlideReadFailure): string {
+  switch (failure) {
+    case "missing-part":
+      return "这一页的部件不在文件里（关系表指向的幻灯片部件缺失）。";
+    case "invalid-xml":
+      return "这一页的 XML 解析失败（文件被截断或标签没闭合）。";
+    case "no-sp-tree":
+      return "这一页解析得动，但没有形状树（`cSld > spTree`），所以没有任何形状可读。";
+  }
+}

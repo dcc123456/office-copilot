@@ -6,10 +6,12 @@ import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeSha
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
  *
+ * @param slideXml 要写进 `ppt/slides/slide1.xml` 的文本；传 `null` 表示**这个部件干脆不存在**
+ *   （关系表仍指向它），用来验读侧的失败码；不传用默认那份三形状幻灯片。
  * @returns zip 的 Uint8Array。含一张 4:3 幻灯片、三种形状（标题占位符、正文占位符、自带几何的文本框）
  *   与一个二进制部件，用来同时验读模型与保真回写。
  */
-async function minimalDeck(): Promise<Uint8Array> {
+async function minimalDeck(slideXml?: string | null): Promise<Uint8Array> {
   const zip = new JSZip();
   zip.file(
     "[Content_Types].xml",
@@ -27,10 +29,9 @@ async function minimalDeck(): Promise<Uint8Array> {
     "ppt/_rels/presentation.xml.rels",
     '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>',
   );
-  zip.file(
-    "ppt/slides/slide1.xml",
-    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>副标题乙</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="TextBox 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="3657600"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>正文丙</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
-  );
+  const defaultSlideXml =
+    '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>副标题乙</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="TextBox 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="3657600"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>正文丙</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>';
+  if (slideXml !== null) zip.file("ppt/slides/slide1.xml", slideXml ?? defaultSlideXml);
   zip.file("ppt/printerSettings/printerSettings1.bin", new Uint8Array([1, 2, 3, 4, 5]));
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -75,6 +76,31 @@ describe("pptx-io：读模型", () => {
     expect(title.paragraphRunCounts).toEqual([2]);
     // 逐 run 的格式照实给：run0 只写了 b，run1 只写了 sz（半磅 1800 → 18pt），都没写颜色。
     expect(title.paragraphRunFormats).toEqual([[{ bold: true }, { sizePt: 18 }]]);
+  });
+});
+
+describe("pptx-io：一页读不懂时的失败码（spec line 439）", () => {
+  it("部件缺失、XML 解析失败、没有形状树——三种各有各的码，不折成\"这一页没有形状\"", async () => {
+    const missing = (await readPresentation(await minimalDeck(null))).model.slides[0]!;
+    expect(missing.readFailure).toBe("missing-part");
+    expect(missing.shapes).toHaveLength(0);
+    const broken = (await readPresentation(await minimalDeck('<p:sld xmlns:p="p"><p:cSld><p:spTree><p:sp>'))).model.slides[0]!;
+    expect(broken.readFailure).toBe("invalid-xml");
+    const noTree = (await readPresentation(await minimalDeck('<p:sld xmlns:p="p"><p:cSld/></p:sld>'))).model.slides[0]!;
+    expect(noTree.readFailure).toBe("no-sp-tree");
+  });
+
+  it("读得动的那一页不给失败码——这时空数组才真的是\"这一页没有形状\"", async () => {
+    const emptyTree = (
+      await readPresentation(
+        await minimalDeck('<p:sld xmlns:p="p"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:sld>'),
+      )
+    ).model.slides[0]!;
+    expect(emptyTree.readFailure).toBeUndefined();
+    expect(emptyTree.shapes).toHaveLength(0);
+    const normal = (await readPresentation(await minimalDeck())).model.slides[0]!;
+    expect(normal.readFailure).toBeUndefined();
+    expect(normal.shapes).toHaveLength(3);
   });
 });
 

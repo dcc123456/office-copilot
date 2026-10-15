@@ -67,6 +67,15 @@ export interface RunFormat {
   hex?: string;
 }
 
+/**
+ * 一张幻灯片读不懂的那几种原因（结构化错误码，中文文案在装配层，`AGENTS.md` §5.7）。
+ *
+ * 码与句子都住在 `@office-copilot/shared` 那一份：桌面面板、`oc ppt` 与上送给模型的理由念同一套话（§3.2）。
+ */
+import { type SlideReadFailure } from "@office-copilot/shared";
+
+export type { SlideReadFailure };
+
 /** 一张幻灯片。 */
 export interface Slide {
   /** 包内路径，如 `ppt/slides/slide1.xml`。 */
@@ -77,6 +86,14 @@ export interface Slide {
   slideId: number;
   /** 形状树顶层子元素（组合不展开）。 */
   shapes: SlideShape[];
+  /**
+   * 这一页**读不懂**的原因；读得懂（哪怕真的一个形状都没有）时 undefined。
+   *
+   * 为什么必须有这一格：`shapes: []` 有两种完全不同的来历——"这页确实没形状"与"这页的部件我们读不动"。
+   * 折成一句「这张幻灯片没有可读出的形状」会让面板与模型把后者说成前者，用户于是被告知"你的第 3 页是空的"
+   * （实测撞到的，spec line 439）。
+   */
+  readFailure?: SlideReadFailure;
 }
 
 /** 整份演示文稿的只读模型。 */
@@ -130,43 +147,50 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
     const rel = rels.find((entry) => entry.id === relId);
     if (!rel) continue; // 关系解析不到：跳过这张，宁可少读也不凭空造一张空幻灯片
     const partPath = resolveTarget(PRESENTATION_PART, rel.target);
+    const { shapes, readFailure } = await readSlideShapes(pkg, partPath, inheritance);
     slides.push({
       partPath,
       order,
       slideId: Number(sldId.attributes["id"] ?? 0),
-      shapes: await readSlideShapes(pkg, partPath, inheritance),
+      shapes,
+      ...(readFailure ? { readFailure } : {}),
     });
   }
   return { slideSizeEmu, slides };
 }
 
 /**
- * 读一张幻灯片的形状树顶层。
+ * 读一张幻灯片的形状树顶层，并如实报告**读不动**是哪一种。
  *
  * @param pkg 已加载的包。
  * @param partPath 幻灯片部件路径。
  * @param inheritance 整份 deck 共用一个的几何继承解析器（版式/母版只解析一次）。
- * @returns 顶层形状数组；部件缺失或解析失败返回空数组（读不动不等于崩，交给上层提示）。
+ * @returns 形状数组 + 失败码：部件缺失 `missing-part`、XML 解析失败 `invalid-xml`、没有 `cSld > spTree` `no-sp-tree`；
+ *          读得动时 `readFailure` 为 undefined，**这时空数组就是"这一页真的没有形状"**。
  */
-async function readSlideShapes(pkg: OpcPackage, partPath: string, inheritance: GeometryInheritance): Promise<SlideShape[]> {
+async function readSlideShapes(
+  pkg: OpcPackage,
+  partPath: string,
+  inheritance: GeometryInheritance,
+): Promise<{ shapes: SlideShape[]; readFailure?: SlideReadFailure }> {
   const xml = await readText(pkg.zip, partPath);
-  if (xml === undefined) return [];
+  if (xml === undefined) return { shapes: [], readFailure: "missing-part" };
   let slideRoot: Element;
   try {
     slideRoot = parseDocument(xml);
   } catch {
-    return [];
+    return { shapes: [], readFailure: "invalid-xml" };
   }
   const cSld = firstChild(slideRoot, "p:cSld");
   const spTree = cSld ? firstChild(cSld, "p:spTree") : undefined;
-  if (!spTree) return [];
+  if (!spTree) return { shapes: [], readFailure: "no-sp-tree" };
   const shapes: SlideShape[] = [];
   for (const el of children(spTree)) {
     const kind = SHAPE_TAGS[el.name];
     if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
     shapes.push(await readShape(el, kind, partPath, inheritance));
   }
-  return shapes;
+  return { shapes };
 }
 
 /**
