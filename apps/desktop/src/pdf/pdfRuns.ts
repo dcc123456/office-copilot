@@ -1,57 +1,51 @@
 /**
- * PDF 视图要用的那几个纯函数（组件只做装配，判定放这里，`AGENTS.md` §3.3）。
+ * PDF 视图与 AI 代理共用的那几个纯函数（组件只做装配，文案与攒草稿放这里，`AGENTS.md` §3.3）。
  *
- * 两条来自引擎事实的守卫都在这里收成一句中文：① 内联内容流（`streamRef` 为 null）改不了；
- * ② 解不出原文的 run（`text` 为 null：字体认不出或缺 `/ToUnicode`）连"从什么改成什么"都不知道，
- * 所以只读（spec D8 的 W1 档）。**字节预算不在这里判**：编码规则（WinAnsi / CID 每字 2 字节）属于
+ * "这条 run 能不能改、卡在哪一类"的判定只有一份，在 `@office-copilot/pdf-io` 的 `runEditBlock`（内联内容流与
+ * 解不出原文那两种）；这里只把它的码翻成中文。**字节预算不在这里判**：编码规则（WinAnsi / CID 每字 2 字节）属于
  * `pdf-io`，视图再算一遍就是第二套换算（§2.1），所以草稿交给引擎、由它回 `length-mismatch`。
  */
-import type { PdfEditFailure, PdfReadModel, PdfTextEdit, PdfTextRun, PdfTextTarget } from "@office-copilot/pdf-io";
+import {
+  isRunEditable,
+  pdfTargetKey,
+  runEditBlock,
+  targetOfRun,
+  type PdfEditFailure,
+  type PdfReadModel,
+  type PdfTextEdit,
+  type PdfTextRun,
+} from "@office-copilot/pdf-io";
 
-/** 一条草稿在渲染层里的样子：`key` 用 {@link pdfTargetKey}，`text` 是用户敲的新文字。 */
+/** 一条草稿在渲染层里的样子：`key` 用引擎的 `pdfTargetKey`，`text` 是用户敲的新文字。 */
 export type PdfDrafts = Record<string, string>;
 
-/**
- * 一条 run 的身份键（草稿表用它索引）。
- *
- * @param target 定位键。
- * @returns `页号|内容流引用|Form 链|起始下标` 拼出的串，与引擎的现场核对同一条口径。
- */
-export function pdfTargetKey(target: PdfTextTarget): string {
-  return `${target.pageIndex}|${target.streamRef}|${target.withinForm ?? ""}|${target.start}`;
-}
+/** 引擎的"改不了"类别 → 回给人听的那句中文开头（文案留在渲染层，§5.7）。 */
+export const PDF_BLOCK_LABEL: Record<NonNullable<ReturnType<typeof runEditBlock>>, string> = {
+  "inline-stream": "文字内联在页面里，没有独立对象可标记，改不了",
+  undecoded: "认不出这段文字念作什么",
+};
 
-/**
- * 从一条 run 抽出改写定位键。
- *
- * @param run 读模型里的一条显示文字。
- * @returns 四个字段组成的定位键；内联流没有可标记的对象，回 null（这条也就改不了）。
- */
-export function targetOfRun(run: PdfTextRun): PdfTextTarget | null {
-  if (run.streamRef === null) return null;
-  return { pageIndex: run.pageIndex, streamRef: run.streamRef, withinForm: run.withinForm, start: run.start };
-}
-
-/**
- * 这条 run 能不能改。
- *
- * @param run 读模型里的一条显示文字。
- * @returns 内联流与解不出原文的 run 都回 false——前者没有可标记的对象，后者连旧文字都不知道（§2.5 的撤销要靠它）。
- */
-export function isRunEditable(run: PdfTextRun): boolean {
-  return run.streamRef !== null && run.text !== null;
-}
+/** 引擎的错误码 → 回给人听的那句中文（文案留在渲染层，§5.7）。 */
+export const PDF_FAILURE_LABEL: Record<PdfEditFailure["reason"], string> = {
+  "run-not-found": "那段文字已经不在原来的位置了",
+  "no-encoding": "认不出那段文字念作什么",
+  "char-outside-subset": "文件里的字体没带这个字，补不出来",
+  "length-mismatch": "改完的文字装不回原来的字节数",
+  "text-drifted": "那段文字后来又被改过，不能拿旧内容覆盖",
+};
 
 /**
  * 改不了的 run 给一句中文理由。
  *
- * @param run 一条不可编辑的显示文字。
- * @returns 说明卡在哪里的短句；可编辑时回空串（调用方据此不显示）。
+ * @param run 一条显示文字。
+ * @returns 说明卡在哪里的短句；可编辑时回空串（调用方据此不显示）。CID 字体在理由里点名，因为它连"缺 `/ToUnicode`"
+ *   还是"子集码表没这条"都表现成同一个码，得让用户自己判断（spec D8）。
  */
 export function readOnlyReason(run: PdfTextRun): string {
-  if (run.streamRef === null) return "文字内联在页面里，没有独立对象可标记，改不了";
-  if (run.text === null) return `认不出这段文字念作什么（字体 ${run.baseFont ?? "?"}${run.composite ? "，CID" : ""}），原文都不知道就不改`;
-  return "";
+  const block = runEditBlock(run);
+  if (!block) return "";
+  if (block === "inline-stream") return PDF_BLOCK_LABEL[block];
+  return `${PDF_BLOCK_LABEL[block]}（字体 ${run.baseFont ?? "?"}${run.composite ? "，CID" : ""}），原文都不知道就不改`;
 }
 
 /**
@@ -93,15 +87,6 @@ export function pendingPdfEdits(model: PdfReadModel, drafts: PdfDrafts): PdfText
 export function byteBudgetNote(run: PdfTextRun): string {
   return `原位只有 ${run.encodedBytes} 字节，改长了装不回（PDF 不回流）`;
 }
-
-/** 引擎的错误码 → 回给人听的那句中文（文案留在渲染层，§5.7）。 */
-export const PDF_FAILURE_LABEL: Record<PdfEditFailure["reason"], string> = {
-  "run-not-found": "那段文字已经不在原来的位置了",
-  "no-encoding": "认不出那段文字念作什么",
-  "char-outside-subset": "文件里的字体没带这个字，补不出来",
-  "length-mismatch": "改完的文字装不回原来的字节数",
-  "text-drifted": "那段文字后来又被改过，不能拿旧内容覆盖",
-};
 
 /**
  * 把一批失败原因汇成一句 toast 文案。

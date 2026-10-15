@@ -7,14 +7,25 @@
  * ③ 落地走增量更新：原文件的前缀字节一字不动，只追加 delta（§7.5.6）。
  */
 import { describe, expect, it } from "vitest";
-import { readPdfModel, applyPdfTextEdits, revertPdfTextEdits, type PdfTextTarget } from "./pdf-file.js";
+import {
+  applyPdfTextEdits,
+  isRunEditable,
+  pdfTargetKey,
+  readPdfModel,
+  revertPdfTextEdits,
+  runEditBlock,
+  targetOfRun,
+  type PdfTextRun,
+  type PdfTextTarget,
+} from "./pdf-file.js";
 import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, cidNoToUnicodeFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
 
 /** 按解出来的文字找定位键。 */
-function targetOfText(runs: Awaited<ReturnType<typeof readPdfModel>>["runs"], text: string): PdfTextTarget {
+function targetOfText(runs: PdfTextRun[], text: string): PdfTextTarget {
   const run = runs.find((candidate) => candidate.text === text);
-  if (!run || !run.streamRef) throw new Error(`夹具里没有可编辑的「${text}」`);
-  return { pageIndex: run.pageIndex, streamRef: run.streamRef, withinForm: run.withinForm, start: run.start };
+  const target = run ? targetOfRun(run) : null;
+  if (!target) throw new Error(`夹具里没有可编辑的「${text}」`);
+  return target;
 }
 
 describe("readPdfModel：两种串形态与 Form XObject 递归", () => {
@@ -193,5 +204,38 @@ describe("revertPdfTextEdits：按内容寻址撤销，不牵连后来的编辑�
     expect(reverted.ok).toBe(false);
     if (reverted.ok) return;
     expect(reverted.failures.map((failure) => failure.reason)).toEqual(["text-drifted"]);
+  });
+});
+
+describe("runEditBlock / pdfTargetKey：能不能改与定位键只有这一份判定", () => {
+  /** 取夹具里那条主内容流的 run。 */
+  async function mainRun(): Promise<PdfTextRun> {
+    const model = await readPdfModel(await simpleWinAnsiFixturePdf());
+    const run = model.runs.find((candidate) => candidate.text === "Quarterly Report 2026");
+    if (!run) throw new Error("夹具少了主内容流那条");
+    return run;
+  }
+
+  it("能改的回 null，内联流与解不出原文各回一个码（视图与 AI 都读它，§3.2）", async () => {
+    const run = await mainRun();
+    expect(runEditBlock(run)).toBeNull();
+    expect(isRunEditable(run)).toBe(true);
+    expect(runEditBlock({ ...run, streamRef: null })).toBe("inline-stream");
+    expect(isRunEditable({ ...run, text: null })).toBe(false);
+    expect(runEditBlock({ ...run, text: null })).toBe("undecoded");
+  });
+
+  it("内联流抽不出定位键：没有可标记的对象，改不了", async () => {
+    const run = await mainRun();
+    expect(targetOfRun(run)).toEqual({ pageIndex: 0, streamRef: run.streamRef, withinForm: null, start: run.start });
+    expect(targetOfRun({ ...run, streamRef: null })).toBeNull();
+  });
+
+  it("定位键四个字段都进串，Form 链为空时留空位——同一条 run 在写与撤两侧拼出同一个键", async () => {
+    const run = await mainRun();
+    const target = targetOfRun(run);
+    if (!target) throw new Error("该抽得出定位键");
+    expect(pdfTargetKey(target)).toBe(`0|${run.streamRef}||${run.start}`);
+    expect(pdfTargetKey({ ...target, withinForm: "Fm0/Fm1", pageIndex: 1, start: 88 })).toBe(`1|${run.streamRef}|Fm0/Fm1|88`);
   });
 });

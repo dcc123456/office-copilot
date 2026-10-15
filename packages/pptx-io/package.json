@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@office-copilot/opc": "workspace:*",
+    "@office-copilot/shared": "workspace:*",
     "jszip": "^3.10.1"
   },
   "devDependencies": {

@@ -339,6 +339,9 @@ importers:
       '@office-copilot/opc':
         specifier: workspace:*
         version: link:../opc
+      '@office-copilot/shared':
+        specifier: workspace:*
+        version: link:../shared
       jszip:
         specifier: ^3.10.1
         version: 3.10.1

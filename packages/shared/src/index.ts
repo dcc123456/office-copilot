@@ -1,4 +1,23 @@
-// Shared types and protocols used by the task pane and the server.
+// Shared types and protocols used by the task pane and the server，外加各 IO 包共用的极小工具。
+
+/** 一条上送给模型看的文字：截断后的正文与"有没有被截"的标记。 */
+export interface ClippedText {
+  /** 上送的文字；超上限时是前 `limit` 个字加一个省略号。 */
+  text: string;
+  /** 是否截掉了后半段（§2.9：截断必须说出来，别让模型以为看到全部）。 */
+  truncated: boolean;
+}
+
+/**
+ * 把一条过长的文字截成上送给模型看的长度。
+ *
+ * @param value 现场读出的原文。
+ * @param limit 上限（字数，按 UTF-16 码元算，与各 IO 包的 `*_TEXT_LIMIT` 常量同一个口径）。
+ * @returns 不超时原样且 `truncated:false`；超了取前 `limit` 个字并补 `…`。
+ */
+export function clipText(value: string, limit: number): ClippedText {
+  return value.length <= limit ? { text: value, truncated: false } : { text: `${value.slice(0, limit)}…`, truncated: true };
+}
 
 export type InsertPosition = "before" | "after" | "start" | "end";
 export type EditScope = "selection" | "body";

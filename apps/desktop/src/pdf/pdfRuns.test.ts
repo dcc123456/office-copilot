@@ -1,13 +1,13 @@
 /**
  * PDF 视图的判定层（阶段 7 的装配）。
  *
- * 钉三条事实：① 内联流与解不出原文的 run 都不给编辑框，理由要说得出；② 草稿只对**当前读模型**里的
- * 可编辑 run 生效，改回原文的那条不进批次；③ 字节预算不在这里判——渲染层再算一遍编码就是第二套换算
+ * 钉三条事实：① 能不能改的判定只有一份（`pdf-io` 的 `runEditBlock`），这里只验它翻出来的中文理由；② 草稿只对
+ * **当前读模型**里的可编辑 run 生效，改回原文的那条不进批次；③ 字节预算不在这里判——渲染层再算一遍编码就是第二套换算
  * （§2.1），所以只把引擎的错误码翻成中文。
  */
 import { describe, expect, it } from "vitest";
-import type { PdfReadModel, PdfTextRun, PdfTextTarget } from "@office-copilot/pdf-io";
-import { byteBudgetNote, isRunEditable, pdfFailureText, pdfTargetKey, pendingPdfEdits, readOnlyReason, runsOfPage } from "./pdfRuns.js";
+import { isRunEditable, pdfTargetKey, type PdfReadModel, type PdfTextRun, type PdfTextTarget } from "@office-copilot/pdf-io";
+import { byteBudgetNote, pdfFailureText, pendingPdfEdits, readOnlyReason, runsOfPage } from "./pdfRuns.js";
 
 /** 造一条可读的 run。 */
 function run(overrides: Partial<PdfTextRun> = {}): PdfTextRun {

@@ -8,6 +8,7 @@
  * - **条件口径与公式一致**：`findRows` 复用 `formula-eval.toCriteria`，工具筛出的行与 `COUNTIF` 数出的行同一套判定。
  * 显示串一律走 `cellDisplayText`/`formatNumberForDisplay`，本文件不自己换算单位（§2.1）。
  */
+import { clipText } from "@office-copilot/shared";
 import { colNameToIndex, formatA1, formatRange, indexToColName, parseA1, parseRange, type A1Range } from "../address.js";
 import { cellDisplayText, formatNumberForDisplay } from "../cell-text.js";
 import { toCriteria } from "../formula-eval.js";
@@ -545,7 +546,7 @@ function parseRangeOrCell(range: string): A1Range | null {
  * @returns 不超过 `CELL_TEXT_LIMIT` 字的文本；超长时截断并加省略号（与 Word 侧"每段 ≤120 字"同一口径）。
  */
 function clipCellText(text: string): string {
-  return text.length <= CELL_TEXT_LIMIT ? text : `${text.slice(0, CELL_TEXT_LIMIT)}…`;
+  return clipText(text, CELL_TEXT_LIMIT).text;
 }
 
 /**

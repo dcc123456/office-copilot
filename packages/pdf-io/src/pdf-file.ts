@@ -96,6 +96,53 @@ export interface PdfEditFailure {
   reason: "run-not-found" | "no-encoding" | "char-outside-subset" | "length-mismatch" | "text-drifted";
 }
 
+/** 一条 run 改不了的类别（结构化码；回给人听的中文由调用方组装，`AGENTS.md` §5.7）。 */
+export type PdfRunBlock = "inline-stream" | "undecoded";
+
+/**
+ * 这条 run 改不了的话，卡在哪一类（判定只在这一处：手工视图与 AI 代理都读它）。
+ *
+ * @param run 读模型里的一条显示文字。
+ * @returns `inline-stream`＝文字内联在页面里、没有可标记的间接对象；`undecoded`＝认不出这段念作什么
+ *   （连旧文字都不知道，§2.5 的撤销无从比对）；null＝可以改。
+ */
+export function runEditBlock(run: PdfTextRun): PdfRunBlock | null {
+  if (run.streamRef === null) return "inline-stream";
+  if (run.text === null) return "undecoded";
+  return null;
+}
+
+/**
+ * 这条 run 能不能改。
+ *
+ * @param run 读模型里的一条显示文字。
+ * @returns {@link runEditBlock} 为 null 时 true。
+ */
+export function isRunEditable(run: PdfTextRun): boolean {
+  return runEditBlock(run) === null;
+}
+
+/**
+ * 从一条 run 抽出改写定位键。
+ *
+ * @param run 读模型里的一条显示文字。
+ * @returns 四个字段组成的定位键；内联流没有可标记的对象，回 null（这条也就改不了）。
+ */
+export function targetOfRun(run: PdfTextRun): PdfTextTarget | null {
+  if (run.streamRef === null) return null;
+  return { pageIndex: run.pageIndex, streamRef: run.streamRef, withinForm: run.withinForm, start: run.start };
+}
+
+/**
+ * 定位键的稳定写法：四个字段拼成一句，供"同一条 run"的比对与草稿索引。
+ *
+ * @param target 定位键。
+ * @returns `页号|内容流引用|Form 链|起始下标`；写入侧的撤销核对与渲染层的草稿表共用这一份实现。
+ */
+export function pdfTargetKey(target: PdfTextTarget): string {
+  return `${target.pageIndex}|${target.streamRef}|${target.withinForm ?? ""}|${target.start}`;
+}
+
 /** 改写结果：要么给出新的完整字节，要么给出全部失败项且不产出任何改动（§2.4 整批语义）。 */
 export type PdfEditResult = { ok: true; bytes: Uint8Array; deltaBytes: number; applied: PdfAppliedEdit[] } | { ok: false; failures: PdfEditFailure[] };
 
@@ -148,17 +195,12 @@ export async function applyPdfTextEdits(bytes: Uint8Array, edits: PdfTextEdit[])
  * @returns 全成时给出新的字节（同样是"原前缀 + delta"）；任一条对不上时 `{ ok: false, failures }` 且不写任何东西。
  */
 export async function revertPdfTextEdits(bytes: Uint8Array, applied: PdfAppliedEdit[]): Promise<PdfEditResult> {
-  const expected = new Map(applied.map((entry) => [targetKey(entry.target), entry.toText]));
+  const expected = new Map(applied.map((entry) => [pdfTargetKey(entry.target), entry.toText]));
   return writeEdits(
     bytes,
     applied.map((entry) => ({ target: entry.target, text: entry.fromText })),
     expected,
   );
-}
-
-/** 定位键的稳定写法：四个字段拼成一句，供撤销时比对"同一条 run"。 */
-function targetKey(target: PdfTextTarget): string {
-  return `${target.pageIndex}|${target.streamRef}|${target.withinForm ?? ""}|${target.start}`;
 }
 
 /**
@@ -189,7 +231,7 @@ async function writeEdits(bytes: Uint8Array, edits: PdfTextEdit[], expected: Map
       failures.push({ target: edit.target, reason: "run-not-found" });
       continue;
     }
-    if (expected && expected.get(targetKey(edit.target)) !== run.text) {
+    if (expected && expected.get(pdfTargetKey(edit.target)) !== run.text) {
       failures.push({ target: edit.target, reason: "text-drifted" });
       continue;
     }

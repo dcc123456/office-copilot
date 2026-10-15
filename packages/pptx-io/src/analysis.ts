@@ -8,6 +8,7 @@
  * 上送内容默认截断（§2.9）：页数、每页形状数、每段 run 数各有上限，单条 run 文字 ≤120 字，
  * 被截掉的部分如实标 `truncated`，让模型接着调 `readSlideText` 往下读，而不是误以为那就是全部。
  */
+import { clipText } from "@office-copilot/shared";
 import { type PresentationModel, type RunFormat, type Slide, type SlideShape } from "./read.js";
 import { emuToPx } from "./units.js";
 
@@ -102,23 +103,13 @@ export interface DescribeOptions {
 }
 
 /**
- * 截断一条上送文字。
- *
- * @param value 现场读出的文字。
- * @returns `{ text, truncated }`：不超上限时原样，超了就切前 {@link RUN_TEXT_LIMIT} 字并置标记。
- */
-function clip(value: string): { text: string; truncated: boolean } {
-  return value.length <= RUN_TEXT_LIMIT ? { text: value, truncated: false } : { text: `${value.slice(0, RUN_TEXT_LIMIT)}…`, truncated: true };
-}
-
-/**
  * 把形状的文字概要拼成一条截断串（描述用，不含逐 run 定位）。
  *
  * @param shape 形状快照。
  * @returns 各段用 `⏎` 隔开的概要文字。
  */
 function shapeTextSummary(shape: SlideShape): string {
-  return clip(shape.paragraphTexts.join("⏎")).text;
+  return clipText(shape.paragraphTexts.join("⏎"), RUN_TEXT_LIMIT).text;
 }
 
 /**
@@ -190,7 +181,7 @@ export function readSlideText(
     shape.paragraphTexts.forEach((_, paraIndex) => {
       const paragraphRuns = shape.paragraphRunTexts[paraIndex] ?? [];
       paragraphRuns.slice(0, maxRunsPerParagraph).forEach((runText, runIndex) => {
-        const clipped = clip(runText);
+        const clipped = clipText(runText, RUN_TEXT_LIMIT);
         runs.push({
           paraIndex,
           runIndex,
