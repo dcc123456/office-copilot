@@ -43,7 +43,7 @@ const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这�
   set_notes 给页号与逐段文字，把那一页**已存在**的演讲者备注整篇换掉（不是追加；画像里 notesPartPath 为 null 就是这页没有备注页，提了也落不了）。
   同一批里删掉的形状就别再改它的文字或字体（落地按顺序执行，那条必然失败并整批不写）。改版式与母版这里做不了，遇到就直说做不了。
 - 表格住在图形框（kind=graphicFrame）里：那个形状自己没有文字体，ppt_read_slide_text 会改成逐格列出（row / col 都是 0 基，shapeId 用图形框那个）。
-  改表格里的字就提 set_table_cell_text；合并区里被并进来的那一格（列表里标了续格）不画自己的字，提了会被拒，要改就改合并起点那一格。
+  改表格里的字就提 set_table_cell_text；改那一格某一截的字号/粗体/颜色就提 set_run_font / set_run_color 并**把 row 与 col 一起带上**（只给一个会被拒）；合并区里被并进来的那一格（列表里标了续格）不画自己的字，提了会被拒，要改就改合并起点那一格。
 - set_shape_geometry 想只改一个轴（比如只把宽改一下），那个形状必须自己写过几何；画像里 hasOwnGeometry=false 的形状（标题/正文那类占位符，值从版式继承）要改就把四个值一起给。
 - 一段里如果有多条 run（read_slide_text 会标出来），必须逐 run 改，整段覆盖会拍平那一截的粗体与字号——这是禁止的。
 - 字号单位是 pt，几何单位是屏幕 px；EMU、半磅这些换算由引擎做，你不许换算数字往字段里塞。
@@ -208,6 +208,18 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
       });
       continue;
     }
+    if ((edit.type === "set_run_font" || edit.type === "set_run_color") && edit.row !== undefined && edit.col !== undefined) {
+      // 带行列就是改表格里那一格：引擎那两条 op 认得这个坐标（`RunTarget`），四层预拒与 set_table_cell_text 共用同一份判定（§3.2）。
+      const cellNote = tableCellRangeNote(shape, edit.row, edit.col, edit.paraIndex, edit.runIndex);
+      if (cellNote) {
+        notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那一格改不了：${cellNote}`);
+        continue;
+      }
+      const cellTarget = { partPath: slide.partPath, shapeId: shape.shapeId, row: edit.row, col: edit.col, paraIndex: edit.paraIndex, runIndex: edit.runIndex };
+      if (edit.type === "set_run_color") requests.push({ kind: "color", target: cellTarget, hex: edit.color });
+      else requests.push({ kind: "font", target: cellTarget, format: { bold: edit.bold, sizePt: edit.sizePt } });
+      continue;
+    }
     const outOfRange = runRangeNote(shape, edit.paraIndex, edit.runIndex);
     if (outOfRange) {
       notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那条改不了：${outOfRange}`);
@@ -263,8 +275,8 @@ function runRangeNote(shape: SlideShape, paraIndex: number, runIndex: number): s
 /**
  * 表格那一格的坐标对不对得上现场模型（表、行列、段、run 四层逐层查）。
  *
- * 引擎的 `setTableCellRunText` 一旦拒就是整批不落地（§2.4），所以这里拿读模型先判。合并续格单独点名：
- * 它在 XML 里确实存在、也确实有一段空 `<a:p/>`，但 PowerPoint 不画它的字，写了等于静默没写。
+ * 引擎的表格那三条 op（改字、改字体、改颜色）一旦拒就是整批不落地（§2.4），所以这里拿读模型先判。
+ * 合并续格单独点名：它在 XML 里确实存在、也确实有一段空 `<a:p/>`，但 PowerPoint 不画它的字，写了等于静默没写。
  *
  * @param shape 该形状快照（表格来自它的 `table`，没有就是图形框里装的不是表）。
  * @param row 模型给的行号（0 基）。
@@ -275,7 +287,7 @@ function runRangeNote(shape: SlideShape, paraIndex: number, runIndex: number): s
  */
 function tableCellRangeNote(shape: SlideShape, row: number, col: number, paraIndex: number, runIndex: number): string | null {
   const table = shape.table;
-  if (!table) return "那个形状里没有表格（图形框里装的可能是图表，或者它压根是图片），改不了表格里的文字";
+  if (!table) return "那个形状里没有表格（图形框里装的可能是图表，或者它压根是图片），那一格什么都改不了";
   if (row >= table.rows.length) return `行号 ${row} 越界（这张表有 ${table.rows.length} 行）`;
   const cells = table.rows[row] ?? [];
   if (col >= cells.length) return `列号 ${col} 越界（第 ${row} 行有 ${cells.length} 格）`;
@@ -283,7 +295,7 @@ function tableCellRangeNote(shape: SlideShape, row: number, col: number, paraInd
   if (cell.isMergeContinuation) return `第 ${row} 行第 ${col} 列是合并区里被并进来的那一格，它不画自己的字，要改的是合并起点那一格`;
   if (paraIndex >= cell.paragraphRunCounts.length) return `第 ${row} 行第 ${col} 列只有 ${cell.paragraphRunCounts.length} 段，没有第 ${paraIndex} 段`;
   const runCount = cell.paragraphRunCounts[paraIndex] ?? 0;
-  if (runCount === 0) return `第 ${row} 行第 ${col} 列的第 ${paraIndex} 段没有 run（空段或字段），改不了文字`;
+  if (runCount === 0) return `第 ${row} 行第 ${col} 列的第 ${paraIndex} 段没有 run（空段或字段），那一截什么都改不了`;
   if (runIndex >= runCount) return `第 ${row} 行第 ${col} 列的第 ${paraIndex} 段只有 ${runCount} 个 run，没有第 ${runIndex} 个`;
   return null;
 }

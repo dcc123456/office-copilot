@@ -4,7 +4,7 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import { notesFlattenNote, type BoxAxisSource, type PptxEditRequest, type PresentationModel, type RunFontFormat, type RunFormat, type ShapeBoxPx, type ShapeGeometryPatch, type SizePtSource, type Slide, type SlideLayerDirection, type SlideNotes, type SlideShape } from "@office-copilot/pptx-io";
+import { notesFlattenNote, type BoxAxisSource, type PptxEditRequest, type PresentationModel, type RunFontFormat, type RunFormat, type RunTarget, type ShapeBoxPx, type ShapeGeometryPatch, type SizePtSource, type Slide, type SlideLayerDirection, type SlideNotes, type SlideShape } from "@office-copilot/pptx-io";
 
 /**
  * 形状几何的四个字段，按视图显示的顺序（左、上、宽、高）。
@@ -229,12 +229,7 @@ export function pendingEdits(deck: PresentationModel, drafts: Record<string, Sli
         if (draft.text !== undefined && draft.text !== currentText) {
           edits.push({ kind: "text", target: runTarget, text: draft.text });
         }
-        const format: RunFontFormat = {};
-        if (draft.sizePt !== undefined && draft.sizePt !== currentFormat.sizePt) format.sizePt = draft.sizePt;
-        if (Object.keys(format).length > 0) edits.push({ kind: "font", target: runTarget, format });
-        if (draft.hex !== undefined && draft.hex !== currentFormat.hex) {
-          edits.push({ kind: "color", target: runTarget, hex: draft.hex });
-        }
+        pushFormatEdits(edits, runTarget, draft, currentFormat);
       });
       if (shape.table) pushTableCellEdits(edits, slide.partPath, shape, drafts);
     }
@@ -261,15 +256,35 @@ function pushTableCellEdits(edits: PptxEditRequest[], partPath: string, shape: S
       cell.paragraphTexts.forEach((currentText, paraIndex) => {
         if (cell.paragraphRunCounts[paraIndex] !== 1) return;
         const draft = drafts[cellDraftKeyOf(partPath, shape.shapeId, rowIndex, colIndex, paraIndex)];
-        if (draft?.text === undefined || draft.text === currentText) return;
-        edits.push({
-          kind: "table_text",
-          target: { partPath, shapeId: shape.shapeId, row: rowIndex, col: colIndex, paraIndex, runIndex: 0 },
-          text: draft.text,
-        });
+        if (!draft) return;
+        const cellTarget = { partPath, shapeId: shape.shapeId, row: rowIndex, col: colIndex, paraIndex, runIndex: 0 };
+        if (draft.text !== undefined && draft.text !== currentText) {
+          edits.push({ kind: "table_text", target: cellTarget, text: draft.text });
+        }
+        pushFormatEdits(edits, cellTarget, draft, cell.paragraphRunFormats[paraIndex]?.[0] ?? {});
       });
     });
   });
+}
+
+/**
+ * 把一条 run 的字号与颜色草稿摊成 `font` / `color` 两条改动，只交真改过的那一项。
+ *
+ * 形状自己的那截与表格里那一格共用这一份判定（§3.2）：与现场显式值相同就不交出（空点"保存"不写盘），
+ * 现场没写过 `sz`（从版式/母版继承）时用户给个数即算改动——那是**用户明示的覆盖**，与 D3 禁止的"读侧烘焙"无关。
+ *
+ * @param edits 目标数组，就地追加。
+ * @param target 那条 run 的坐标；带行列时是表格里那一格。
+ * @param draft 该 run 的草稿。
+ * @param currentFormat 该 run 自己写过的格式（`readRunFormat` 那一份）。
+ */
+function pushFormatEdits(edits: PptxEditRequest[], target: RunTarget, draft: SlideDraft, currentFormat: RunFormat): void {
+  const format: RunFontFormat = {};
+  if (draft.sizePt !== undefined && draft.sizePt !== currentFormat.sizePt) format.sizePt = draft.sizePt;
+  if (Object.keys(format).length > 0) edits.push({ kind: "font", target, format });
+  if (draft.hex !== undefined && draft.hex !== currentFormat.hex) {
+    edits.push({ kind: "color", target, hex: draft.hex });
+  }
 }
 
 /**

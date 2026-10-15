@@ -61,10 +61,11 @@ function shapeOf(shapeId: number, paragraphs: [string, number, RunFormat?][]): S
   };
 }
 
-/** 一张表里某一格的规格：逐段文字，可选每段 run 条数（默认每段 1 条）、是否合并续格、横向占几列。 */
+/** 一张表里某一格的规格：逐段文字，可选每段 run 条数（默认每段 1 条）、逐段 run 级现场格式（默认全是没写过）、是否合并续格、横向占几列。 */
 interface CellSpec {
   texts: string[];
   runCounts?: number[];
+  formats?: RunFormat[][];
   isMergeContinuation?: boolean;
   gridSpan?: number;
 }
@@ -85,12 +86,17 @@ function tableShapeOf(shapeId: number, rows: CellSpec[][]): SlideShape {
     kind: "graphicFrame",
     table: {
       rows: rows.map((cells) =>
-        cells.map((spec) => ({
-          paragraphTexts: spec.texts,
-          paragraphRunCounts: spec.runCounts ?? spec.texts.map(() => 1),
-          gridSpan: spec.gridSpan ?? 1,
-          isMergeContinuation: spec.isMergeContinuation ?? false,
-        })),
+        cells.map((spec) => {
+          const runCounts = spec.runCounts ?? spec.texts.map(() => 1);
+          return {
+            paragraphTexts: spec.texts,
+            paragraphRunCounts: runCounts,
+            // 默认每段那一截都是"现场什么显式属性都没写"，用例要测"改现场已有的字号"就自己给 formats。
+            paragraphRunFormats: spec.formats ?? runCounts.map((runCount) => Array.from({ length: runCount }, () => ({}) as RunFormat)),
+            gridSpan: spec.gridSpan ?? 1,
+            isMergeContinuation: spec.isMergeContinuation ?? false,
+          };
+        }),
       ),
     },
   };
@@ -150,6 +156,36 @@ describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
     // 同一格里那段单 run 的照旧交出，草稿键按「行.列.段」分得开。
     expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 0, 1)]: { text: "拍平了" }, [cellDraftKeyOf(PART, 10, 1, 0, 0)]: { text: "李四" } })).toEqual([
       { kind: "table_text", target: { partPath: PART, shapeId: 10, row: 1, col: 0, paraIndex: 0, runIndex: 0 }, text: "李四" },
+    ]);
+  });
+
+  it("表格那一格的字号与颜色：走引擎已有的 font / color，坐标带行列，守卫与普通形状那一条同一份", () => {
+    const deck = deckOf([
+      tableShapeOf(10, [
+        [{ texts: ["姓名"], formats: [[{ sizePt: 18, hex: "#ff0000" }]] }, { texts: ["城市"] }],
+        [{ texts: ["张三", "两截不同格式"], runCounts: [1, 2], formats: [[{}], [{}, {}]] }, { texts: [""], runCounts: [0], isMergeContinuation: true }],
+      ]),
+    ]);
+    // 与现场显式值一样的那两条不交出（空点"保存"不写盘）。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 0, 0)]: { sizePt: 18, hex: "#ff0000" } })).toEqual([]);
+    // 只改字号就只交 font 一条，颜色那条不许被牵连。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 0, 0)]: { sizePt: 24 } })).toEqual([
+      { kind: "font", target: { partPath: PART, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, format: { sizePt: 24 } },
+    ]);
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 0, 0)]: { hex: "#00cc00" } })).toEqual([
+      { kind: "color", target: { partPath: PART, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, hex: "#00cc00" },
+    ]);
+    // 那一格现场什么显式值都没写（从表格样式/版式继承）：用户给个数即算明示的覆盖，输入框那时是空的。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 1, 0)]: { sizePt: 20 } })).toEqual([
+      { kind: "font", target: { partPath: PART, shapeId: 10, row: 0, col: 1, paraIndex: 0, runIndex: 0 }, format: { sizePt: 20 } },
+    ]);
+    // 多 run 的那段与续格照样什么都交不出（§2.3 / §2.4），字号也不例外。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 0, 1)]: { sizePt: 30 } })).toEqual([]);
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 1, 0)]: { hex: "#0000ff" } })).toEqual([]);
+    // 文字与字号都改了：两条各自一条，顺序跟着草稿那一段走。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 0, 0)]: { text: "名字", hex: "#00cc00" } })).toEqual([
+      { kind: "table_text", target: { partPath: PART, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, text: "名字" },
+      { kind: "color", target: { partPath: PART, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, hex: "#00cc00" },
     ]);
   });
 

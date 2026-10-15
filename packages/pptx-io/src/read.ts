@@ -81,6 +81,8 @@ export interface SlideTableCell {
   paragraphTexts: string[];
   /** 每段自己的 `<a:r>` 截数，与 `paragraphTexts` 同长同序；>1 表示整段覆盖会拍平局部格式（§2.3）。 */
   paragraphRunCounts: number[];
+  /** 这一格每段逐 run 的**自己写过的**格式（`a:rPr` 的 b/sz 与解出来的 hex），与 `paragraphRunCounts` 同长同序；没写的一律留空，不猜继承值。 */
+  paragraphRunFormats: RunFormat[][];
   /** 横向跨度（`@gridSpan`，1 基；默认 1，被并进来的续格也是 1）。 */
   gridSpan: number;
   /**
@@ -414,7 +416,7 @@ async function readShape(
     boxPx: groupShapeId === undefined ? completeBox(ownAxes) : undefined,
     effectiveBoxPx: groupShapeId === undefined ? effective.box : {},
     boxPxSources: groupShapeId === undefined ? effective.sources : {},
-    table: kind === "graphicFrame" ? readTableOf(el) : undefined,
+    table: kind === "graphicFrame" ? await readTableOf(el, colors, slidePartPath) : undefined,
   };
 }
 
@@ -422,24 +424,34 @@ async function readShape(
  * 从一个图形框里把它那张表读成网格（`a:graphic/a:graphicData/a:tbl`）。
  *
  * @param el 图形框元素 `<p:graphicFrame>`。
+ * @param colors 解 run 颜色用的那条继承链（母版 + 主题），与形状那一档共用同一个解析器。
+ * @param slidePartPath 这一页的部件路径，解继承色时要按它去读母版与主题部件。
  * @returns 逐行逐格的表；图形框里装的是图表（`@uri` 指向 chart 那一族）、表是空的（没有 `<a:tr>`）
  *   或结构读不动时一律 undefined——宁可不给网格也不给一份猜出来的行列数。
  */
-function readTableOf(el: Element): SlideTable | undefined {
+async function readTableOf(el: Element, colors: ColorInheritance, slidePartPath: string): Promise<SlideTable | undefined> {
   const tbl = tableElementOf(el);
   if (!tbl) return undefined;
-  const rows = findChildren(tbl, "a:tr").map(
-    (tr): SlideTableCell[] =>
-      findChildren(tr, "a:tc").map((tc) => {
-        const txBody = firstChild(tc, "a:txBody");
-        const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
-        return {
-          paragraphTexts: paragraphs.map((p) => text(p)),
-          paragraphRunCounts: paragraphs.map((p) => findChildren(p, "a:r").length),
-          gridSpan: Number(tc.attributes["gridSpan"]) || 1,
-          isMergeContinuation: isMergeContinuationCell(tc),
-        };
-      }),
+  const rows = await Promise.all(
+    findChildren(tbl, "a:tr").map(
+      async (tr): Promise<SlideTableCell[]> =>
+        Promise.all(
+          findChildren(tr, "a:tc").map(async (tc) => {
+            const txBody = firstChild(tc, "a:txBody");
+            const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
+            const runsByParagraph = paragraphs.map((p) => findChildren(p, "a:r"));
+            return {
+              paragraphTexts: paragraphs.map((p) => text(p)),
+              paragraphRunCounts: runsByParagraph.map((runs) => runs.length),
+              // 只记这一截自己写的 `<a:rPr>`（解色仍走母版+主题那一条链）；表格里那几档继承（表格样式 / cell 的 lstStyle）
+              // 没有现成的解析器，所以宁可不给 effectiveSizePt，也不给一个猜出来的字号（与 D3 同一条线）。
+              paragraphRunFormats: await Promise.all(runsByParagraph.map((runs) => Promise.all(runs.map((run) => readRunFormat(run, colors, slidePartPath))))),
+              gridSpan: Number(tc.attributes["gridSpan"]) || 1,
+              isMergeContinuation: isMergeContinuationCell(tc),
+            };
+          }),
+        ),
+    ),
   );
   return rows.length > 0 ? { rows } : undefined;
 }

@@ -180,6 +180,8 @@ describe("表格那一格：概要与逐 run 清单都要带上它", () => {
     expect(tableShape.hasText).toBe(false);
     expect(tableShape.runs).toEqual([]);
     expect(tableShape.table!.map((row) => row.map((cell) => cell.text))).toEqual([["姓名", "城市"], ["张三⏎上海", ""]]);
+    // 那一格逐截的显式格式也跟着上送：模型要对准 run 序号提字号或颜色，靠的就是这一份
+    expect(tableShape.table![0]![1]!.paragraphRunFormats).toEqual([[{ bold: true }, {}]]);
     // 标题那格不受牵连：它仍走段—run 那一条，没有 table 这一格
     const title = read.report.shapes.find((s) => s.shapeId === 2)!;
     expect(title.table).toBeUndefined();

@@ -248,6 +248,18 @@ function sheetChartLines(chart: ResolvedChart): string[] {
 }
 
 /**
+ * 幻灯片表格里那一格的中文定位（接在"第 N 页 · 形状 X"后面）。
+ *
+ * @param where 页号与形状号那一截前缀。
+ * @param row 表格行号，0 基，与面板上从上往下数的第几行一致。
+ * @param col 表格列号，0 基，**含合并续格**（续格照样占一格，数法与面板一致）。
+ * @returns 一句中文定位；后面直接接"段 X 第 Y 截…"。
+ */
+function tableCellWhere(where: string, row: number, col: number): string {
+  return `${where} 的表 第 ${row} 行第 ${col} 列`;
+}
+
+/**
  * 幻灯片提案条目 → 卡片上的一行中文。
  *
  * 坐标用的是模型视角（页号 1 基、段/run 0 基），与代理回给模型的编号一致，用户能对着幻灯片面板核对（§5.7）。
@@ -271,14 +283,19 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
     // 表格那一格比别的 run 级改动多两个坐标（行、列，0 基）：用户对着面板上那张表数格子就能核对。
     if (edit.type === "set_table_cell_text") {
       const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
-      return `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId} 的表 第 ${edit.row} 行第 ${edit.col} 列 段 ${edit.paraIndex} 第 ${edit.runIndex} 截文字改为「${value || "（清空）"}」`;
+      return `${tableCellWhere(`第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`, edit.row, edit.col)} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截文字改为「${value || "（清空）"}」`;
     }
     const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
     // 段号与 run 号只有 run 级改动才带：几何、叠放与删形状条目上没有这两项，取用之前先按类型分岔。
+    // 字体与颜色那两条现在也认表格那一格（行列一起给就是改那一格里的某一截），定位里得把行列报出来，否则用户看不出改的是哪格。
     const atRun =
       edit.type === "set_shape_geometry" || edit.type === "move_shape_layer" || edit.type === "remove_shape"
         ? where
-        : `${where} 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
+        : `${
+            (edit.type === "set_run_font" || edit.type === "set_run_color") && edit.row !== undefined && edit.col !== undefined
+              ? tableCellWhere(where, edit.row, edit.col)
+              : where
+          } 段 ${edit.paraIndex} 第 ${edit.runIndex} 截`;
     switch (edit.type) {
       case "set_run_text": {
         const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;

@@ -978,6 +978,11 @@ describe("pptx-io：幻灯片里的表（读侧逐格 + 改某一格的一条 ru
     expect(table.table!.rows[0]![0]!.isMergeContinuation).toBe(false);
     // 段里的 run 截数也读得到：那一格「城|市」是两条 run，整段覆盖会拍平粗体（§2.3）
     expect(table.table!.rows[0]![1]!.paragraphRunCounts).toEqual([2]);
+    // 每一格还带着**那一截自己写过**的格式：视图上那两个输入框靠它决定预填什么，没写的留空（表格里那几档继承不猜）
+    expect(table.table!.rows[0]![1]!.paragraphRunFormats).toEqual([[{ bold: true }, {}]]);
+    expect(table.table!.rows[0]![0]!.paragraphRunFormats).toEqual([[{}]]);
+    expect(table.table!.rows[1]![0]!.paragraphRunFormats).toEqual([[{}], [{}]]);
+    expect(table.table!.rows[1]![1]!.paragraphRunFormats).toEqual([[]]); // 续格那个空段一条 run 都没有
   });
   
   it("改某一格的第二条 run：只有那一截换了字，同段另一截的粗体与别的格一个字节都不动", async () => {

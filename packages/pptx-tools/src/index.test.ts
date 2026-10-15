@@ -120,6 +120,26 @@ describe("pptx-tools：提案的九类改动", () => {
     expect(one({ type: "set_table_cell_text", slideNumber: 1, shapeId: 5, paraIndex: 0, runIndex: 0, text: "甲" }).ok).toBe(false);
   });
 
+  it("set_run_font / set_run_color 的行列：一起给就是改表格那一格，只给一个被 refine 拒，边界与 set_table_cell_text 同源", () => {
+    const cellFont = { type: "set_run_font", slideNumber: 1, shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 0, sizePt: 20 };
+    const cellColor = { type: "set_run_color", slideNumber: 1, shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 0, color: "#ff0000" };
+    expect(one(cellFont).ok).toBe(true);
+    expect(one(cellColor).ok).toBe(true);
+    // 行列都省略的旧条目必须照样合法：加的是可选字段，不能把普通形状那条字体/颜色改坏（§3.4 扩接口不另开一条）
+    expect(one({ type: "set_run_font", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, bold: true }).ok).toBe(true);
+    expect(one({ type: "set_run_color", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, color: "00ff00" }).ok).toBe(true);
+    // 只给一个下标时连"指普通形状还是指那一格"都判不出来，所以成对强制
+    for (const halfGiven of [{ ...cellFont, col: undefined }, { ...cellFont, row: undefined }, { ...cellColor, col: undefined }]) {
+      const r = one(halfGiven);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toContain("必须一起给");
+    }
+    expect(one({ ...cellFont, row: -1 }).ok).toBe(false);
+    expect(one({ ...cellColor, col: 501 }).ok).toBe(false);
+    // strict：行列之外的字段照样不许多给
+    expect(one({ ...cellFont, 格子号: 3 }).ok).toBe(false);
+  });
+
   it("改文字超过 2000 字被拒", () => {
     const r = one({ type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "x".repeat(2001) });
     expect(r.ok).toBe(false);
@@ -160,5 +180,26 @@ describe("pptx-tools：导出一致性", () => {
       "set_shape_geometry",
       "set_table_cell_text",
     ]);
+  });
+
+  it("表格行列在给模型的 JSON 里：字体/颜色那条是可选、表格文字那条是必填（只加 zod 忘了声明，模型就看不见这两个下标）", () => {
+    const submit = PPTX_TOOLS.find((tool) => tool.function.name === "ppt_submit_proposal");
+    if (!submit) throw new Error("没有 ppt_submit_proposal 这条工具定义");
+    const branches = (
+      submit.function.parameters.properties as {
+        edits: { items: { oneOf: { properties: { type: { const: string } } & Record<string, unknown>; required: string[] }[] } };
+      }
+    ).edits.items.oneOf;
+    const byType = new Map(branches.map((branch) => [branch.properties.type.const, branch]));
+    for (const type of ["set_run_font", "set_run_color"]) {
+      const branch = byType.get(type);
+      if (!branch) throw new Error(`${type} 的 JSON 分支不见了`);
+      expect(Object.keys(branch.properties)).toEqual(expect.arrayContaining(["row", "col"]));
+      expect(branch.required).not.toContain("row");
+      expect(branch.required).not.toContain("col");
+    }
+    const cellBranch = byType.get("set_table_cell_text");
+    if (!cellBranch) throw new Error("set_table_cell_text 的 JSON 分支不见了");
+    expect(cellBranch.required).toEqual(expect.arrayContaining(["row", "col"]));
   });
 });

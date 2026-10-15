@@ -523,9 +523,9 @@ function SlideNotesField({
 /**
  * 图形框里那张表那一格：逐行逐格铺开，每格一段一行。
  *
- * 只有"这一格这一段恰好一条 run"才给输入框，其余只读并说清为什么（`AGENTS.md` §2.3 不许拍平局部格式；
- * 合并续格根本不画自己的字）。字号与颜色**还没接**：引擎那两条 op 已经认得 `<a:tc>` 里的 run
- * （坐标带行列就走同一套 `<a:rPr>` 改动），缺的是这一格上的输入框与 `pendingEdits` 那一路，不是第二条写路径。
+ * 只有"这一格这一段恰好一条 run"才给输入框（文字 + 字号 + 颜色），其余只读并说清为什么（`AGENTS.md` §2.3 不许拍平局部格式；
+ * 合并续格根本不画自己的字）。字号与颜色走的是引擎已有的那两条 op，坐标多带行列（`RunTarget`，不是第二条写路径）；
+ * 表格里那一截没写显式值时框子留空，不拿 18pt 之类的"常见默认"凑。
  * 格子形状上也没有位置尺寸那几个框——`boxPx` 属于整个图形框，改它等于挪整张表。
  *
  * @param shape 装着表的那个图形框（`shape.table` 由调用处判过才渲染）。
@@ -569,15 +569,40 @@ function SlideTableField({
                         </div>
                       );
                     }
+                    const draft = drafts[key];
+                    // 表格里那一截只认自己写过的 `<a:rPr>`：没有继承链解析器，所以空白就是"没显式值"，不拿 18pt 凑（D3 同一条线）。
+                    const currentFormat = cell.paragraphRunFormats[paraIndex]?.[0] ?? {};
                     return (
-                      <input
-                        className="slide-para-input"
-                        key={key}
-                        type="text"
-                        value={drafts[key]?.text ?? paragraphText}
-                        spellCheck={false}
-                        onChange={(event) => onPatch(key, { text: event.target.value })}
-                      />
+                      <div className="slide-para-row" key={key}>
+                        <input
+                          className="slide-para-input"
+                          type="text"
+                          value={draft?.text ?? paragraphText}
+                          spellCheck={false}
+                          onChange={(event) => onPatch(key, { text: event.target.value })}
+                        />
+                        <label className="slide-field">
+                          <span>字号</span>
+                          <input
+                            type="number"
+                            min={1}
+                            step={0.5}
+                            title={sizeFieldHint(currentFormat)}
+                            placeholder={currentFormat.sizePt === undefined ? "未写" : ""}
+                            value={draft?.sizePt ?? currentFormat.sizePt ?? ""}
+                            onChange={(event) => onPatch(key, { sizePt: numberOrUndefined(event.target.value) })}
+                          />
+                        </label>
+                        <label className="slide-field">
+                          <span>颜色</span>
+                          <input
+                            type="color"
+                            title={currentFormat.hex ?? "这一截没写显式颜色"}
+                            value={draft?.hex ?? currentFormat.hex ?? INHERITED_COLOR}
+                            onChange={(event) => onPatch(key, { hex: event.target.value })}
+                          />
+                        </label>
+                      </div>
                     );
                   })
                 )}

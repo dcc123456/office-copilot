@@ -35,6 +35,8 @@ export interface SlideTableCellSnapshot {
   text: string;
   /** 每段的 `<a:r>` 截数：>1 表示整段覆盖会拍平局部格式（§2.3），只能逐 run 改。 */
   paragraphRunCounts: number[];
+  /** 这一格每段逐 run 的**显式**格式（字号/粗体/颜色，没写的一律留空）：给那一截提字号或颜色时靠它对准 run 序号。 */
+  paragraphRunFormats: RunFormat[][];
   /** 是不是合并区里的**续格**（`hMerge`/`vMerge`）——PowerPoint 不画它的字，对它提改动等于静默无效。 */
   isMergeContinuation: boolean;
 }
@@ -171,6 +173,7 @@ function tableSnapshot(shape: SlideShape): SlideTableCellSnapshot[][] | undefine
     row.map((cell) => ({
       text: clipText(cell.paragraphTexts.join("⏎"), RUN_TEXT_LIMIT).text,
       paragraphRunCounts: cell.paragraphRunCounts,
+      paragraphRunFormats: cell.paragraphRunFormats,
       isMergeContinuation: cell.isMergeContinuation,
     })),
   );

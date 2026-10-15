@@ -56,6 +56,15 @@ export const ReadSlideTextArgs = z
   })
   .strict();
 
+/**
+ * 表格那一格的行号（`<a:tr>` 位置，0 基，与读模型 `SlideShape.table.rows` 同口径）。
+ * 边界只写这一份：`set_table_cell_text` 必填它，`set_run_font`/`set_run_color` 可给它。
+ */
+const TableRow = z.number().int().min(0).max(2000);
+
+/** 表格那一格的列号（该行内 `<a:tc>` 位置，0 基；合并起点也算第 0 列往后数）。 */
+const TableCol = z.number().int().min(0).max(500);
+
 /** 一条改 run 文字的请求。 */
 const SetRunTextEdit = z
   .object({
@@ -79,8 +88,8 @@ const SetTableCellTextEdit = z
     type: z.literal("set_table_cell_text"),
     slideNumber: SlideNumber,
     shapeId: ShapeId,
-    row: z.number().int().min(0).max(2000).describe("表格行号，0 基。来自 ppt_read_slide_text 里这张表列出的行号，别自己数。"),
-    col: z.number().int().min(0).max(500).describe("表格列号，0 基（合并起点也算第 0 列往后数）。越界或落在合并续格上都会被拒。"),
+    row: TableRow.describe("表格行号，0 基。来自 ppt_read_slide_text 里这张表列出的行号，别自己数。"),
+    col: TableCol.describe("表格列号，0 基（合并起点也算第 0 列往后数）。越界或落在合并续格上都会被拒。"),
     paraIndex: ParaIndex,
     runIndex: RunIndex,
     text: z.string().max(2000).describe("这一格该 run 要换成的新文字。只动这一个 run，同格同段其它 run 的格式与文字不受影响。"),
@@ -93,6 +102,8 @@ const SetRunFontEdit = z
     type: z.literal("set_run_font"),
     slideNumber: SlideNumber,
     shapeId: ShapeId,
+    row: TableRow.optional().describe("给了行号（连同列号）就是改**幻灯片表格里那一格**的那条 run；省略就是改普通形状自己的文字体。"),
+    col: TableCol.optional().describe("给了列号就是改表格里那一格；与行号一起给，0 基。落在合并续格上会被拒。"),
     paraIndex: ParaIndex,
     runIndex: RunIndex,
     bold: z.boolean().optional().describe("是否加粗：true 加粗、false 取消加粗。省略表示不改这一项。"),
@@ -106,6 +117,8 @@ const SetRunColorEdit = z
     type: z.literal("set_run_color"),
     slideNumber: SlideNumber,
     shapeId: ShapeId,
+    row: TableRow.optional().describe("给了行号（连同列号）就是改**幻灯片表格里那一格**的那条 run；省略就是改普通形状自己的文字体。"),
+    col: TableCol.optional().describe("给了列号就是改表格里那一格；与行号一起给，0 基。落在合并续格上会被拒。"),
     paraIndex: ParaIndex,
     runIndex: RunIndex,
     color: RunColor,
@@ -218,6 +231,10 @@ export const SubmitProposalArgs = z
       if (edit.type === "set_run_font" && edit.bold === undefined && edit.sizePt === undefined) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["edits", index], message: "set_run_font 的 bold 与 sizePt 至少给一个，否则这条什么都没改。" });
       }
+      if ((edit.type === "set_run_font" || edit.type === "set_run_color") && (edit.row === undefined) !== (edit.col === undefined)) {
+        // 只给一个下标时这一条到底指普通形状还是表格里那一格都判不出来；引擎按行与列两个下标才走表格那条链。
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["edits", index], message: "set_run_font / set_run_color 要改表格里那一格时，row 与 col 必须一起给；改普通形状的 run 就两个都省略。" });
+      }
       if (
         edit.type === "set_shape_geometry" &&
         edit.leftPx === undefined &&
@@ -278,6 +295,12 @@ const RUN_TARGET_JSON = {
   runIndex: { type: "integer", minimum: 0, maximum: 2000 },
 };
 
+/** 表格那一格行列下标的 JSON 形态：边界与 `TableRow`/`TableCol` 那两条 zod 一致，只写一份。 */
+const TABLE_CELL_POS_JSON = {
+  row: { type: "integer", minimum: 0, maximum: 2000 },
+  col: { type: "integer", minimum: 0, maximum: 500 },
+};
+
 /** 给模型的读工具与写工具定义，直接进请求的 `tools` 数组。 */
 export const PPTX_TOOLS: PptxToolDefinition[] = [
   {
@@ -326,7 +349,8 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
         "set_table_cell_text 改表格里某一格的某个 run（除 shapeId 还要给 row/col，都是 0 基，取自 ppt_read_slide_text 列出的行列；" +
         "shapeId 给的是那个**图形框**自己的 id，不是格子的 id；落在合并续格上会被拒，那一格不画自己的字，要改就改合并起点那一格）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
-        "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
+        "set_run_color 改某个 run 的颜色（#rrggbb）；这两条一起给 row/col 时改的就是**幻灯片表格里那一格**的那条 run（行列都是 0 基，取自 ppt_read_slide_text；续格一样会被拒），省略就是改普通形状自己的文字体；" +
+        "set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
         "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒；" +
         "组合形状自己、以及画像里 inGroup=true 的那一格（坐标写在组内子坐标系）几何都改不了，提了只会换回一句理由）；" +
         "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
@@ -357,8 +381,7 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                   properties: {
                     type: { const: "set_table_cell_text" },
                     ...RUN_TARGET_JSON,
-                    row: { type: "integer", minimum: 0, maximum: 2000 },
-                    col: { type: "integer", minimum: 0, maximum: 500 },
+                    ...TABLE_CELL_POS_JSON,
                     text: { type: "string", maxLength: 2000 },
                   },
                   required: ["type", "slideNumber", "shapeId", "row", "col", "paraIndex", "runIndex", "text"],
@@ -369,6 +392,7 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                   properties: {
                     type: { const: "set_run_font" },
                     ...RUN_TARGET_JSON,
+                    ...TABLE_CELL_POS_JSON,
                     bold: { type: "boolean" },
                     sizePt: { type: "number", minimum: 1, maximum: 400 },
                   },
@@ -377,7 +401,12 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                 },
                 {
                   type: "object",
-                  properties: { type: { const: "set_run_color" }, ...RUN_TARGET_JSON, color: { type: "string", pattern: "^#?[0-9a-fA-F]{6}$" } },
+                  properties: {
+                    type: { const: "set_run_color" },
+                    ...RUN_TARGET_JSON,
+                    ...TABLE_CELL_POS_JSON,
+                    color: { type: "string", pattern: "^#?[0-9a-fA-F]{6}$" },
+                  },
                   required: ["type", "slideNumber", "shapeId", "paraIndex", "runIndex", "color"],
                   additionalProperties: false,
                 },

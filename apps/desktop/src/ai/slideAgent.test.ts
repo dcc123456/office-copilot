@@ -136,12 +136,12 @@ function deckWithTable(): PresentationModel {
     table: {
       rows: [
         [
-          { paragraphTexts: ["姓名"], paragraphRunCounts: [1], gridSpan: 1, isMergeContinuation: false },
-          { paragraphTexts: ["城市"], paragraphRunCounts: [1], gridSpan: 1, isMergeContinuation: false },
+          { paragraphTexts: ["姓名"], paragraphRunCounts: [1], paragraphRunFormats: [[{}]], gridSpan: 1, isMergeContinuation: false },
+          { paragraphTexts: ["城市"], paragraphRunCounts: [1], paragraphRunFormats: [[{}]], gridSpan: 1, isMergeContinuation: false },
         ],
         [
-          { paragraphTexts: ["张三", "上海两截"], paragraphRunCounts: [1, 2], gridSpan: 2, isMergeContinuation: false },
-          { paragraphTexts: [""], paragraphRunCounts: [0], gridSpan: 1, isMergeContinuation: true },
+          { paragraphTexts: ["张三", "上海两截"], paragraphRunCounts: [1, 2], paragraphRunFormats: [[{}], [{}, { sizePt: 20 }]], gridSpan: 2, isMergeContinuation: false },
+          { paragraphTexts: [""], paragraphRunCounts: [0], paragraphRunFormats: [[]], gridSpan: 1, isMergeContinuation: true },
         ],
       ],
     },
@@ -358,6 +358,40 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     expect(notes).toHaveLength(1);
     expect(requests).toHaveLength(1);
     expect(requests[0]!.kind).toBe("text");
+  });
+
+  it("表格那一格的字号/颜色：带行与列就翻成带行列的 font / color 坐标（引擎那两条 op 认得，不新开 kinds）", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithTable(), [
+      { type: "set_run_font", slideNumber: 1, shapeId: 10, row: 0, col: 1, paraIndex: 0, runIndex: 0, sizePt: 20 },
+      { type: "set_run_color", slideNumber: 1, shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 1, color: "#ff0000" },
+      // 不带行列的旧条目照旧走普通形状那条链：一个字段都不多给
+      { type: "set_run_font", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, bold: false },
+    ]);
+    expect(notes).toEqual([]);
+    expect(requests).toEqual([
+      { kind: "font", target: { partPath: "ppt/slides/slide1.xml", shapeId: 10, row: 0, col: 1, paraIndex: 0, runIndex: 0 }, format: { bold: undefined, sizePt: 20 } },
+      { kind: "color", target: { partPath: "ppt/slides/slide1.xml", shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 1 }, hex: "#ff0000" },
+      { kind: "font", target: { partPath: "ppt/slides/slide1.xml", shapeId: 2, paraIndex: 0, runIndex: 0 }, format: { bold: false, sizePt: undefined } },
+    ]);
+  });
+
+  it("表格那一格的字号/颜色四种改不了：不是表、行列越界、合并续格、run 越界——一条都不许交出，别条照旧落地（§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithTable(), [
+      { type: "set_run_font", slideNumber: 1, shapeId: 7, row: 0, col: 0, paraIndex: 0, runIndex: 0, bold: true },
+      { type: "set_run_color", slideNumber: 1, shapeId: 10, row: 5, col: 0, paraIndex: 0, runIndex: 0, color: "#00ff00" },
+      { type: "set_run_font", slideNumber: 1, shapeId: 10, row: 1, col: 1, paraIndex: 0, runIndex: 0, sizePt: 18 },
+      { type: "set_run_color", slideNumber: 1, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 3, color: "#0000ff" },
+      // 同批里合法的那一条不能因为上面四条被牺牲
+      { type: "set_run_font", slideNumber: 1, shapeId: 10, row: 0, col: 0, paraIndex: 0, runIndex: 0, bold: true },
+    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.kind).toBe("font");
+    expect(notes).toHaveLength(4);
+    const all = notes.join("\n");
+    expect(all).toContain("没有表格");
+    expect(all).toContain("行号 5 越界（这张表有 2 行）");
+    expect(all).toContain("它不画自己的字");
+    expect(all).toContain("只有 1 个 run，没有第 3 个");
   });
 
   it("set_notes 把页号翻成备注部件路径：这一档只改整篇，带的是那一页自己的 partPath", () => {
