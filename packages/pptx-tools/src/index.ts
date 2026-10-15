@@ -3,15 +3,16 @@
  *
  * 与 `sheet-tools`/`word-tools` 同构，守同一条红线：模型只产出**入参与提案**，定位、落地、撤销全部由
  * `@office-copilot/pptx-io` 做（`AGENTS.md` §2.8、§2.11）。写面只有 `ppt_submit_proposal` 一个出口，
- * 它的八类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状 / 整篇换备注）与
- * `pptx-io/edit.ts` 里**自带逆操作**的八个 op 一一对应——表达不了的（改版式与母版、给没备注页的那页造备注）宁可不提供，
+ * 它的九类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 改表格某格的一条 run / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状 / 整篇换备注）与
+ * `pptx-io/edit.ts` 里**自带逆操作**的九个 op 一一对应——表达不了的（改版式与母版、给没备注页的那页造备注）宁可不提供，
  * 也不发一批没有逆操作的直写（§2.5）。
  * 按 spec §三 的包边界，本包只依赖 `zod` 与 `@office-copilot/shared`（那条入参判定共用一份）、**不 import `pptx-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 slideAgent）拿校验过的入参去调引擎函数：把 `slideNumber` 翻成部件路径、
  * 把 `{shapeId,paraIndex,runIndex}` 交给 `setShapeRunText`/`setRunFont`/`setRunColor`、
+ * 把表格那格的 `{shapeId,row,col,paraIndex,runIndex}` 交给 `setTableCellRunText`、
  * 把 `{shapeId}` 交给 `setShapeGeometry`/`moveShapeLayer`/`removeShape`、把整页路径交给 `addTextBox`。
  * 坐标一律是"模型视角"：幻灯片 1 基（ppt_describe 报第几页）、形状号取自 ppt_describe 给的 shapeId、
- * 段/run 0 基（与 ppt_read_slide_text 列出的序号一致）。单位说在描述里：字号 pt、几何 px（§2.1 换算在引擎边）。
+ * 段/run 与表格的行/列 0 基（与 ppt_read_slide_text 列出的序号一致）。单位说在描述里：字号 pt、几何 px（§2.1 换算在引擎边）。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
  */
 import { z } from "zod";
@@ -64,6 +65,25 @@ const SetRunTextEdit = z
     paraIndex: ParaIndex,
     runIndex: RunIndex,
     text: z.string().max(2000).describe("这个 run 要换成的新文字。只动这一个 run，同段其它 run 的格式与文字不受影响。"),
+  })
+  .strict();
+
+/**
+ * 一条改**幻灯片表格里某一格**的请求。
+ *
+ * 表格挂在图形框（`p:graphicFrame`）里，那一格的文字体不是形状自己的 `p:txBody`，所以定位要多给行与列；
+ * 两者都是 0 基，取自 ppt_read_slide_text 列出的行列号。合并区里被并进来的那一格（续格）不画自己的字，提了会被引擎拒。
+ */
+const SetTableCellTextEdit = z
+  .object({
+    type: z.literal("set_table_cell_text"),
+    slideNumber: SlideNumber,
+    shapeId: ShapeId,
+    row: z.number().int().min(0).max(2000).describe("表格行号，0 基。来自 ppt_read_slide_text 里这张表列出的行号，别自己数。"),
+    col: z.number().int().min(0).max(500).describe("表格列号，0 基（合并起点也算第 0 列往后数）。越界或落在合并续格上都会被拒。"),
+    paraIndex: ParaIndex,
+    runIndex: RunIndex,
+    text: z.string().max(2000).describe("这一格该 run 要换成的新文字。只动这一个 run，同格同段其它 run 的格式与文字不受影响。"),
   })
   .strict();
 
@@ -171,6 +191,7 @@ const SetNotesEdit = z
 /** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状与整篇换备注为止。 */
 export const PptxEdit = z.discriminatedUnion("type", [
   SetRunTextEdit,
+  SetTableCellTextEdit,
   SetRunFontEdit,
   SetRunColorEdit,
   SetShapeGeometryEdit,
@@ -183,7 +204,7 @@ export const PptxEdit = z.discriminatedUnion("type", [
 /**
  * `ppt_submit_proposal` 的入参。
  *
- * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这八项。
+ * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这九项。
  * "字体/几何至少给一项"这种跨字段约束不能放进 `discriminatedUnion`（会把成员包成 ZodEffects 而非法），所以在外层校验。
  */
 export const SubmitProposalArgs = z
@@ -282,7 +303,8 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
       name: "ppt_read_slide_text",
       description:
         "把某一页里每个文本形状的段落与 run 摊开列出（含 paraIndex、runIndex、该 run 现文本、现有的粗体/字号/颜色）。" +
-        "提交 run 级编辑前用它确认要改的 paraIndex/runIndex，别凭印象数。",
+        "图形框里装的若是表格，会按行列逐格列出（含 row、col、该格现文本与逐段 run 数）；合并区里被并进来的那一格会标出来，它不画自己的字。" +
+        "提交 run 级编辑前用它确认要改的 paraIndex/runIndex 与行列号，别凭印象数。",
       parameters: {
         type: "object",
         properties: {
@@ -300,7 +322,9 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
       name: "ppt_submit_proposal",
       description:
         "把你打算对幻灯片做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
-        "八类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
+        "九类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
+        "set_table_cell_text 改表格里某一格的某个 run（除 shapeId 还要给 row/col，都是 0 基，取自 ppt_read_slide_text 列出的行列；" +
+        "shapeId 给的是那个**图形框**自己的 id，不是格子的 id；落在合并续格上会被拒，那一格不画自己的字，要改就改合并起点那一格）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
         "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
         "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒；" +
@@ -326,6 +350,18 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                   type: "object",
                   properties: { type: { const: "set_run_text" }, ...RUN_TARGET_JSON, text: { type: "string", maxLength: 2000 } },
                   required: ["type", "slideNumber", "shapeId", "paraIndex", "runIndex", "text"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "set_table_cell_text" },
+                    ...RUN_TARGET_JSON,
+                    row: { type: "integer", minimum: 0, maximum: 2000 },
+                    col: { type: "integer", minimum: 0, maximum: 500 },
+                    text: { type: "string", maxLength: 2000 },
+                  },
+                  required: ["type", "slideNumber", "shapeId", "row", "col", "paraIndex", "runIndex", "text"],
                   additionalProperties: false,
                 },
                 {

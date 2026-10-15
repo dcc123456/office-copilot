@@ -15,6 +15,7 @@ import type { PptxEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
 import {
   boxDraftKeyOf,
+  cellDraftKeyOf,
   draftKeyOf,
   dropShapeDrafts,
   inheritedBoxNote,
@@ -55,7 +56,11 @@ function shapeKindLabel(shape: SlideShape): string {
   const within = shape.groupShapeId === undefined ? "" : "组合里的";
   if (shape.isPlaceholder) return `${within}占位符 ${shape.placeholderRef ?? "?"}`;
   if (shape.kind === "picture") return `${within}图片`;
-  if (shape.kind === "graphicFrame") return `${within}图形框（表格 / 图表）`;
+  if (shape.kind === "graphicFrame") {
+    // 图形框里可能是表也可能是图表：读得出逐格文字的那一种直接报行数，别让用户对着"（表格 / 图表）"猜。
+    if (shape.table) return `${within}图形框（表格 ${shape.table.rows.length} 行）`;
+    return `${within}图形框（表格 / 图表）`;
+  }
   if (shape.kind === "group") return "组合形状";
   if (shape.kind === "connector") return `${within}连接线`;
   return shape.paragraphTexts.length ? `${within}文本框` : `${within}形状（无文字）`;
@@ -392,6 +397,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
                   ) : (
                     <p className="slide-box-note">{inheritedBoxNote(shape)}</p>
                   )}
+                  {shape.table ? <SlideTableField shape={shape} partPath={slide.partPath} drafts={drafts} onPatch={patchDraft} /> : null}
                   {shape.paragraphTexts.map((paragraphText, paraIndex) => {
                     const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;
                     const key = draftKeyOf(slide.partPath, shape.shapeId, paraIndex);
@@ -510,6 +516,76 @@ function SlideNotesField({
         <p className="slide-notes-note">{block}</p>
       )}
       {slide.notes && draft !== undefined && block ? <p className="slide-notes-note">{block}</p> : null}
+    </div>
+  );
+}
+
+/**
+ * 图形框里那张表那一格：逐行逐格铺开，每格一段一行。
+ *
+ * 只有"这一格这一段恰好一条 run"才给输入框，其余只读并说清为什么（`AGENTS.md` §2.3 不许拍平局部格式；
+ * 合并续格根本不画自己的字）。字号与颜色这里**故意**不给：引擎那两条字体/颜色 op 定位的是形状自己的
+ * `p:txBody`，还没伸进 `<a:tc>` 里的 run，视图不许另发明一条写入路径。
+ * 格子形状上也没有位置尺寸那几个框——`boxPx` 属于整个图形框，改它等于挪整张表。
+ *
+ * @param shape 装着表的那个图形框（`shape.table` 由调用处判过才渲染）。
+ * @param partPath 该页的幻灯片部件路径，草稿键要用它。
+ * @param drafts 当前全部草稿，表格那些格的键见 `cellDraftKeyOf`。
+ * @param onPatch 某一格输入框改了字（第一参是草稿键）。
+ */
+function SlideTableField({
+  shape,
+  partPath,
+  drafts,
+  onPatch,
+}: {
+  shape: SlideShape;
+  partPath: string;
+  drafts: Record<string, SlideDraft>;
+  onPatch: (key: string, patch: SlideDraft) => void;
+}) {
+  const table = shape.table;
+  if (!table) return null;
+  return (
+    <div className="slide-table">
+      {table.rows.map((cells, rowIndex) => (
+        <div className="slide-table-row" key={rowIndex}>
+          {cells.map((cell, colIndex) => {
+            const mergedNote = cell.gridSpan > 1 ? `，横向占 ${cell.gridSpan} 列` : "";
+            return (
+              <div className={cell.isMergeContinuation ? "slide-table-cell slide-table-cell-merged" : "slide-table-cell"} key={colIndex}>
+                <span className="slide-table-cell-name">{`第 ${rowIndex} 行第 ${colIndex} 列${mergedNote}`}</span>
+                {cell.isMergeContinuation ? (
+                  <em className="slide-table-cell-note">这一格被并到左边那一格里了，画的是合并起点那格的字，要改就改那一格</em>
+                ) : (
+                  cell.paragraphTexts.map((paragraphText, paraIndex) => {
+                    const runCount = cell.paragraphRunCounts[paraIndex] ?? 0;
+                    const key = cellDraftKeyOf(partPath, shape.shapeId, rowIndex, colIndex, paraIndex);
+                    if (runCount !== 1) {
+                      return (
+                        <div className="slide-para-locked" key={key}>
+                          <span>{paragraphText || "（空段）"}</span>
+                          <em>{lockedParagraphHint(runCount)}</em>
+                        </div>
+                      );
+                    }
+                    return (
+                      <input
+                        className="slide-para-input"
+                        key={key}
+                        type="text"
+                        value={drafts[key]?.text ?? paragraphText}
+                        spellCheck={false}
+                        onChange={(event) => onPatch(key, { text: event.target.value })}
+                      />
+                    );
+                  })
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }

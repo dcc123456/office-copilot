@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { PptxEditRequest, PresentationModel, RunFormat, Slide, SlideNotes, SlideShape } from "@office-copilot/pptx-io";
-import { boxDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, notesRequestOf, notesSaveBlock, pendingEdits, sizeFieldHint } from "./slideDeckModel.js";
+import { boxDraftKeyOf, cellDraftKeyOf, draftKeyOf, dropShapeDrafts, inheritedBoxNote, layerEdgeNote, notesRequestOf, notesSaveBlock, pendingEdits, sizeFieldHint } from "./slideDeckModel.js";
 
 /** 一张幻灯片上的部件路径，全部用例共用。 */
 const PART = "ppt/slides/slide1.xml";
@@ -61,6 +61,41 @@ function shapeOf(shapeId: number, paragraphs: [string, number, RunFormat?][]): S
   };
 }
 
+/** 一张表里某一格的规格：逐段文字，可选每段 run 条数（默认每段 1 条）、是否合并续格、横向占几列。 */
+interface CellSpec {
+  texts: string[];
+  runCounts?: number[];
+  isMergeContinuation?: boolean;
+  gridSpan?: number;
+}
+
+/**
+ * 造一个图形框快照，里面装一张表（`pendingEdits` 的表格那条守卫只看这份）。
+ *
+ * 表格的形状自己**没有** `paragraphTexts`（文字体在每格的 `<a:txBody>` 里），所以走的是另一条摊开的分支。
+ *
+ * @param shapeId 那个图形框的形状号（格子没有自己的 id，落地靠它 + 行列）。
+ * @param rows 逐行的格子规格。
+ * @returns 一个形状快照；没有自己的 `<a:xfrm>`，与 {@link shapeOf} 一样。
+ */
+function tableShapeOf(shapeId: number, rows: CellSpec[][]): SlideShape {
+  return {
+    ...shapeOf(shapeId, []),
+    name: `表格 ${shapeId}`,
+    kind: "graphicFrame",
+    table: {
+      rows: rows.map((cells) =>
+        cells.map((spec) => ({
+          paragraphTexts: spec.texts,
+          paragraphRunCounts: spec.runCounts ?? spec.texts.map(() => 1),
+          gridSpan: spec.gridSpan ?? 1,
+          isMergeContinuation: spec.isMergeContinuation ?? false,
+        })),
+      ),
+    },
+  };
+}
+
 /**
  * 造一份只有一张幻灯片的模型。
  *
@@ -89,6 +124,33 @@ describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
   it("段落的文字来自字段（0 条 run）时也不交出去", () => {
     const deck = deckOf([shapeOf(5, [["2", 0]])]);
     expect(pendingEdits(deck, { [draftKeyOf(PART, 5, 0)]: { text: "99" } })).toEqual([]);
+  });
+
+  it("表格那一格：单 run 那段真改了才成一条 table_text，行/列/段一起带上", () => {
+    const deck = deckOf([tableShapeOf(10, [[{ texts: ["姓名"] }, { texts: ["城市"] }], [{ texts: ["张三"] }, { texts: [""] }]])]);
+    expect(pendingEdits(deck, {})).toEqual([]);
+    // 与现场一样的那条不交出（空点"保存"不写盘）。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 0, 0, 0)]: { text: "姓名" } })).toEqual([]);
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 1, 0)]: { text: "北京" } })).toEqual([
+      { kind: "table_text", target: { partPath: PART, shapeId: 10, row: 1, col: 1, paraIndex: 0, runIndex: 0 }, text: "北京" },
+    ]);
+  });
+
+  it("表格那一格的三条守卫：合并续格不交出、多 run 段不交出、同格另一段的草稿牵连不到它", () => {
+    const deck = deckOf([
+      tableShapeOf(10, [
+        [{ texts: ["姓名"] }, { texts: ["城市"] }],
+        [{ texts: ["张三", "两截不同格式"], runCounts: [1, 2], gridSpan: 2 }, { texts: [""], runCounts: [0], isMergeContinuation: true }],
+      ]),
+    ]);
+    // 续格在 XML 里确有自己的空段，但 PowerPoint 不画它的字，写了就是一次静默失效的落盘（§2.4）。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 1, 0)]: { text: "硬写一格" } })).toEqual([]);
+    // 多 run 的那段整段覆盖会拍平那一截的粗体与字号（§2.3）。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 0, 1)]: { text: "拍平了" } })).toEqual([]);
+    // 同一格里那段单 run 的照旧交出，草稿键按「行.列.段」分得开。
+    expect(pendingEdits(deck, { [cellDraftKeyOf(PART, 10, 1, 0, 1)]: { text: "拍平了" }, [cellDraftKeyOf(PART, 10, 1, 0, 0)]: { text: "李四" } })).toEqual([
+      { kind: "table_text", target: { partPath: PART, shapeId: 10, row: 1, col: 0, paraIndex: 0, runIndex: 0 }, text: "李四" },
+    ]);
   });
 
   it("字号与颜色各成一条，且只带真改过的那一项", () => {
@@ -242,6 +304,7 @@ describe("dropShapeDrafts：删掉的形状不留未保存的草稿", () => {
       [draftKeyOf(PART, 4, 0)]: { text: "要删的" },
       [draftKeyOf(PART, 4, 1)]: { hex: "#ff0000" },
       [boxDraftKeyOf(PART, 4)]: { box: { widthPx: 200 } },
+      [cellDraftKeyOf(PART, 4, 1, 0, 0)]: { text: "要删的那张表的一格" },
     };
     expect(Object.keys(dropShapeDrafts(drafts, PART, 4))).toEqual([`${PART}#2#0`]);
   });

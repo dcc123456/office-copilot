@@ -115,6 +115,40 @@ function deckWithGroup(): PresentationModel {
   return deck;
 }
 
+/**
+ * 在第 1 页末尾再加一个图形框（id=10）装一张表：第 0 行两格各一段一截，
+ * 第 1 行第 0 列是合并起点（跨两列、两段——第二段两条 run），第 1 行第 1 列是它并进来的续格。
+ *
+ * 表格的形状自己**没有** `paragraphTexts`（文字体在 `<a:tbl>` 的每格里），所以这一格专测装配层那条"逐格"的分岔。
+ */
+function deckWithTable(): PresentationModel {
+  const deck = sampleDeck();
+  const picture = deck.slides[0]!.shapes[2]!;
+  deck.slides[0]!.shapes.push({
+    ...picture,
+    shapeId: 10,
+    name: "Table 9",
+    kind: "graphicFrame",
+    paragraphTexts: [],
+    paragraphRunCounts: [],
+    paragraphRunTexts: [],
+    paragraphRunFormats: [],
+    table: {
+      rows: [
+        [
+          { paragraphTexts: ["姓名"], paragraphRunCounts: [1], gridSpan: 1, isMergeContinuation: false },
+          { paragraphTexts: ["城市"], paragraphRunCounts: [1], gridSpan: 1, isMergeContinuation: false },
+        ],
+        [
+          { paragraphTexts: ["张三", "上海两截"], paragraphRunCounts: [1, 2], gridSpan: 2, isMergeContinuation: false },
+          { paragraphTexts: [""], paragraphRunCounts: [0], gridSpan: 1, isMergeContinuation: true },
+        ],
+      ],
+    },
+  });
+  return deck;
+}
+
 /** 模型点一个工具的一轮回包。 */
 function turnWithTool(name: string, args: string, content = ""): ToolTurnResult {
   return { ok: true, content, toolCalls: [{ id: `call_${name}`, name, arguments: args }] };
@@ -278,6 +312,52 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     ]);
     expect(requests).toEqual([]);
     expect(notes[0]).toContain("文字来自字段");
+  });
+
+  it("表格那一格：带行与列翻成 table_text，shapeId 用图形框那个", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithTable(), [
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 0, col: 1, paraIndex: 0, runIndex: 0, text: "省份" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 1, text: "改为两截的第二截" },
+    ]);
+    expect(notes).toEqual([]);
+    expect(requests).toEqual([
+      { kind: "table_text", target: { partPath: "ppt/slides/slide1.xml", shapeId: 10, row: 0, col: 1, paraIndex: 0, runIndex: 0 }, text: "省份" },
+      {
+        kind: "table_text",
+        target: { partPath: "ppt/slides/slide1.xml", shapeId: 10, row: 1, col: 0, paraIndex: 1, runIndex: 1 },
+        text: "改为两截的第二截",
+      },
+    ]);
+  });
+
+  it("表格那一格的四种改不了：图形框里不是表、行列越界、合并续格、段/run 越界——一条都不许交出（§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithTable(), [
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 7, row: 0, col: 0, paraIndex: 0, runIndex: 0, text: "图片里没有表" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 5, col: 0, paraIndex: 0, runIndex: 0, text: "越界的行" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 0, col: 3, paraIndex: 0, runIndex: 0, text: "越界的列" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 1, col: 1, paraIndex: 0, runIndex: 0, text: "并进来的那一格" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 0, col: 0, paraIndex: 2, runIndex: 0, text: "越界的段" },
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 1, col: 0, paraIndex: 0, runIndex: 1, text: "越界的 run" },
+    ]);
+    expect(requests).toEqual([]);
+    expect(notes).toHaveLength(6);
+    const all = notes.join("\n");
+    expect(all).toContain("没有表格");
+    expect(all).toContain("行号 5 越界（这张表有 2 行）");
+    expect(all).toContain("列号 3 越界（第 0 行有 2 格）");
+    expect(all).toContain("它不画自己的字");
+    expect(all).toContain("只有 1 段，没有第 2 段");
+    expect(all).toContain("只有 1 个 run，没有第 1 个");
+  });
+
+  it("表格那一格与同批别的改动混着提：拒掉的那条只牺牲自己，别条照旧交出", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithTable(), [
+      { type: "set_table_cell_text", slideNumber: 1, shapeId: 10, row: 1, col: 1, paraIndex: 0, runIndex: 0, text: "并进来的那一格" },
+      { type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "新标题" },
+    ]);
+    expect(notes).toHaveLength(1);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.kind).toBe("text");
   });
 
   it("set_notes 把页号翻成备注部件路径：这一档只改整篇，带的是那一页自己的 partPath", () => {

@@ -37,11 +37,13 @@ const CONTEXT_MAX_SHAPES_PER_SLIDE = 20;
 
 const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这份文稿的结构画像，不是整份原文。
 - 动手前先调 ppt_describe 拿页号与 shapeId；要改某段文字再调 ppt_read_slide_text 确认 paraIndex / runIndex，不许凭印象数，也不许自己编形状号。
-- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape / set_notes 八种，
-  前三条指到"某一页某个形状的某段某 run"，中间两条指到形状（叠放方向是 up/down/top/bottom），后三条是结构或整篇改动：
+- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_table_cell_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape / set_notes 九种，
+  前四条指到"某一页某个形状的某段某 run"（表格那条还要给行与列），中间两条指到形状（叠放方向是 up/down/top/bottom），后三条是结构或整篇改动：
   add_text_box 只给页号与四个几何值加文字（新形状号由引擎落地时分配，同一份提案里引用不到它），remove_shape 给页号与形状号，
   set_notes 给页号与逐段文字，把那一页**已存在**的演讲者备注整篇换掉（不是追加；画像里 notesPartPath 为 null 就是这页没有备注页，提了也落不了）。
   同一批里删掉的形状就别再改它的文字或字体（落地按顺序执行，那条必然失败并整批不写）。改版式与母版这里做不了，遇到就直说做不了。
+- 表格住在图形框（kind=graphicFrame）里：那个形状自己没有文字体，ppt_read_slide_text 会改成逐格列出（row / col 都是 0 基，shapeId 用图形框那个）。
+  改表格里的字就提 set_table_cell_text；合并区里被并进来的那一格（列表里标了续格）不画自己的字，提了会被拒，要改就改合并起点那一格。
 - set_shape_geometry 想只改一个轴（比如只把宽改一下），那个形状必须自己写过几何；画像里 hasOwnGeometry=false 的形状（标题/正文那类占位符，值从版式继承）要改就把四个值一起给。
 - 一段里如果有多条 run（read_slide_text 会标出来），必须逐 run 改，整段覆盖会拍平那一截的粗体与字号——这是禁止的。
 - 字号单位是 pt，几何单位是屏幕 px；EMU、半磅这些换算由引擎做，你不许换算数字往字段里塞。
@@ -102,7 +104,7 @@ export function slideContextOf(deck: PresentationModel): string {
  *
  * 页号是模型视角的 1 基，部件路径由现场模型算——这是唯一一处做这个映射（§3.3）。
  * 翻不动的（页号越界、该页没有这个形状、几何一条属性都没给、同一批里那个形状已被删掉、那一页根本没有备注页、
- * 备注带多种格式）逐条记进 `notes`，
+ * 备注带多种格式、图形框里不是表、表格的行列/段/run 越界或落在合并续格）逐条记进 `notes`，
  * 不许交出一批主进程必然拒绝、整批不落地的改动（§2.4 的事务语义）。
  *
  * @param deck 提案要落在这份文稿上（页号→部件路径按它算）。
@@ -191,6 +193,21 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
       requests.push({ kind: "layer", target: { partPath: slide.partPath, shapeId: shape.shapeId }, direction: edit.direction });
       continue;
     }
+    if (edit.type === "set_table_cell_text") {
+      // 表格那一格住在图形框自己的 `<a:tbl>` 里，不在形状的 `p:txBody`，所以坐标要多带行列；
+      // 引擎那条会把**整批**拒掉（§2.4），因此四层（表、行列、段、run）都按现场模型先判一刀再决定交不交。
+      const cellNote = tableCellRangeNote(shape, edit.row, edit.col, edit.paraIndex, edit.runIndex);
+      if (cellNote) {
+        notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那一格改不了：${cellNote}`);
+        continue;
+      }
+      requests.push({
+        kind: "table_text",
+        target: { partPath: slide.partPath, shapeId: shape.shapeId, row: edit.row, col: edit.col, paraIndex: edit.paraIndex, runIndex: edit.runIndex },
+        text: edit.text,
+      });
+      continue;
+    }
     const outOfRange = runRangeNote(shape, edit.paraIndex, edit.runIndex);
     if (outOfRange) {
       notes.push(`第 ${edit.slideNumber} 页「${shape.name}」那条改不了：${outOfRange}`);
@@ -240,6 +257,34 @@ function runRangeNote(shape: SlideShape, paraIndex: number, runIndex: number): s
   const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;
   if (runCount === 0) return `第 ${paraIndex} 段的文字来自字段（页码 / 日期），不在可改范围`;
   if (runIndex >= runCount) return `第 ${paraIndex} 段只有 ${runCount} 个 run，没有第 ${runIndex} 个`;
+  return null;
+}
+
+/**
+ * 表格那一格的坐标对不对得上现场模型（表、行列、段、run 四层逐层查）。
+ *
+ * 引擎的 `setTableCellRunText` 一旦拒就是整批不落地（§2.4），所以这里拿读模型先判。合并续格单独点名：
+ * 它在 XML 里确实存在、也确实有一段空 `<a:p/>`，但 PowerPoint 不画它的字，写了等于静默没写。
+ *
+ * @param shape 该形状快照（表格来自它的 `table`，没有就是图形框里装的不是表）。
+ * @param row 模型给的行号（0 基）。
+ * @param col 模型给的列号（0 基，合并起点往后照数）。
+ * @param paraIndex 模型给的段号（0 基，该格自己的段）。
+ * @param runIndex 模型给的 run 号（0 基，该段自己的 run）。
+ * @returns 一句中文理由；四层都对得上时返回 null。
+ */
+function tableCellRangeNote(shape: SlideShape, row: number, col: number, paraIndex: number, runIndex: number): string | null {
+  const table = shape.table;
+  if (!table) return "那个形状里没有表格（图形框里装的可能是图表，或者它压根是图片），改不了表格里的文字";
+  if (row >= table.rows.length) return `行号 ${row} 越界（这张表有 ${table.rows.length} 行）`;
+  const cells = table.rows[row] ?? [];
+  if (col >= cells.length) return `列号 ${col} 越界（第 ${row} 行有 ${cells.length} 格）`;
+  const cell = cells[col]!;
+  if (cell.isMergeContinuation) return `第 ${row} 行第 ${col} 列是合并区里被并进来的那一格，它不画自己的字，要改的是合并起点那一格`;
+  if (paraIndex >= cell.paragraphRunCounts.length) return `第 ${row} 行第 ${col} 列只有 ${cell.paragraphRunCounts.length} 段，没有第 ${paraIndex} 段`;
+  const runCount = cell.paragraphRunCounts[paraIndex] ?? 0;
+  if (runCount === 0) return `第 ${row} 行第 ${col} 列的第 ${paraIndex} 段没有 run（空段或字段），改不了文字`;
+  if (runIndex >= runCount) return `第 ${row} 行第 ${col} 列的第 ${paraIndex} 段只有 ${runCount} 个 run，没有第 ${runIndex} 个`;
   return null;
 }
 

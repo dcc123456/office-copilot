@@ -268,6 +268,11 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
       const shown = preview.length > 40 ? `${preview.slice(0, 40)}…` : preview;
       return `第 ${edit.slideNumber} 页 备注整篇换成 ${edit.paragraphTexts.length} 段「${shown}」`;
     }
+    // 表格那一格比别的 run 级改动多两个坐标（行、列，0 基）：用户对着面板上那张表数格子就能核对。
+    if (edit.type === "set_table_cell_text") {
+      const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
+      return `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId} 的表 第 ${edit.row} 行第 ${edit.col} 列 段 ${edit.paraIndex} 第 ${edit.runIndex} 截文字改为「${value || "（清空）"}」`;
+    }
     const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
     // 段号与 run 号只有 run 级改动才带：几何、叠放与删形状条目上没有这两项，取用之前先按类型分岔。
     const atRun =

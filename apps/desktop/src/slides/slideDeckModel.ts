@@ -140,7 +140,25 @@ export function boxDraftKeyOf(partPath: string, shapeId: number): string {
 }
 
 /**
- * 删掉一个形状时把它那些还没保存的草稿一并丢掉。
+ * 表格里某一格的文字草稿的定位键。
+ *
+ * 表格住在图形框的 `<a:tbl>` 里，一格一段最多一条 run 时本视图才允许改（与 {@link draftKeyOf} 同一条守卫）。
+ * 末段用 `行.列.段` 三个数字点分，与 {@link draftKeyOf} 那个纯数字的段号键不可能撞车，
+ * 又仍然带 `${partPath}#${shapeId}#` 前缀，删形状时 {@link dropShapeDrafts} 一并清得掉。
+ *
+ * @param partPath 幻灯片部件路径。
+ * @param shapeId 那个**图形框**的 `<p:cNvPr @id>`（格子自己没有形状号）。
+ * @param row 行号（0 基）。
+ * @param col 列号（0 基，合并起点往后照数）。
+ * @param paraIndex 该格自己的段落序号（0 基）。
+ * @returns 拼出来的键；run 固定是 0，理由同 {@link draftKeyOf}。
+ */
+export function cellDraftKeyOf(partPath: string, shapeId: number, row: number, col: number, paraIndex: number): string {
+  return `${partPath}#${shapeId}#${row}.${col}.${paraIndex}`;
+}
+
+/**
+ * 删掉一个形状时把它那些还没保存的草稿一并丢掉（表格那一格的草稿同前缀，一并清掉）。
  *
  * 形状号是"这一页已有 `@id` 最大值 +1"（见 `pptx-io/edit.ts` 的 `addTextBox`），删掉最大号那个之后
  * 再新建就会把同一个号发给新形状；旧草稿留着就会把用户给旧框打的字静默写进新框。
@@ -218,9 +236,40 @@ export function pendingEdits(deck: PresentationModel, drafts: Record<string, Sli
           edits.push({ kind: "color", target: runTarget, hex: draft.hex });
         }
       });
+      if (shape.table) pushTableCellEdits(edits, slide.partPath, shape, drafts);
     }
   }
   return edits;
+}
+
+/**
+ * 把一个图形框里那张表的逐格草稿摊成 `table_text` 改动。
+ *
+ * 守卫与 {@link pendingEdits} 摊段落那三条一模一样：一格一段最多一条 run 才允许整段覆盖（`AGENTS.md` §2.3），
+ * 与现场值相同的不交出（空点"保存"不写盘）。合并续格单独一条且不交出：它在 XML 里确实有自己的空 `<a:p/>`，
+ * 但 PowerPoint 不画它的字，写了就是一次静默失效的落盘（§2.4）——要改的是合并起点那一格。
+ *
+ * @param edits 目标数组，就地追加（顺序跟着表格的行列走，与用户在表上从上到下看到的顺序一致）。
+ * @param partPath 幻灯片部件路径。
+ * @param shape 装着表的那个图形框（`shape.table` 不存在时什么都不加，即那里面是图表）。
+ * @param drafts 当前全部草稿，表格那些格的键见 {@link cellDraftKeyOf}。
+ */
+function pushTableCellEdits(edits: PptxEditRequest[], partPath: string, shape: SlideShape, drafts: Record<string, SlideDraft>): void {
+  shape.table?.rows.forEach((cells, rowIndex) => {
+    cells.forEach((cell, colIndex) => {
+      if (cell.isMergeContinuation) return;
+      cell.paragraphTexts.forEach((currentText, paraIndex) => {
+        if (cell.paragraphRunCounts[paraIndex] !== 1) return;
+        const draft = drafts[cellDraftKeyOf(partPath, shape.shapeId, rowIndex, colIndex, paraIndex)];
+        if (draft?.text === undefined || draft.text === currentText) return;
+        edits.push({
+          kind: "table_text",
+          target: { partPath, shapeId: shape.shapeId, row: rowIndex, col: colIndex, paraIndex, runIndex: 0 },
+          text: draft.text,
+        });
+      });
+    });
+  });
 }
 
 /**

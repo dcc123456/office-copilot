@@ -37,7 +37,7 @@ describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   });
 });
 
-describe("pptx-tools：提案的八类改动", () => {
+describe("pptx-tools：提案的九类改动", () => {
   const one = (edit: unknown) => parseToolArguments("ppt_submit_proposal", JSON.stringify({ summary: "改一处", edits: [edit] }));
 
   it("set_run_text 合法入参通过", () => {
@@ -107,6 +107,19 @@ describe("pptx-tools：提案的八类改动", () => {
     expect(one({ type: "set_notes", slideNumber: 1, paragraphTexts: ["x".repeat(2001)] }).ok).toBe(false);
   });
 
+  it("set_table_cell_text 要页号/图形框号/行列/段/run/文字：合法通过，缺任一项或负数被拒", () => {
+    const cell = { type: "set_table_cell_text", slideNumber: 1, shapeId: 5, row: 0, col: 1, paraIndex: 0, runIndex: 1, text: "城市" };
+    expect(one(cell).ok).toBe(true);
+    expect(one({ ...cell, row: -1 }).ok).toBe(false);
+    expect(one({ ...cell, col: 501 }).ok).toBe(false);
+    for (const field of ["row", "col", "paraIndex", "runIndex", "text"] as const) {
+      const withoutField = Object.fromEntries(Object.entries(cell).filter(([key]) => key !== field));
+      expect(one(withoutField).ok).toBe(false);
+    }
+    // 与 set_run_text 是两条：表格那条必须带行列，少了就落不回某一格
+    expect(one({ type: "set_table_cell_text", slideNumber: 1, shapeId: 5, paraIndex: 0, runIndex: 0, text: "甲" }).ok).toBe(false);
+  });
+
   it("改文字超过 2000 字被拒", () => {
     const r = one({ type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "x".repeat(2001) });
     expect(r.ok).toBe(false);
@@ -145,6 +158,7 @@ describe("pptx-tools：导出一致性", () => {
       "set_run_font",
       "set_run_text",
       "set_shape_geometry",
+      "set_table_cell_text",
     ]);
   });
 });
