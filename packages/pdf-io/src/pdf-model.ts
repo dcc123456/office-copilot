@@ -148,3 +148,113 @@ export function targetOfRun(run: PdfTextRun): PdfTextTarget | null {
 export function pdfTargetKey(target: PdfTextTarget): string {
   return `${target.pageIndex}|${target.streamRef}|${target.withinForm ?? ""}|${target.start}`;
 }
+
+/**
+ * 一条逻辑文本行：把逐字形的 run 拼回"人能读的一句"。
+ *
+ * 存在的原因（2026-10-15 两份真文件实测）：真实中文产物**一个字发一条显示算子**
+ * （WPS 简历 6 页 5196 条 run，每字形一次 `Tj` + 一次 `TD`），所以 run 不是行、也不是词。
+ * 拼行只靠几何：同一层里 **y 在容差内相同**就是同一行；**x 间隔超过字号 4 倍**判为新行（那是换栏或标签位）。
+ * 行是**连续下标段**（按传入顺序，即内容流顺序），所以 `fromRun`/`toRun` 就足够换回定位键。
+ */
+export interface PdfTextLine {
+  /** 页号（0 基）。 */
+  pageIndex: number;
+  /** 所在内容流的对象引用；与 run 一样，内联流为 null。 */
+  streamRef: string | null;
+  /** Form XObject 资源名链；主内容流为 null。 */
+  withinForm: string | null;
+  /** 这条行覆盖的 run 下标区间：含 `fromRun`、不含 `toRun`（指向 {@link pdfTextLinesOf} 的入参数组）。 */
+  fromRun: number;
+  /** 区间的右端（不含）：`toRun - fromRun` 就是这条行由几条 run 拼成。 */
+  toRun: number;
+  /**
+   * 拼出来的文字（Unicode）。
+   *
+   * 段与段之间**不补空格**：中文逐字形的相邻 run 补空格会凭空多出一个字符。
+   * 含解不出原文的 run 时那些位置直接缺字，靠 {@link hasUndecoded} 如实标出来。
+   */
+  text: string;
+  /** 行首字形原点（PDF 用户空间 pt，y 朝上）。 */
+  x: number;
+  /** 这条行的 y（取行首那条 run 的原点）。 */
+  y: number;
+  /** 行内最后一条 run 的原点 x（**不是右边界**：本包不读字形宽度）。 */
+  lastOriginX: number;
+  /** 生效字号（pt）：取行内第一条有字号的 run；整行都没有时 null。 */
+  fontSizePt: number | null;
+  /** 这条行里有没有解不出原文的 run（true 时 `text` 是缺字的，不许当成完整句子送给模型或用户）。 */
+  hasUndecoded: boolean;
+}
+
+/** y 容差（pt）：WPS 那份简历里同一条视觉行内相邻字形的 y 实测最多差 0.119pt（`TD` 的累加抖动），而真是两条行时最近的两行差 15.12pt，0.6pt 落在两者之间。 */
+const LINE_Y_TOLERANCE_PT = 0.6;
+/**
+ * 断行的 x 间隔上限，按**字号归一**（em）。
+ *
+ * 为什么不写死 pt：实测同一行内相邻字形的推进量 p50=1.00em、p90=1.01em（中日韩字形都是一个 em 宽），
+ * 而换栏/标签位的间隔是 9em 起（94pt/157pt 那些），所以 4em 落在两类之间最空的带子里。
+ * 直接写 40pt 会在大字号标题上把一行切开、在小字号正文里把跨栏的并成一行。
+ */
+const LINE_BREAK_GAP_EM = 4;
+
+/**
+ * 把一条页内、同一坐标层的 run 拼成逻辑文本行（spec 阶段 7 的 W2 前置）。
+ *
+ * @param runs 读模型里的全部 run，**必须按内容流顺序**（{@link PdfReadModel} 的 `runs` 就是：页 → 流 → 起始下标）。
+ * @returns 逻辑行，按传入顺序；跨页、跨内容流、跨 Form 链的一律不合并（三者的原点不在同一个坐标空间里）。
+ *
+ * 已知不做：① 旋转排版的文字（y 会一路漂，会被切成一条一个字一行）；② 字形宽度与真正的右边界——
+ * 只比原点，所以 `lastOriginX` 是"最后一个字形的起点"。
+ */
+export function pdfTextLinesOf(runs: readonly PdfTextRun[]): PdfTextLine[] {
+  const lines: PdfTextLine[] = [];
+
+  /** 从一条 run 起一条新行（下标 `index` 是它在入参数组里的位置）。 */
+  const startLine = (index: number, run: PdfTextRun): PdfTextLine => ({
+    pageIndex: run.pageIndex,
+    streamRef: run.streamRef,
+    withinForm: run.withinForm,
+    fromRun: index,
+    toRun: index + 1,
+    text: run.text ?? "",
+    x: run.origin.x,
+    y: run.origin.y,
+    lastOriginX: run.origin.x,
+    fontSizePt: run.fontSizePt,
+    hasUndecoded: run.text === null,
+  });
+
+  /**
+   * 这条 run 是否该另起一行（只在同一坐标层内判）。
+   *
+   * @param line 当前攒着的行。
+   * @param run 下一条 run。
+   * @returns y 出了容差、x 倒退、或空出超过 4em 时 true。
+   */
+  const isBreak = (line: PdfTextLine, run: PdfTextRun): boolean => {
+    const em = line.fontSizePt ?? run.fontSizePt ?? 0;
+    const gap = run.origin.x - line.lastOriginX;
+    return Math.abs(run.origin.y - line.y) > LINE_Y_TOLERANCE_PT || gap < -LINE_Y_TOLERANCE_PT || (em > 0 && gap > LINE_BREAK_GAP_EM * em);
+  };
+
+  /** 当前正在攒的那条行。 */
+  let open: PdfTextLine | null = null;
+  for (let index = 0; index < runs.length; index += 1) {
+    const run = runs[index];
+    if (!run) continue;
+    const current = open;
+    const sameLayer = current !== null && current.pageIndex === run.pageIndex && current.streamRef === run.streamRef && current.withinForm === run.withinForm;
+    if (current === null || !sameLayer || isBreak(current, run)) {
+      open = startLine(index, run);
+      lines.push(open);
+      continue;
+    }
+    current.toRun = index + 1;
+    current.text += run.text ?? "";
+    current.lastOriginX = run.origin.x;
+    if (current.fontSizePt === null) current.fontSizePt = run.fontSizePt;
+    if (run.text === null) current.hasUndecoded = true;
+  }
+  return lines;
+}

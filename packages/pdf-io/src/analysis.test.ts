@@ -1,13 +1,15 @@
 /**
  * `.pdf` 的 AI 读面用例（spec 阶段 7 的 D6 那一半）。
  *
- * 钉四条：① 模型看到的只有页号（1 基）与该页内 run 序号（0 基），`streamRef` 与起始下标跨不出引擎；
+ * 钉五条：① 模型看到的只有页号（1 基）与该页内 run 序号（0 基），`streamRef` 与起始下标跨不出引擎；
  * ② `describePdf` 与 `readPdfPageText` 的序号必须由同一个排序算出来，否则模型照概要提的号会指错那条；
  * ③ 上送内容截断要如实标记（§2.9），越界页号回一句中文理由而不是抛异常（B9）；
- * ④ 改不了的 run 照样列出来并带码说明，别让模型对着一页看不见的文字瞎猜。
+ * ④ 改不了的 run 照样列出来并带码说明，别让模型对着一页看不见的文字瞎猜；
+ * ⑤ 概要那一栏按**逻辑文本行**拼（一个行内多条 run 之间不再有 `⏎`），但逐条那一面仍是 run 粒度——
+ *   改了行就不许顺手改定位坐标，那是模型提交改动时唯一的把手（spec D8 的 W1 档）。
  */
 import { describe, expect, it } from "vitest";
-import { describePdf, readPdfModel, readPdfPageText, type PdfReadModel, type PdfTextRun } from "./index.js";
+import { describePdf, pdfTextLinesOf, readPdfModel, readPdfPageText, type PdfReadModel, type PdfTextRun } from "./index.js";
 import { simpleWinAnsiFixturePdf } from "./test-pdf.js";
 
 /** 造一条 run。 */
@@ -36,7 +38,7 @@ function model(): PdfReadModel {
     pageCount: 3,
     runs: [
       run(),
-      run({ start: 60, withinForm: "Fm0", text: "中文标题", composite: true, baseFont: "SourceHanSansCN-Regular", encodedBytes: 8 }),
+      run({ start: 60, withinForm: "Fm0", text: "中文标题", composite: true, baseFont: "SourceHanSansCN-Regular", encodedBytes: 8, origin: { x: 72, y: 700 } }),
       run({ pageIndex: 2, streamRef: null, text: "内联的文字" }),
       run({ pageIndex: 2, start: 10, text: null, baseFont: null }),
     ],
@@ -59,6 +61,30 @@ describe("describePdf：页号 1 基，没文字的页也在场", () => {
     expect(outline.pages.map((page) => page.pageNumber)).toEqual([1, 2]);
     expect(outline.pageCount).toBe(3);
     expect(outline.pagesTruncated).toBe(true);
+  });
+
+  it("同一逻辑行的多条 run（WPS 那种逐字形产物）在概要里拼成一行，逐条面仍是 run 粒度", () => {
+    const glyphs: PdfReadModel = {
+      pageCount: 1,
+      runs: [
+        run({ text: "姓", origin: { x: 90, y: 615 }, fontSizePt: 10.45 }),
+        run({ start: 24, text: "名", origin: { x: 100.45, y: 615 }, fontSizePt: 10.45 }),
+      ],
+    };
+    const page = describePdf(glyphs, { maxPages: 5 }).pages[0];
+    expect(page?.text).toBe("姓名");
+    expect(page?.runCount).toBe(2);
+    const read = readPdfPageText(glyphs, 1, 50);
+    if (!read.ok) throw new Error("该读出来的：" + read.reason);
+    expect(read.report.runs.map((item) => item.text)).toEqual(["姓", "名"]);
+  });
+
+  it("概要里的 `⏎` 只出现在换行处：y 差超过 0.6pt 才断行", () => {
+    const two: PdfReadModel = {
+      pageCount: 1,
+      runs: [run({ text: "第一行", origin: { x: 90, y: 615 } }), run({ start: 60, text: "第二行", origin: { x: 90, y: 597 } })],
+    };
+    expect(describePdf(two, { maxPages: 5 }).pages[0]?.text).toBe("第一行⏎第二行");
   });
 
   it("概要超 400 字时截断并标记（§2.9：截了要说出来）", () => {
@@ -105,7 +131,7 @@ describe("readPdfPageText：逐条 run 的序号、字数与改不了的码", ()
     expect(read.report.runCount).toBe(2);
   });
 
-  it("真文件上 describe 的概要就是逐条文字拼出来的：模型照任一边的号提改动都指同一条", async () => {
+  it("真文件上概要是逻辑行拼的、逐条是 run 列的，两边同源：模型照任一边的号提改动都指同一条", async () => {
     const bytes = await simpleWinAnsiFixturePdf();
     const real = await readPdfModel(bytes);
     const outline = describePdf(real, { maxPages: 50 });
@@ -113,7 +139,11 @@ describe("readPdfPageText：逐条 run 的序号、字数与改不了的码", ()
       const read = readPdfPageText(real, page.pageNumber, 50);
       if (!read.ok) throw new Error("该读出来的：" + read.reason);
       expect(read.report.runCount).toBe(page.runCount);
-      expect(read.report.runs.map((item) => item.text).filter((text) => text !== "").join("⏎")).toBe(page.text);
+      const runsOfPage = real.runs.filter((item) => item.pageIndex === page.pageNumber - 1);
+      const lines = pdfTextLinesOf(runsOfPage);
+      if (!page.textTruncated) expect(lines.map((line) => line.text).filter((text) => text !== "").join("⏎")).toBe(page.text);
+      // 分组只改"怎么断行"，不许改文字本身：把行首尾相接必须等于把 run 首尾相接。
+      expect(lines.map((line) => line.text).join("")).toBe(runsOfPage.map((item) => item.text ?? "").join(""));
     }
   });
 });

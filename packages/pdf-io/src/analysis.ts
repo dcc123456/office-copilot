@@ -14,7 +14,7 @@
  * `pagesTruncated` / `runsTruncated` / `textTruncated`，让模型接着加大上限往下读，而不是误以为那就是全部。
  */
 import { clipText } from "@office-copilot/shared";
-import { isRunEditable, runEditBlock, type PdfReadModel, type PdfRunBlock, type PdfTextRun } from "./pdf-model.js";
+import { isRunEditable, pdfTextLinesOf, runEditBlock, type PdfReadModel, type PdfRunBlock, type PdfTextRun } from "./pdf-model.js";
 
 /** 单条 run 文字上送的上限（字数；与幻灯侧 `RUN_TEXT_LIMIT`、表格侧单格 120 字同一口径，§2.9）。 */
 const RUN_TEXT_LIMIT = 120;
@@ -36,7 +36,7 @@ export interface PdfPageOutline {
   runCount: number;
   /** 其中能改的条数（内联流与认不出原文的那两种在这里已经排除）。 */
   editableCount: number;
-  /** 这一页的文字概要（按内容流顺序拼接，超长已截，换行用 `⏎`）。 */
+  /** 这一页的文字概要（按**逻辑文本行**拼，逐字形的产物已拼回整行；超长已截，行之间用 `⏎`）。 */
   text: string;
   /** 概要是否被 {@link PAGE_TEXT_LIMIT} 截断。 */
   textTruncated: boolean;
@@ -100,7 +100,12 @@ export function describePdf(model: PdfReadModel, options: PdfDescribeOptions): P
   const pages: PdfPageOutline[] = [];
   for (let index = 0; index < Math.min(byPage.length, options.maxPages); index += 1) {
     const runs = byPage[index] ?? [];
-    const joined = runs.map((run) => run.text ?? "").filter((text) => text !== "").join("⏎");
+    // 按**逻辑行**拼，不是按 run 拼：真实中文产物一个字一条 run，按 run 拼出来的概要是"个⏎人⏎简⏎历"，
+    // 模型读不出这是一句话，也就提不出正确的改动。
+    const joined = pdfTextLinesOf(runs)
+      .map((line) => line.text)
+      .filter((text) => text !== "")
+      .join("⏎");
     const clipped = clipText(joined, PAGE_TEXT_LIMIT);
     pages.push({
       pageNumber: index + 1,
