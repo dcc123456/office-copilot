@@ -31,8 +31,9 @@ const SLIDE_EDIT_LABEL = "幻灯片改动";
  * 判断一条历史记录是不是幻灯片的。
  *
  * 历史文件里文档、表格、幻灯片三类记录混在同一个 docKey 下，而 `listModifications` 返回的是 `unknown[]`，
- * 不校验就用会拿到 undefined 字段。幻灯片 op 的唯一签名是每条都带整页的 `beforeXml`/`afterXml`
- * （文档的 `CoreOp` 与表格的 `SheetCoreOp` 都没有这两个字段）。
+ * 不校验就用会拿到 undefined 字段。幻灯片 op 的唯一签名是每条都带整页的 `afterXml`
+ * （文档的 `CoreOp` 与表格的 `SheetCoreOp` 都没有这两个字段）。`beforeXml` 允许是 **null**——
+ * 那是"新建部件"那一条（撤销就是把部件删掉），但缺字段（undefined）不算签名，否则会把别的格式认成幻灯片。
  *
  * @param value 从主进程读回来的一条记录。
  * @returns `ops` 是非空数组且每条都像幻灯片 op 才算。
@@ -44,7 +45,11 @@ export function isSlideEditRecord(value: unknown): value is SlideEditRecord {
   return record.ops.every((op) => {
     if (typeof op !== "object" || op === null) return false;
     const slideOp = op as Partial<SlideEditOp>;
-    return typeof slideOp.partPath === "string" && typeof slideOp.beforeXml === "string" && typeof slideOp.afterXml === "string";
+    return (
+      typeof slideOp.partPath === "string" &&
+      typeof slideOp.afterXml === "string" &&
+      (typeof slideOp.beforeXml === "string" || slideOp.beforeXml === null)
+    );
   });
 }
 

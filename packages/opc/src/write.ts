@@ -29,21 +29,30 @@ export function nextRelIdFor(pkg: OpcPackage, sourcePartPath: string): string {
 }
 
 /**
- * 源部件的关系文件：保留原文，追加一条指向新部件的关系。
+ * 源部件的关系文件：保留原文，追加指向新部件的关系。
+ *
+ * 为什么一次收多条而不是循环调一次一个：新建一个部件常常要**同时**给它挂上两条关系（`.pptx` 的备注页要指向
+ * notesMaster 与幻灯片，`.xlsx` 的画图部件要指向图表与内嵌工作簿），而这一段在"原文件里没有这个关系文件"时
+ * 是**整篇新建**——循环调两次就会各拿一份只有一条关系的骨架，第二次把第一次那条盖掉。
  *
  * @param pkg 已加载的包（读它的 `zip`）。
  * @param sourcePartPath 关系所属的源部件。
- * @param relId 新关系编号（来自 `nextRelIdFor`）。
- * @param relType 关系类型 URI。
- * @param targetPartPath 目标部件路径；写成**相对源部件目录**的形式（实测绝对写法办公软件拒开）。
+ * @param entries 要追加的关系：编号（来自 `nextRelIdFor`）、类型 URI、目标部件路径。
  * @returns 可直接写回的 `.rels` 文本；原文件没有这个关系文件时整篇新建。
  */
-export async function relsWith(pkg: OpcPackage, sourcePartPath: string, relId: string, relType: string, targetPartPath: string): Promise<string> {
-  const relationship = `<Relationship Id="${relId}" Type="${relType}" Target="${relativeTarget(sourcePartPath, targetPartPath)}"/>`;
+export async function relsWith(
+  pkg: OpcPackage,
+  sourcePartPath: string,
+  entries: ReadonlyArray<{ id: string; type: string; targetPartPath: string }>,
+): Promise<string> {
+  const relationships = entries.map(
+    ({ id, type, targetPartPath }) =>
+      `<Relationship Id="${id}" Type="${type}" Target="${relativeTarget(sourcePartPath, targetPartPath)}"/>`,
+  );
   const original = await readText(pkg.zip, relsPathFor(sourcePartPath));
   return original
-    ? original.replace("</Relationships>", `${relationship}</Relationships>`)
-    : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationship}</Relationships>`;
+    ? original.replace("</Relationships>", `${relationships.join("")}</Relationships>`)
+    : `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${relationships.join("")}</Relationships>`;
 }
 
 /**

@@ -306,7 +306,7 @@ export class SheetFile {
     this.stagePart(parts.drawingRelsPath, parts.drawingRelsXml);
     this.stagePart(
       relsPathFor(sheetPartPath),
-      await relsWith(this.pkg, sheetPartPath, relId, DRAWING_REL_TYPE, parts.drawingPartPath),
+      await relsWith(this.pkg, sheetPartPath, [{ id: relId, type: DRAWING_REL_TYPE, targetPartPath: parts.drawingPartPath }]),
     );
     this.stagePart(
       "[Content_Types].xml",
@@ -431,7 +431,7 @@ export class SheetFile {
     const relId = nextRelIdFor(this.pkg, WORKBOOK_PART);
     this.pkg.zip.file(
       relsPathFor(WORKBOOK_PART),
-      await relsWith(this.pkg, WORKBOOK_PART, relId, SHARED_STRINGS_REL_TYPE, SHARED_STRINGS_PART),
+      await relsWith(this.pkg, WORKBOOK_PART, [{ id: relId, type: SHARED_STRINGS_REL_TYPE, targetPartPath: SHARED_STRINGS_PART }]),
     );
     this.pkg.zip.file(
       "[Content_Types].xml",

@@ -11,7 +11,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { type PresentationModel } from "@office-copilot/pptx-io";
-import { buildDeckBytes, minimalDeckParts, twoShapeDeckParts, type DeckParts } from "@office-copilot/pptx-io/testing";
+import { buildDeckBytes, minimalDeckParts, notesMasterDeckParts, twoShapeDeckParts, type DeckParts } from "@office-copilot/pptx-io/testing";
 import { PPTX_EXT, editPptxDoc, openPptxDoc, revertPptxDoc } from "./pptxHandlers.js";
 
 vi.mock("electron", () => ({ dialog: {} }));
@@ -45,6 +45,46 @@ describe("幻灯片出入口的扩展名分派", () => {
     expect(PPTX_EXT.test("演示文稿.pptx")).toBe(true);
     expect(PPTX_EXT.test("/tmp/a.PPTX")).toBe(true);
     expect(PPTX_EXT.test("/tmp/a.ppt")).toBe(false);
+  });
+});
+
+describe("幻灯片出入口的新建备注页（一条请求落四条 op，撤销是把新部件删掉）", () => {
+  it("保存后部件清单只多出那两件、模型带上新备注；撤销后那一页又回到「没有备注页」", async () => {
+    const file = await writeDeck("新建备注.pptx", notesMasterDeckParts());
+    const edited = await editPptxDoc(file, file, [
+      { kind: "create_notes", target: { partPath: "ppt/slides/slide1.xml" }, paragraphTexts: ["新建的一句", "", "第三句"] },
+    ]);
+    expect(edited.ok).toBe(true);
+    if (!edited.ok) return;
+    expect(edited.ops).toHaveLength(4);
+    expect(edited.changedParts).toEqual(
+      ["[Content_Types].xml", "ppt/notesSlides/_rels/notesSlide1.xml.rels", "ppt/notesSlides/notesSlide1.xml", "ppt/slides/_rels/slide1.xml.rels"].sort(),
+    );
+    expect(edited.presentation.slides[0]!.notes?.paragraphTexts).toEqual(["新建的一句", "", "第三句"]);
+    const reverted = await revertPptxDoc(file, file, [...edited.ops].reverse());
+    expect(reverted.ok).toBe(true);
+    if (!reverted.ok) return;
+    // 四条都撤动（`skipped` 只在有条目被跳过时才出现在结果里，所以这里问的是"落了几条"）。
+    expect(reverted.ops).toHaveLength(4);
+    const reopened = await openPptxDoc(file);
+    expect(reopened.ok && reopened.presentation.slides[0]!.notes).toBeUndefined();
+  });
+
+  it("这一页已经有备注页时整批不写：磁盘一份字节都不动，理由原样带回", async () => {
+    const file = await writeDeck("已有备注.pptx", notesMasterDeckParts());
+    const first = await editPptxDoc(file, file, [
+      { kind: "create_notes", target: { partPath: "ppt/slides/slide1.xml" }, paragraphTexts: ["先建一份"] },
+    ]);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const bytesOnDisk = await fs.readFile(file);
+    const again = await editPptxDoc(file, file, [
+      { kind: "create_notes", target: { partPath: "ppt/slides/slide1.xml" }, paragraphTexts: ["再建一份"] },
+    ]);
+    expect(again.ok).toBe(false);
+    if (again.ok) return;
+    expect(again.message).toContain("这一页已经有备注页了");
+    expect(await fs.readFile(file)).toEqual(bytesOnDisk);
   });
 });
 

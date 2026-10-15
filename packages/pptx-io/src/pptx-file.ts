@@ -5,7 +5,7 @@
  * 回写时连二进制部件（`printerSettings/*.bin`、`docProps/thumbnail.jpeg`、嵌入的 `.xlsx`）都逐字带回。
  * 只有显式 `writePartText` 改写过的文本部件才重新序列化，改一张幻灯片只重写那一张的部件。
  */
-import { loadPackage, readText, serializePackage, type OpcPackage } from "@office-copilot/opc";
+import { loadPackage, readText, serializePackage, type OpcPackage, type OpcRelationship } from "@office-copilot/opc";
 import { readModelFromPackage, type PresentationModel } from "./read.js";
 
 export class PptxFile {
@@ -56,6 +56,46 @@ export class PptxFile {
   writePartText(partPath: string, content: string): void {
     this.pkg.zip.file(partPath, content);
     this.rewrittenParts.add(partPath);
+  }
+
+  /**
+   * 从包里删掉一个部件（撤销"新建部件"那一档用的——前像为 null 的 op 就是这个语义）。
+   *
+   * 为什么走 `delete zip.files[name]` 而不是 `zip.remove(name)`：`remove` 是**按前缀递归**删的，
+   * 而 `ppt/notesSlides/notesSlide1.xml` 恰好是 `ppt/notesSlides/_rels/…` 之外又一个前缀陷阱——
+   * `notesSlide1.xml.rels` 不以 `.xml` 结尾但 `startsWith("…notesSlide1.xml")` 为真，一次 `remove` 会把
+   * 它的关系表一起删没。与 `opc` 的 `serializePackage` 清目录项时是同一条理由。
+   *
+   * @param partPath 包内路径；不存在时静默（撤销的现场核对在调用方，那里已经比过现场与后像）。
+   */
+  removePart(partPath: string): void {
+    if (this.pkg.zip.files[partPath]) delete this.pkg.zip.files[partPath];
+    this.rewrittenParts.add(partPath);
+  }
+
+  /**
+   * 包里的条目清单（含目录项，`opc` 的 `nextPartIndex` 按前缀与后缀数，目录项不会误收）。
+   *
+   * @returns 已排序的条目名，新建部件避开重名用。
+   */
+  get partNames(): string[] {
+    return this.pkg.entryNames;
+  }
+
+  /**
+   * 某个源部件已登记的关系。
+   *
+   * @param sourcePartPath 承载关系表的部件路径，如 `ppt/presentation.xml`。
+   * @returns 关系清单（`id`/`type`/`target` 原样），没有该关系表时为空数组。注意这是**打开时**解析的那一份，
+   *   本次新追加的关系不在里面——要判"这一页是不是已经有备注页"得读关系表当前文本（`partText`）。
+   */
+  relationshipsOf(sourcePartPath: string): OpcRelationship[] {
+    return this.pkg.relsBySourcePart.get(sourcePartPath) ?? [];
+  }
+
+  /** 供 op 生产者拼登记文本用的那份包（`opc` 的 `relsWith` / `contentTypesWith` 都吃它）。 */
+  get package(): OpcPackage {
+    return this.pkg;
   }
 
   /**

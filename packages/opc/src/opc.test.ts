@@ -94,10 +94,23 @@ describe("write：§2.10 新建部件的关系与内容类型登记原语", () =
 
   it("relsWith 保留原关系并把目标写成相对源部件目录", async () => {
     const pkg = await loadPackage(await minimalPackage());
-    const rels = await relsWith(pkg, "ppt/presentation.xml", "rId2", "http://x/slideLayout", "ppt/slideLayouts/slideLayout1.xml");
+    const rels = await relsWith(pkg, "ppt/presentation.xml", [
+      { id: "rId2", type: "http://x/slideLayout", targetPartPath: "ppt/slideLayouts/slideLayout1.xml" },
+    ]);
     expect(rels).toContain('Id="rId1"');
     expect(rels).toContain('Id="rId2"');
     expect(rels).toContain('Target="slideLayouts/slideLayout1.xml"');
+  });
+
+  it("relsWith 一次交两条时两条都在（新建部件自带的关系表不能后一条盖掉前一条）", async () => {
+    const pkg = await loadPackage(await minimalPackage());
+    // `ppt/notesSlides/` 这一层在原包里根本不存在，走的是"整篇新建"那一档。
+    const rels = await relsWith(pkg, "ppt/notesSlides/notesSlide9.xml", [
+      { id: "rId1", type: "http://x/notesMaster", targetPartPath: "ppt/notesMasters/notesMaster1.xml" },
+      { id: "rId2", type: "http://x/slide", targetPartPath: "ppt/slides/slide1.xml" },
+    ]);
+    expect(rels).toContain('Id="rId1" Type="http://x/notesMaster" Target="../notesMasters/notesMaster1.xml"');
+    expect(rels).toContain('Id="rId2" Type="http://x/slide" Target="../slides/slide1.xml"');
   });
 
   it("contentTypesWith 追加 Override 且同名不重复", async () => {

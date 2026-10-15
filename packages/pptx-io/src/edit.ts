@@ -10,7 +10,26 @@
  * 整段替换会把这些格式压平。这里只碰目标 run 自己的 `<a:t>` 文本或 `<a:rPr>` 属性，其它 run 一个字节都不动。
  * 实测：`serialize` 对本机真实幻灯片的往返**逐字一致**（仅声明后换行差异），所以重序列化不会误伤同段其它格式。
  */
-import { XML_DECLARATION, children, escapeText, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element, type XmlNode } from "@office-copilot/opc";
+import {
+  XML_DECLARATION,
+  children,
+  contentTypesWith,
+  escapeText,
+  firstChild,
+  findChildren,
+  isElement,
+  isText,
+  nextPartIndex,
+  nextRelIdFor,
+  parseDocument,
+  relsPathFor,
+  relsWith,
+  resolveTarget,
+  serialize,
+  type Element,
+  type XmlNode,
+} from "@office-copilot/opc";
+import { NOTES_MASTER_REL_TYPE, NOTES_SLIDE_REL_TYPE, PRESENTATION_PART, PPTX_CONTENT_TYPES, SLIDE_REL_TYPE, isNotesMasterRelationship } from "./parts.js";
 import { findNotesBodyShape, isMergeContinuationCell, shapeIdOf, tableElementOf } from "./read.js";
 import { PptxFile } from "./pptx-file.js";
 import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
@@ -19,13 +38,28 @@ import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from
 export interface SlideEditOp {
   /** 幻灯片部件路径，如 `ppt/slides/slide1.xml`。 */
   partPath: string;
-  /** 编辑前该部件的完整 XML 文本（撤销就写回它）。 */
-  beforeXml: string;
+  /**
+   * 编辑前该部件的完整 XML 文本（撤销就写回它）。
+   *
+   * `null` 表示**这个部件本来不存在**，是这次改动新建出来的——撤销的语义随之从"写回前像"变成"把部件删掉"
+   * （新建备注页那一档一次要登记四件，见 `createSlideNotes`）。用 null 而不是另开一种 op 形状，是因为
+   * 落地/撤销/modlog 那条链只有一条通道（§3.4），"没有前像"是这条通道上本来就存在的一种状态。
+   */
+  beforeXml: string | null;
   /** 编辑后该部件的完整 XML 文本（落地就写回它）。 */
   afterXml: string;
 }
 
 export type SlideEditResult = { ok: true; op: SlideEditOp } | { ok: false; reason: string };
+
+/**
+ * 一条改动的落地结果，收的是**一组** op。
+ *
+ * 现有那九个 op 生产者各产一件；"新建备注页"那一档一次要登记四件（部件本体、它自己的关系表、幻灯片侧的
+ * `<Relationship>`、`[Content_Types].xml` 的 Override，`AGENTS.md` §2.10），少一件 PowerPoint 直接判损坏，
+ * 而四件都是"部件粒度的前/后像"，所以复用同一条通道而不是长出第二种 op（§3.4）。
+ */
+export type SlideEditBatchResult = { ok: true; ops: SlideEditOp[] } | { ok: false; reason: string };
 
 /** 目标 run 的定位坐标。 */
 export interface ShapeRunTarget {
@@ -125,7 +159,8 @@ export type PptxEditRequest =
   | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection }
   | { kind: "add_text_box"; target: SlidePartTarget; box: ShapeBoxPx; text: string }
   | { kind: "remove_shape"; target: ShapeGeometryTarget }
-  | { kind: "set_notes"; target: SlideNotesTarget; paragraphTexts: string[] };
+  | { kind: "set_notes"; target: SlideNotesTarget; paragraphTexts: string[] }
+  | { kind: "create_notes"; target: SlidePartTarget; paragraphTexts: string[] };
 
 /** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
 export interface PptxEditPayload {
@@ -490,10 +525,90 @@ export async function setSlideNotes(file: PptxFile, target: SlideNotesTarget, pa
 }
 
 /**
+ * 产出一批"给某一页新建备注页并写上这几段"的改动，**不落地**。
+ *
+ * 与 {@link setSlideNotes} 的分界就在"部件在不在"：那一档只换**已经存在**的备注部件，这一档原文件里没有，
+ * 按 `AGENTS.md` §2.10 必须**四处一起登记**——部件本体、它自己那份 `.rels`（指 notesMaster 与幻灯片）、
+ * 幻灯片侧 `.rels` 追加的那条 `notesSlide` 关系、`[Content_Types].xml` 的 Override。少任一件 PowerPoint
+ * 判文件损坏，所以一次交出四个 op，落地与撤销仍走那一条通道（§3.4）。
+ *
+ * 形状照一手参照抄（取证产物 `tmp/notes-new/out.pptx`，python-pptx 在 WPS 真模板上现建的备注页）：三格 `p:sp`
+ * 是 `sldImg`（无 `p:txBody`）、`body sz="quarter"`（**正文只在这一格**，与读侧那条判据互为正反）、
+ * `sldNum`（无 `p:txBody`），末尾 `<p:clrMapOvr><a:masterClrMapping/>`。**没有 notesMaster 就整条拒绝**：
+ * 备注页的版式全靠继承那份母版，凭空造一份备注母版是替用户发明版式意图（§2.7）。
+ *
+ * @param file 已打开的读写器。
+ * @param target 那一页的部件路径（`Slide.partPath`，不是备注部件路径——备注部件正是这次要新建的）。
+ * @param paragraphTexts 备注逐段文字，一段一个字符串（空串 = 那一行没字）。
+ * @returns 成功带四条 op（新部件那两条的 `beforeXml` 为 null，表示撤销时把部件删掉）；这一页已有备注页、
+ *   这份文件没有备注母版、幻灯片没有关系表、没有要写的段落时 `{ ok:false, reason }`。
+ */
+export async function createSlideNotes(file: PptxFile, target: SlidePartTarget, paragraphTexts: string[]): Promise<SlideEditBatchResult> {
+  if (paragraphTexts.length === 0) return { ok: false, reason: "没有要写的备注段落。" };
+  const slideRelsPath = relsPathFor(target.partPath);
+  // 幻灯片侧没有关系表是合法的（OPC 里 `.rels` 可以整篇不存在），那种情形新登记的那份前像同样是 null。
+  const slideRelsBefore = (await file.partText(slideRelsPath)) ?? null;
+  if (slideRelsBefore?.includes(`Type="${NOTES_SLIDE_REL_TYPE}"`)) {
+    return { ok: false, reason: "这一页已经有备注页了，直接改那一份就行。" };
+  }
+  const notesMasterRel = file.relationshipsOf(PRESENTATION_PART).find((rel) => isNotesMasterRelationship(rel.type));
+  if (!notesMasterRel) return { ok: false, reason: "这份演示文稿没有备注母版（notesMaster），新建的备注页没有可继承的版式，这一档不建。" };
+  const notesPartPath = `ppt/notesSlides/notesSlide${nextPartIndex(file.partNames, "ppt/notesSlides/notesSlide", ".xml")}.xml`;
+  const notesXml = `${XML_DECLARATION}${notesSlideSkeleton(paragraphTexts)}`;
+  // 新部件自己的关系表：编号照参照固定成 rId1→notesMaster、rId2→幻灯片（那份 `.rels` 是整篇新建，不会撞号）。
+  const notesRelsXml = await relsWith(file.package, notesPartPath, [
+    { id: "rId1", type: NOTES_MASTER_REL_TYPE, targetPartPath: resolveTarget(PRESENTATION_PART, notesMasterRel.target) },
+    { id: "rId2", type: SLIDE_REL_TYPE, targetPartPath: target.partPath },
+  ]);
+  const slideRelsAfter = await relsWith(file.package, target.partPath, [
+    { id: nextRelIdFor(file.package, target.partPath), type: NOTES_SLIDE_REL_TYPE, targetPartPath: notesPartPath },
+  ]);
+  const typesPath = "[Content_Types].xml";
+  const typesBefore = (await file.partText(typesPath)) ?? null;
+  const typesAfter = await contentTypesWith(file.package, [[`/${notesPartPath}`, PPTX_CONTENT_TYPES.notesSlide]]);
+  return {
+    ok: true,
+    ops: [
+      { partPath: notesPartPath, beforeXml: null, afterXml: notesXml },
+      { partPath: relsPathFor(notesPartPath), beforeXml: null, afterXml: notesRelsXml },
+      { partPath: slideRelsPath, beforeXml: slideRelsBefore, afterXml: slideRelsAfter },
+      { partPath: typesPath, beforeXml: typesBefore, afterXml: typesAfter },
+    ],
+  };
+}
+
+/**
+ * 新备注页部件的正文（不含 XML 声明）：三格占位符 + 颜色覆盖，正文只写在 `type="body"` 那一格。
+ *
+ * @param paragraphTexts 逐段文字，一段一个 `<a:p>`（只带 `<a:r><a:t>`，新建的备注没有可继承的字符格式）。
+ * @returns `p:notes` 元素的字符串。
+ */
+function notesSlideSkeleton(paragraphTexts: string[]): string {
+  const paragraphs = paragraphTexts.map((line) => `<a:p><a:r><a:t>${escapeText(line)}</a:t></a:r></a:p>`).join("");
+  return (
+    '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    "<p:cSld><p:spTree>" +
+    '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>' +
+    '<p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>' +
+    '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Slide Image Placeholder 1"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>' +
+    '<p:nvPr><p:ph type="sldImg" idx="2"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>' +
+    '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Notes Placeholder 2"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>' +
+    '<p:nvPr><p:ph type="body" idx="3" sz="quarter"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+    `<p:txBody><a:bodyPr/><a:lstStyle/>${paragraphs}</p:txBody></p:sp>` +
+    '<p:sp><p:nvSpPr><p:cNvPr id="4" name="Slide Number Placeholder 3"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>' +
+    '<p:nvPr><p:ph type="sldNum" idx="5" sz="quarter"/></p:nvPr></p:nvSpPr><p:spPr/></p:sp>' +
+    "</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"
+  );
+}
+
+/**
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由本文件那九个 op 生产者（`setShapeRunText` / `setTableCellRunText` … `addTextBox`/`removeShape`/`setSlideNotes`）产出的 op。
+ * @param op 由本文件那十个 op 生产者（`setShapeRunText` / `setTableCellRunText` … `addTextBox`/`removeShape`/
+ *   `setSlideNotes`/`createSlideNotes`）产出的 op。新建部件那几条的前像是 null，落地不需要特殊分支——后像照写。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -503,9 +618,14 @@ export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
  * 撤销一条编辑提案：把前像写回部件（内容寻址，不受其它部件后续编辑牵连）。
  *
  * @param file 读写器。
- * @param op 之前已 `apply` 的 op。
+ * @param op 之前已 `apply` 的 op。`beforeXml` 为 null 时这条改动当年是**新建**了一个部件，
+ *   撤销就是把部件从包里删掉（不是写回一个空部件——那会留下一份谁也不指向它的孤件）。
  */
 export function revertSlideEdit(file: PptxFile, op: SlideEditOp): void {
+  if (op.beforeXml === null) {
+    file.removePart(op.partPath);
+    return;
+  }
   file.writePartText(op.partPath, op.beforeXml);
 }
 
@@ -531,6 +651,7 @@ export interface SlideRevertOutcome {
  * @param file 读写器（对着磁盘当前那份打开的）。
  * @param ops 之前落地时带回来的那批 op，**按逆序**传入（最后改的先回）。
  * @returns `{ applied, skipped }`：部件已不在包里、或现场与后像逐字不一致的条目进 `skipped`。
+ *   前像是 null 的那几条（新建的部件）走的是"删掉部件"，同样要先比过现场——只有"现在正是我们写进去的那个样子"才删。
  */
 export async function revertSlideEdits(file: PptxFile, ops: SlideEditOp[]): Promise<SlideRevertOutcome> {
   const applied: SlideEditOp[] = [];

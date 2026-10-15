@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { newlyIntroducedIssues } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
-import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes, setTableCellRunText } from "./index.js";
+import { addTextBox, applySlideEdit, createSlideNotes, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes, setTableCellRunText } from "./index.js";
 import { auditPptxPackage } from "./audit.js";
-import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, tableDeckParts, textStyleDeckParts } from "./test-deck.js";
+import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, minimalDeckParts, notesMasterDeckParts, tableDeckParts, textStyleDeckParts } from "./test-deck.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -763,6 +763,107 @@ async function notesDeckWithBody(bodyInner: string): Promise<Uint8Array> {
   );
   return await zip.generateAsync({ type: "uint8array" });
 }
+
+describe("pptx-io：新建备注页那一档（四处一起登记，撤销是删部件而不是写空部件）", () => {
+  const NOTES = "ppt/notesSlides/notesSlide1.xml";
+  const NOTES_RELS = "ppt/notesSlides/_rels/notesSlide1.xml.rels";
+  const SLIDE_RELS = "ppt/slides/_rels/slide1.xml.rels";
+
+  /**
+   * 一份"有备注母版、但第一页还没有备注页"的夹具字节。
+   *
+   * @returns 可直接喂 `PptxFile.open` 的字节，部件形状见 `test-deck.notesMasterDeckParts`。
+   */
+  async function deckWithNotesMaster(): Promise<Uint8Array> {
+    return buildDeckBytes(notesMasterDeckParts());
+  }
+
+  /** 解包取文件部件清单（不含目录项），用来核"新建只多出两件、撤销一件不剩"。 */
+  async function entryNames(bytes: Uint8Array): Promise<string[]> {
+    const zip = await JSZip.loadAsync(bytes);
+    return Object.keys(zip.files)
+      .filter((name) => !zip.files[name]!.dir)
+      .sort();
+  }
+
+  it("一次交出四条 op：两件新部件的前像是 null，幻灯片侧的关系表与内容类型是原像加追加", async () => {
+    const bytes = await deckWithNotesMaster();
+    const file = await PptxFile.open(bytes);
+    const slideRelsBefore = (await file.partText(SLIDE_RELS))!;
+    const typesBefore = (await file.partText("[Content_Types].xml"))!;
+    const made = await createSlideNotes(file, { partPath: "ppt/slides/slide1.xml" }, ["第一句", "", "第三句"]);
+    if (!made.ok) throw new Error(made.reason);
+    expect(made.ops.map((op) => op.partPath)).toEqual([NOTES, NOTES_RELS, SLIDE_RELS, "[Content_Types].xml"]);
+    expect(made.ops[0]!.beforeXml).toBeNull();
+    expect(made.ops[1]!.beforeXml).toBeNull();
+    expect(made.ops[2]!.beforeXml).toBe(slideRelsBefore);
+    expect(made.ops[3]!.beforeXml).toBe(typesBefore);
+    // 新关系挂在幻灯片侧那条的编号后面（最小夹具的 rId1 是版式），目标写成相对路径。
+    expect(made.ops[2]!.afterXml).toContain('Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"');
+    expect(made.ops[3]!.afterXml).toContain('<Override PartName="/ppt/notesSlides/notesSlide1.xml"');
+    for (const op of made.ops) applySlideEdit(file, op);
+    const { model } = await readPresentation(await file.toBytes());
+    expect(model.slides[0]!.notes?.paragraphTexts).toEqual(["第一句", "", "第三句"]);
+    // 正文只写在 body 那一格：sldImg 与 sldNum 两格连 p:txBody 都没有，读侧不可能把它们念成备注。
+    const notesXml = (await file.partText(NOTES))!;
+    expect(notesXml.match(/<p:sp>/g)).toHaveLength(3);
+    expect(notesXml).toContain('<p:ph type="body" idx="3" sz="quarter"/>');
+    // 新部件自己的关系表两条都在：rId1 指备注母版、rId2 反指它那一页。
+    expect(await file.partText(NOTES_RELS)).toContain('Target="../notesMasters/notesMaster1.xml"');
+    expect(await file.partText(NOTES_RELS)).toContain('Target="../slides/slide1.xml"');
+  });
+
+  it("落地产物不新增结构问题，且部件清单只多出那两件", async () => {
+    const bytes = await deckWithNotesMaster();
+    const file = await PptxFile.open(bytes);
+    const made = await createSlideNotes(file, { partPath: "ppt/slides/slide1.xml" }, ["登记齐不齐"]);
+    if (!made.ok) throw new Error(made.reason);
+    for (const op of made.ops) applySlideEdit(file, op);
+    const out = await file.toBytes();
+    expect(newlyIntroducedIssues(await auditPptxPackage(bytes), await auditPptxPackage(out))).toEqual([]);
+    const base = await entryNames(bytes);
+    const added = (await entryNames(out)).filter((name) => !base.includes(name));
+    expect(added).toEqual([NOTES, NOTES_RELS].sort());
+  });
+
+  it("撤销逐字回原样：两条 null 前像的 op 把部件删掉，部件清单与原文件逐条一致", async () => {
+    const bytes = await deckWithNotesMaster();
+    const file = await PptxFile.open(bytes);
+    const made = await createSlideNotes(file, { partPath: "ppt/slides/slide1.xml" }, ["要撤回去的一句"]);
+    if (!made.ok) throw new Error(made.reason);
+    for (const op of made.ops) applySlideEdit(file, op);
+    const reverted = await revertSlideEdits(file, [...made.ops].reverse());
+    expect(reverted.applied).toHaveLength(4);
+    expect(reverted.skipped).toEqual([]);
+    expect(await file.partText(NOTES)).toBeUndefined();
+    expect(await file.partText(NOTES_RELS)).toBeUndefined();
+    const reopened = await PptxFile.open(await file.toBytes());
+    expect(await entryNames(await reopened.toBytes())).toEqual(await entryNames(bytes));
+    const { model } = await readPresentation(await reopened.toBytes());
+    expect(model.slides[0]!.notes).toBeUndefined();
+  });
+
+  it("删 notesSlide1.xml 不许连带删掉 notesSlide1.xml.rels（zip 的 remove 是按前缀递归的）", async () => {
+    const file = await PptxFile.open(await deckWithNotesMaster());
+    file.writePartText(NOTES, "<p:notes/>");
+    file.writePartText(NOTES_RELS, "<Relationships/>");
+    file.removePart(NOTES);
+    expect(await file.partText(NOTES)).toBeUndefined();
+    expect(await file.partText(NOTES_RELS)).toBe("<Relationships/>");
+  });
+
+  it("两类拒绝各回一句理由，不产出任何 op：没有备注母版 / 这一页已经有备注页", async () => {
+    const noMaster = await PptxFile.open(await buildDeckBytes(minimalDeckParts()));
+    const refused = await createSlideNotes(noMaster, { partPath: "ppt/slides/slide1.xml" }, ["没有母版也要写"]);
+    expect(refused).toEqual({ ok: false, reason: "这份演示文稿没有备注母版（notesMaster），新建的备注页没有可继承的版式，这一档不建。" });
+    // 已有备注页那一档由 setSlideNotes 管：这里必须拒绝，不许覆盖用户已有的备注部件。
+    const withNotes = await PptxFile.open(await minimalDeck(undefined, "旧的一句"));
+    expect(await createSlideNotes(withNotes, { partPath: "ppt/slides/slide1.xml" }, ["再建一份"])).toEqual({
+      ok: false,
+      reason: "这一页已经有备注页了，直接改那一份就行。",
+    });
+  });
+});
 
 describe("pptx-io：演讲者备注的写侧（只改已存在的备注部件，幻灯片部件不许被牵连）", () => {
   const NOTES = "ppt/notesSlides/notesSlide1.xml";

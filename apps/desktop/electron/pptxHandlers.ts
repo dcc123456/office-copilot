@@ -14,6 +14,7 @@ import {
   addTextBox,
   applySlideEdit,
   auditPptxPackage,
+  createSlideNotes,
   moveShapeLayer,
   removeShape,
   setSlideNotes,
@@ -28,6 +29,7 @@ import {
   type PptxEditPayload,
   type PptxEditRequest,
   type PptxRevertPayload,
+  type SlideEditBatchResult,
   type SlideEditOp,
 } from "@office-copilot/pptx-io";
 import { newlyIntroducedIssues } from "@office-copilot/opc";
@@ -128,10 +130,12 @@ export async function editPptxDoc(
   return await applyBatch(targetPath, basePath, "保存", async (file) => {
     const ops: SlideEditOp[] = [];
     for (const edit of edits) {
-      const made = await makeEdit(file, edit);
+      const made = await makeEdits(file, edit);
       if (!made.ok) return made;
-      applySlideEdit(file, made.op);
-      ops.push(made.op);
+      for (const op of made.ops) {
+        applySlideEdit(file, op);
+        ops.push(op);
+      }
     }
     return { ok: true, ops };
   });
@@ -198,32 +202,39 @@ async function applyBatch(
 }
 
 /**
- * 按 `kind` 把一条跨界请求翻成引擎的 op 生产者调用。
+ * 按 `kind` 把一条跨界请求翻成引擎的 op 生产者调用，统一交出**一组** op。
+ *
+ * 为什么返回数组：那九条改动各产一件，但"给某一页新建备注页"那一档一次要登记四件（`AGENTS.md` §2.10），
+ * 四件都是部件粒度的前/后像，所以仍走这同一个落地口，不在装配层长第二条保存通道（§3.4）。
  *
  * @param file 已打开的读写器。
  * @param edit 渲染层送来的一条改动。
- * @returns `{ ok, op }`；引擎给的理由原样带回，由调用方组装中文（§5.7）。
+ * @returns `{ ok, ops }`；引擎给的理由原样带回，由调用方组装中文（§5.7）。
  */
-async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: true; op: SlideEditOp } | { ok: false; reason: string }> {
+async function makeEdits(file: PptxFile, edit: PptxEditRequest): Promise<SlideEditBatchResult> {
+  const single = (result: { ok: true; op: SlideEditOp } | { ok: false; reason: string }): SlideEditBatchResult =>
+    result.ok ? { ok: true, ops: [result.op] } : result;
   switch (edit.kind) {
     case "text":
-      return await setShapeRunText(file, edit.target, edit.text);
+      return single(await setShapeRunText(file, edit.target, edit.text));
     case "table_text":
-      return await setTableCellRunText(file, edit.target, edit.text);
+      return single(await setTableCellRunText(file, edit.target, edit.text));
     case "font":
-      return await setRunFont(file, edit.target, edit.format);
+      return single(await setRunFont(file, edit.target, edit.format));
     case "color":
-      return await setRunColor(file, edit.target, edit.hex);
+      return single(await setRunColor(file, edit.target, edit.hex));
     case "geometry":
-      return await setShapeGeometry(file, edit.target, edit.box);
+      return single(await setShapeGeometry(file, edit.target, edit.box));
     case "layer":
-      return await moveShapeLayer(file, edit.target, edit.direction);
+      return single(await moveShapeLayer(file, edit.target, edit.direction));
     case "add_text_box":
-      return await addTextBox(file, edit.target, edit.box, edit.text);
+      return single(await addTextBox(file, edit.target, edit.box, edit.text));
     case "remove_shape":
-      return await removeShape(file, edit.target);
+      return single(await removeShape(file, edit.target));
     case "set_notes":
-      return await setSlideNotes(file, edit.target, edit.paragraphTexts);
+      return single(await setSlideNotes(file, edit.target, edit.paragraphTexts));
+    case "create_notes":
+      return await createSlideNotes(file, edit.target, edit.paragraphTexts);
   }
 }
 

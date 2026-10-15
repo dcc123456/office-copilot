@@ -70,6 +70,31 @@ export function minimalDeckParts(): DeckParts {
 }
 
 /**
+ * 一页带版式关系、主关系表里挂着 notesMaster，但**那一页自己还没有备注页**的 deck——
+ * "新建备注页"那一档要的形状（`createSlideNotes`）。本机取证的那 8 份 WPS 模板里 4 份连 notesMaster 都没有，
+ * 所以"母版在不在"必须能由夹具分别造得出两种状态，而不是靠一份真文件碰运气。
+ *
+ * @returns 直接传给 {@link buildDeckBytes} 的部件表；比 {@link minimalDeckParts} 多三件（备注母版部件、
+ *   它的内容类型 Override、主关系表里那条 notesMaster 关系），少一件（幻灯片侧没有 `notesSlide` 关系）。
+ */
+export function notesMasterDeckParts(): DeckParts {
+  const parts = minimalDeckParts();
+  return {
+    ...parts,
+    "[Content_Types].xml": parts["[Content_Types].xml"]!.replace(
+      "</Types>",
+      '<Override PartName="/ppt/notesMasters/notesMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml"/></Types>',
+    ),
+    "ppt/_rels/presentation.xml.rels": parts["ppt/_rels/presentation.xml.rels"]!.replace(
+      "</Relationships>",
+      '<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesMaster" Target="notesMasters/notesMaster1.xml"/></Relationships>',
+    ),
+    "ppt/notesMasters/notesMaster1.xml":
+      '<p:notesMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld></p:notesMaster>',
+  };
+}
+
+/**
  * 一页里放两个形状（`id=2` 标题在下、`id=3` 文本框在上）的 deck，给叠放次序的用例用。
  *
  * 最小夹具只有一形状，"最顶/最底"永远重合，看不出重排有没有落地，所以另开一份而不是改那份

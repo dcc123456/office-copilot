@@ -17,8 +17,22 @@ export function isNotesSlideRelationship(type: string): boolean {
   return type.endsWith("/relationships/notesSlide");
 }
 
+/** 一条关系 `@Type` 是不是"指向备注母版"（新建备注页必须有它可继承，没有就整条拒绝）。 */
+export function isNotesMasterRelationship(type: string): boolean {
+  return type.endsWith("/relationships/notesMaster");
+}
+
 /** 关系类型 URI 的公共前缀，新建关系时拼上具体角色名。 */
 export const PPTX_REL_TYPE_PREFIX = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+/** 新建一条"指向演讲者备注页"的关系时要写的那个 URI。 */
+export const NOTES_SLIDE_REL_TYPE = `${PPTX_REL_TYPE_PREFIX}/notesSlide`;
+
+/** 新建一条"指向备注母版"的关系时要写的那个 URI。 */
+export const NOTES_MASTER_REL_TYPE = `${PPTX_REL_TYPE_PREFIX}/notesMaster`;
+
+/** 新建一条"指向幻灯片"的关系时要写的那个 URI（备注页自己反向指回它那一页）。 */
+export const SLIDE_REL_TYPE = `${PPTX_REL_TYPE_PREFIX}/slide`;
 
 /** 各部件的内容类型 Override 值（§2.10 新建部件要登记到 `[Content_Types].xml` 的就是这些串）。 */
 export const PPTX_CONTENT_TYPES = {
