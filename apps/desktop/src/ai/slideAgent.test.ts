@@ -84,6 +84,37 @@ function sampleDeck(notesOfFirstSlide: SlideNotes | null = SAMPLE_NOTES): Presen
   };
 }
 
+/**
+ * 在第 1 页末尾再加一个组（id=9）与组里两格（id=5、id=6，各一段单 run 文字）。
+ *
+ * `sampleDeck()` 每次现造一个新对象，所以这里直接往它返回的数组上追加，不影响别的用例。
+ * 页面平铺顺序成了 2、4、7、9、5、6：组自己那一层在最顶，组里 6 在最顶——正是"必须按层比"的那两种情形。
+ */
+function deckWithGroup(): PresentationModel {
+  const deck = sampleDeck();
+  const shapes = deck.slides[0]!.shapes;
+  const picture = shapes[2]!;
+  /** 组里的一格：一段一截文字，自己写了几何但那是组内子坐标（读模型这时候不给 `boxPx`）。 */
+  const groupedChild = (shapeId: number, paragraphText: string) => ({
+    ...picture,
+    shapeId,
+    name: `TextBox ${shapeId}`,
+    paragraphTexts: [paragraphText],
+    paragraphRunCounts: [1],
+    paragraphRunTexts: [[paragraphText]],
+    paragraphRunFormats: [[{}]],
+    hasOwnGeometry: true,
+    boxPx: undefined,
+    effectiveBoxPx: {},
+    boxPxSources: {},
+    groupShapeId: 9,
+  });
+  shapes.push({ ...picture, shapeId: 9, name: "Group 8", kind: "group" });
+  shapes.push(groupedChild(5, "组内甲"));
+  shapes.push(groupedChild(6, "组内乙"));
+  return deck;
+}
+
 /** 模型点一个工具的一轮回包。 */
 function turnWithTool(name: string, args: string, content = ""): ToolTurnResult {
   return { ok: true, content, toolCalls: [{ id: `call_${name}`, name, arguments: args }] };
@@ -138,6 +169,22 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     expect(requests).toEqual([{ kind: "layer", target: { partPath: "ppt/slides/slide1.xml", shapeId: 4 }, direction: "up" }]);
     expect(notes.join("\n")).toContain("已经在最底层");
     expect(notes.join("\n")).toContain("已经在最顶层");
+  });
+
+  it("组合里的那一格：改文字照旧交出去，改几何与越界的调层级换成一句理由（引擎那两条会整批拒）", () => {
+    const { requests, notes } = slideRequestsOfProposal(deckWithGroup(), [
+      { type: "set_run_text", slideNumber: 1, shapeId: 5, paraIndex: 0, runIndex: 0, text: "改后的组内甲" },
+      { type: "set_shape_geometry", slideNumber: 1, shapeId: 5, leftPx: 10, topPx: 10, widthPx: 100, heightPx: 100 },
+      { type: "move_shape_layer", slideNumber: 1, shapeId: 6, direction: "up" },
+      { type: "move_shape_layer", slideNumber: 1, shapeId: 9, direction: "up" },
+    ]);
+    expect(requests).toEqual([
+      { kind: "text", target: { partPath: "ppt/slides/slide1.xml", shapeId: 5, paraIndex: 0, runIndex: 0 }, text: "改后的组内甲" },
+    ]);
+    const joined = notes.join("\n");
+    expect(joined).toContain("组内子坐标系"); // 几何那条：它的坐标写在组的子坐标系里
+    expect(joined).toContain("组内最顶层"); // 组里最后一格向上：只比组内的邻居
+    expect(joined).toContain("已经在最顶层"); // 组自己向上：页面那一层它确实在最顶（后面那两格是它的内容，不是邻居）
   });
 
   it("加文本框只定位到整页（新形状号要引擎落地时才分配），删形状定位到形状", () => {

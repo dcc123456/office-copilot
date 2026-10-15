@@ -196,6 +196,45 @@ describe("layerEdgeNote：到头的那个方向压根不许交出去", () => {
   });
 });
 
+describe("组合那一层：叠放只比组内的邻居，几何那一格只给一句话", () => {
+  /** 一页五格：标题、组、组里两格、一条连接线（读模型给的平铺顺序就是文档顺序）。 */
+  const title = shapeOf(2, [["标题", 1]]);
+  const group = { ...shapeOf(9, [["", 0]]), kind: "group" as const };
+  const first = { ...shapeOf(3, [["组内甲", 1]]), groupShapeId: 9 };
+  const second = { ...shapeOf(4, [["组内乙", 1]]), groupShapeId: 9 };
+  const connector = { ...shapeOf(10, [["", 0]]), kind: "connector" as const };
+  const shapes = [title, group, first, second, connector];
+
+  it("组里最后一格向上到头：拿整页平铺清单比会误判成还能挪，交出去主进程整批不落地（§2.4）", () => {
+    expect(layerEdgeNote(shapes, second, "up"), "up").toBe("它已经在组内最顶层");
+    expect(layerEdgeNote(shapes, second, "top"), "top").toBe("它已经在组内最顶层");
+    expect(layerEdgeNote(shapes, second, "down"), "down").toBeNull();
+    expect(layerEdgeNote(shapes, first, "down"), "down").toBe("它已经在组内最底层");
+    expect(layerEdgeNote(shapes, first, "up"), "up").toBeNull();
+  });
+
+  it("页面那一层的三格照旧按整页比：连接线在最顶、标题在最底", () => {
+    expect(layerEdgeNote(shapes, connector, "up"), "up").toBe("它已经在最顶层");
+    expect(layerEdgeNote(shapes, title, "bottom"), "bottom").toBe("它已经在最底层");
+    expect(layerEdgeNote(shapes, group, "up"), "up").toBeNull();
+  });
+
+  it("组里只剩一格时四个方向都不给点，理由说的是组内", () => {
+    const onlyOne = { ...shapeOf(3, [["组内只有一个", 1]]), groupShapeId: 9 };
+    for (const direction of ["up", "down", "top", "bottom"] as const) {
+      expect(layerEdgeNote([group, onlyOne], onlyOne, direction), direction).toBe("这个组合里只有这一个形状，组内没有可叠放的邻居");
+    }
+  });
+
+  it("组内那格的几何说明不许念成「自己没写几何」：它写了，只是写在组内子坐标系里", () => {
+    expect(inheritedBoxNote({ ...first, hasOwnGeometry: true })).toContain("组内子坐标系");
+    // 组自己那一格同理：它把几何写在 `<p:grpSpPr>` 的组框里，读侧没接，不许念成"没写"。
+    expect(inheritedBoxNote(group)).toContain("组框");
+    // 连接线在自己身上写了几何时不受影响（它不在组里），走原来那条继承说明。
+    expect(inheritedBoxNote(connector)).toContain("这个形状自己没写几何");
+  });
+});
+
 describe("dropShapeDrafts：删掉的形状不留未保存的草稿", () => {
   it("只去掉那一个形状的各段与它的几何，别的形状一条不少", () => {
     const drafts = {

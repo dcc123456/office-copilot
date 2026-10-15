@@ -160,9 +160,10 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
       continue;
     }
     if (edit.type === "set_shape_geometry") {
-      // 组合形状的几何引擎会拒（子偏移语义不同）：这里就别交，否则主进程整批不落地（§2.4）。
-      if (isGroupShape(shape)) {
-        notes.push(`第 ${edit.slideNumber} 页的「${shape.name}」是组合形状，几何改不了（子偏移语义不同），这条跳过。`);
+      // 组合与组内形状的几何引擎会拒（子偏移语义不同）：这里就别交，否则主进程整批不落地（§2.4）。
+      const blockedNote = geometryBlockedNote(shape);
+      if (blockedNote) {
+        notes.push(`第 ${edit.slideNumber} 页的「${shape.name}」几何改不了（${blockedNote}），这条跳过。`);
         continue;
       }
       // 占位符那一类自己没写 `<a:xfrm>`：`<a:off>` 的 x、y 与 `<a:ext>` 的 cx、cy 在 OOXML 里都是必填，
@@ -204,13 +205,15 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
 }
 
 /**
- * 判断一个形状是不是组合形状（几何 op 对它没意义，引擎会拒）。
+ * 这个形状的几何是不是压根改不了（组合本身，或装在组合里的那一格——引擎两条都会整条拒）。
  *
  * @param shape 形状快照。
- * @returns true 表示 `kind === "group"`。
+ * @returns 一句中文理由；能改几何时返回 null。
  */
-function isGroupShape(shape: SlideShape): boolean {
-  return shape.kind === "group";
+function geometryBlockedNote(shape: SlideShape): string | null {
+  if (shape.kind === "group") return "它是组合形状，子偏移语义不同";
+  if (shape.groupShapeId !== undefined) return "它装在某个组合里，坐标写的是组内子坐标系，换算回页面位置那一档还没做";
+  return null;
 }
 
 /**
@@ -232,7 +235,7 @@ function hasFullBox(edit: Extract<PptxEditT, { type: "set_shape_geometry" }>): b
  * @returns 一句中文理由；对得上时返回 null。
  */
 function runRangeNote(shape: SlideShape, paraIndex: number, runIndex: number): string | null {
-  if (shape.paragraphTexts.length === 0) return "这个形状没有文字体（图片或图形框），改不了文字";
+  if (shape.paragraphTexts.length === 0) return "这个形状没有文字体（图片、图形框或连接线），改不了文字";
   if (paraIndex >= shape.paragraphTexts.length) return `段落序号 ${paraIndex} 越界（只有 ${shape.paragraphTexts.length} 段）`;
   const runCount = shape.paragraphRunCounts[paraIndex] ?? 0;
   if (runCount === 0) return `第 ${paraIndex} 段的文字来自字段（页码 / 日期），不在可改范围`;

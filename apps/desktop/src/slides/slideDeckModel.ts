@@ -21,16 +21,23 @@ const BOX_SOURCE_LABEL: Record<BoxAxisSource, string> = {
 };
 
 /**
- * 形状没有自己的 `<a:xfrm>` 时，视图上那句几何说明。
+ * 形状这一格给不出可写的几何时，视图上那句说明（两种情况：几何从版式继承、或它装在组合里）。
  *
  * 数字来自读模型算完继承链的 `effectiveBoxPx`（spec D3 要求"有效值 + 来源层"两个都给，视图不许自己猜），
  * 但**只读**：这一格的写侧入口仍然要求形状自己写了几何（见 {@link pushGeometryEdits}），
  * 把继承值烤进 slide 就永久切断了版式/母版联动。
  *
  * @param shape 一个形状快照（`boxPx` 应为 undefined，即自己没写几何）。
- * @returns 一句中文：继承来的四数与来源层；三层都没写几何或非占位符时说明"没写"，不给猜测值。
+ * @returns 一句中文：继承来的四数与来源层；三层都没写几何或非占位符时说明"没写"，不给猜测值；
+ *   组合自己那一格说的是组框（`<p:grpSpPr>`），组里的一格说的是组内子坐标系，两种都不给数。
  */
 export function inheritedBoxNote(shape: SlideShape): string {
+  if (shape.kind === "group") {
+    return "位置与尺寸：组合自己写的是组框（`<p:grpSpPr>` 那对 off/ext），读侧与几何那一条这一档都不接，本视图不给数。";
+  }
+  if (shape.groupShapeId !== undefined) {
+    return "位置与尺寸：这个形状在一个组合里，它写的坐标是组内子坐标系，换算回页面位置那一档还没做，本视图不给数。";
+  }
   const fields = SHAPE_BOX_FIELDS.filter((field) => shape.effectiveBoxPx[field] !== undefined);
   if (fields.length === 0) {
     return shape.isPlaceholder
@@ -157,20 +164,26 @@ export function dropShapeDrafts(drafts: Record<string, SlideDraft>, partPath: st
  * 第一个在最底、最后一个在最顶（ECMA-376 §19.3.5 只钉子元素顺序，这层语义取自 python-pptx
  * 的 `shapetree.py`）。所以只要比对首尾，不必再解析一次 XML。
  *
- * @param shapes 该页全部形状（文档顺序）。
+ * **只在同一层内比**：组合（`<p:grpSp>`）里的形状，叠放次序是它那个组内部的性质，引擎那条也只在组里换序。
+ * 拿整页的平铺清单去判会两头错——组里最后一格会被判"还能上移"（引擎整批拒绝，§2.4），
+ * 页面最后一格也可能被组里的孩子顶掉。
+ *
+ * @param shapes 该页全部形状（文档顺序，含展开的组内形状）。
  * @param shape 本次要挪的那个。
  * @param direction 要挪的方向。
- * @returns 一句中文理由（该页只有一个形状、或已在要去的那一端）；能挪时返回 null。
+ * @returns 一句中文理由（该层只有一个形状、或已在要去的那一端）；能挪时返回 null。
  */
 export function layerEdgeNote(
   shapes: SlideShape[],
   shape: SlideShape,
   direction: SlideLayerDirection,
 ): string | null {
-  const at = shapes.indexOf(shape);
-  if (shapes.length < 2) return "这一页只有这一个形状，没有可叠放的邻居";
-  if ((direction === "up" || direction === "top") && at === shapes.length - 1) return "它已经在最顶层";
-  if ((direction === "down" || direction === "bottom") && at === 0) return "它已经在最底层";
+  const siblings = shapes.filter((entry) => entry.groupShapeId === shape.groupShapeId);
+  const at = siblings.indexOf(shape);
+  const inGroup = shape.groupShapeId !== undefined;
+  if (siblings.length < 2) return inGroup ? "这个组合里只有这一个形状，组内没有可叠放的邻居" : "这一页只有这一个形状，没有可叠放的邻居";
+  if ((direction === "up" || direction === "top") && at === siblings.length - 1) return inGroup ? "它已经在组内最顶层" : "它已经在最顶层";
+  if ((direction === "down" || direction === "bottom") && at === 0) return inGroup ? "它已经在组内最底层" : "它已经在最底层";
   return null;
 }
 

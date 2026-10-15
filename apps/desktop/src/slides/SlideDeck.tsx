@@ -48,14 +48,17 @@ const INHERITED_COLOR = "#000000";
  * 形状在列表上的身份说明。
  *
  * @param shape 一个形状快照。
- * @returns 一句中文：占位符带它的版式角色，其余按大类点名。
+ * @returns 一句中文：占位符带它的版式角色，其余按大类点名；装在组合里的再加一句"组合里的"，
+ *   免得看名字以为那是页面上独立的一格。
  */
 function shapeKindLabel(shape: SlideShape): string {
-  if (shape.isPlaceholder) return `占位符 ${shape.placeholderRef ?? "?"}`;
-  if (shape.kind === "picture") return "图片";
-  if (shape.kind === "graphicFrame") return "图形框（表格 / 图表）";
+  const within = shape.groupShapeId === undefined ? "" : "组合里的";
+  if (shape.isPlaceholder) return `${within}占位符 ${shape.placeholderRef ?? "?"}`;
+  if (shape.kind === "picture") return `${within}图片`;
+  if (shape.kind === "graphicFrame") return `${within}图形框（表格 / 图表）`;
   if (shape.kind === "group") return "组合形状";
-  return shape.paragraphTexts.length ? "文本框" : "形状（无文字）";
+  if (shape.kind === "connector") return `${within}连接线`;
+  return shape.paragraphTexts.length ? `${within}文本框` : `${within}形状（无文字）`;
 }
 
 /**

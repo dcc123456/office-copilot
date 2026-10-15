@@ -303,7 +303,8 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
         "八类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
         "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
-        "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒）；" +
+        "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒；" +
+        "组合形状自己、以及画像里 inGroup=true 的那一格（坐标写在组内子坐标系）几何都改不了，提了只会换回一句理由）；" +
         "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
         "add_text_box 在某页新加一个文本框（四个几何值都要给，文字必填，形状号由引擎在落地时分配，这一份提案里引用不到它）；" +
         "remove_shape 删掉某个形状（连同它的文字一起没，可撤销）。" +
