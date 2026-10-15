@@ -92,6 +92,42 @@ export function twoShapeDeckParts(): DeckParts {
 }
 
 /**
+ * 一页里放一张**表**（`p:graphicFrame` + `a:tbl`）的 deck，给读模型的 `table` 与表格里改字那条 op 用。
+ *
+ * 形状逐条照 python-pptx 在真文件上现建一张表再拆包抄回来（`AGENTS.md` §6.2 的"读产物不转述文档"）：
+ * 2 行 2 列，第一行第二格故意两条 run（一条带 `b="1"`，用来验改一截不拍平另一截），
+ * 第二行是横向合并——起点写 `gridSpan="2"` 并把两段文字都放进去，被并进来的那一格仍然存在、只标 `hMerge="1"`
+ * （所以每行的格数恒等于 `a:gridCol` 数，画面上却不画它的字）。
+ *
+ * @returns 直接传给 {@link buildDeckBytes} 的部件表。
+ */
+export function tableDeckParts(): DeckParts {
+  return {
+    ...minimalDeckParts(),
+    "ppt/slides/slide1.xml":
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp>" +
+      '<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="5" name="Table 4"/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp="1"/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr>' +
+      '<p:xfrm><a:off x="457200" y="1097280"/><a:ext cx="4572000" cy="914400"/></p:xfrm>' +
+      '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl>' +
+      '<a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}</a:tableStyleId></a:tblPr>' +
+      '<a:tblGrid><a:gridCol w="2286000"/><a:gridCol w="2286000"/></a:tblGrid>' +
+      '<a:tr h="457200">' +
+      '<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>姓名</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>' +
+      '<a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1"/><a:t>城</a:t></a:r><a:r><a:t>市</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>' +
+      "</a:tr>" +
+      '<a:tr h="457200">' +
+      '<a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>张三</a:t></a:r></a:p><a:p><a:r><a:t>上海</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc>' +
+      '<a:tc hMerge="1"><a:txBody><a:bodyPr/><a:lstStyle/><a:p/></a:txBody><a:tcPr/></a:tc>' +
+      "</a:tr>" +
+      "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>" +
+      "</p:spTree></p:cSld></p:sld>",
+  };
+}
+
+/**
  * 一份带**完整继承链**的 deck（幻灯片 → 版式 → 母版），给 `inherit.ts` 与读模型的 `effectiveBoxPx` 用。
  *
  * 三格各占一条链上的不同情形，EMU 值都挑成整 px（9525 EMU/px，见 `units.ts`）方便断言：

@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { readPresentation } from "./read.js";
-import { buildDeckBytes, minimalDeckParts } from "./test-deck.js";
+import { buildDeckBytes, minimalDeckParts, tableDeckParts } from "./test-deck.js";
 import { describeDeck, readSlideText } from "./analysis.js";
 
 /** 一条 130 字的 run 文字（超过上送上限 120 字，用来验截断真的发生）。 */
@@ -156,5 +156,33 @@ describe("演讲者备注：模型看到的这一页有没有备注", () => {
     const slide = describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 }).slides[0]!;
     expect(slide.notes).toBe("先讲背景⏎再讲结论");
     expect(slide.notesPartPath).toBe("ppt/notesSlides/notesSlide1.xml");
+  });
+});
+
+describe("表格那一格：概要与逐 run 清单都要带上它", () => {
+  it("画像里表形状带出逐格文字、每段 run 截数与续格标记，`text` 仍是空", async () => {
+    const { model } = await readPresentation(await buildDeckBytes(tableDeckParts()));
+    const entry = describeDeck(model, { maxSlides: 50, maxShapesPerSlide: 40 }).slides[0]!.shapes.find((s) => s.shapeId === 5)!;
+    expect(entry.kind).toBe("graphicFrame");
+    expect(entry.text).toBe("");
+    expect(entry.table!.map((row) => row.map((cell) => [cell.text, cell.isMergeContinuation]))).toEqual([
+      [["姓名", false], ["城市", false]],
+      [["张三⏎上海", false], ["", true]],
+    ]);
+    expect(entry.table![0]![1]!.paragraphRunCounts).toEqual([2]);
+  });
+
+  it("`readSlideText` 把表也列出来（`hasText` 为 false，文字在 `table` 那一格里），不再把它当成没内容", async () => {
+    const { model } = await readPresentation(await buildDeckBytes(tableDeckParts()));
+    const read = readSlideText(model, 1, 50);
+    if (!read.ok) throw new Error(read.reason);
+    const tableShape = read.report.shapes.find((s) => s.shapeId === 5)!;
+    expect(tableShape.hasText).toBe(false);
+    expect(tableShape.runs).toEqual([]);
+    expect(tableShape.table!.map((row) => row.map((cell) => cell.text))).toEqual([["姓名", "城市"], ["张三⏎上海", ""]]);
+    // 标题那格不受牵连：它仍走段—run 那一条，没有 table 这一格
+    const title = read.report.shapes.find((s) => s.shapeId === 2)!;
+    expect(title.table).toBeUndefined();
+    expect(title.runs.map((run) => run.text)).toEqual(["标题甲"]);
   });
 });

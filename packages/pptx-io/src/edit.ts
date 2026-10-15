@@ -11,7 +11,7 @@
  * 实测：`serialize` 对本机真实幻灯片的往返**逐字一致**（仅声明后换行差异），所以重序列化不会误伤同段其它格式。
  */
 import { XML_DECLARATION, children, escapeText, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element, type XmlNode } from "@office-copilot/opc";
-import { findNotesBodyShape, shapeIdOf } from "./read.js";
+import { findNotesBodyShape, isMergeContinuationCell, shapeIdOf, tableElementOf } from "./read.js";
 import { PptxFile } from "./pptx-file.js";
 import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
@@ -34,6 +34,28 @@ export interface ShapeRunTarget {
   /** 形状 `<p:cNvPr @id>`。 */
   shapeId: number;
   /** 段落序号（`<p:txBody>` 内 `<a:p>`，0 基）。 */
+  paraIndex: number;
+  /** run 序号（该段内 `<a:r>`，0 基）。 */
+  runIndex: number;
+}
+
+/**
+ * 表格里一格 run 的定位坐标。
+ *
+ * 为什么不复用 {@link ShapeRunTarget}：表里的字不写在形状的 `p:txBody` 里，而是 `<a:tbl>` 逐行逐格各自的
+ * `a:tc/a:txBody`（ECMA-376 §21.2.3），段/run 序号在**每一格里**重新数。行与列就是 `<a:tr>`/`<a:tc>`
+ * 的位置下标（0 基，含合并续格），与读模型 `SlideShape.table.rows` 同一口径。
+ */
+export interface TableCellRunTarget {
+  /** 幻灯片部件路径。 */
+  partPath: string;
+  /** 那个图形框的 `<p:cNvPr @id>`。 */
+  shapeId: number;
+  /** 行号（`<a:tr>` 位置，0 基）。 */
+  row: number;
+  /** 列号（该行内 `<a:tc>` 位置，0 基）。 */
+  col: number;
+  /** 这一格里的段落序号（该格 `a:txBody` 内 `<a:p>`，0 基）。 */
   paraIndex: number;
   /** run 序号（该段内 `<a:r>`，0 基）。 */
   runIndex: number;
@@ -78,7 +100,7 @@ export interface SlideNotesTarget {
 }
 
 /**
- * 一条要落地的幻灯片改动：`kind` 与本文件那八个 op 生产者一一对应，坐标原样交给它们。
+ * 一条要落地的幻灯片改动：`kind` 与本文件那九个 op 生产者一一对应，坐标原样交给它们。
  *
  * 这是**跨界契约**（渲染层 → 主进程）放在引擎侧的理由：两边都按它构造与解析，
  * 写第二份就会有人改一边忘一边（`AGENTS.md` §3.2）。里面只有坐标与值，没有幻灯片原文，
@@ -86,6 +108,7 @@ export interface SlideNotesTarget {
  */
 export type PptxEditRequest =
   | { kind: "text"; target: ShapeRunTarget; text: string }
+  | { kind: "table_text"; target: TableCellRunTarget; text: string }
   | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
   | { kind: "color"; target: ShapeRunTarget; hex: string }
   | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch }
@@ -126,6 +149,35 @@ const FILL_GROUP_TAGS = ["a:noFill", "a:solidFill", "a:gradFill", "a:blipFill", 
 export async function setShapeRunText(file: PptxFile, target: ShapeRunTarget, newText: string): Promise<SlideEditResult> {
   const located = await locateRun(file, target);
   if (!located.ok) return located;
+  return replaceRunText(located, target.partPath, newText);
+}
+
+/**
+ * 产出一条"把表格里某一格的某条 run 改成 newText"的编辑提案，**不落地**。
+ *
+ * @param file 已打开的读写器。
+ * @param target 那一格内那条 run 的定位坐标（图形框形状号 + 行列 + 段 + run）。
+ * @param newText 新的纯文本（写入 `<a:t>`，序列化时转义）。
+ * @returns `{ ok, op }`：那不是一个 `<a:tbl>`（例如图形框里是图表）、行列越界、
+ *   那一格是合并区的续格（PowerPoint 不画它的字，改了等于没改）、或该 run 读不动时 `{ ok:false, reason }`。
+ *   只动 `<a:t>` 的文本节点，`<a:rPr>` 与同段其它 run 一个字都不碰（§2.3）。
+ */
+export async function setTableCellRunText(file: PptxFile, target: TableCellRunTarget, newText: string): Promise<SlideEditResult> {
+  const located = await locateTableCellRun(file, target);
+  if (!located.ok) return located;
+  return replaceRunText(located, target.partPath, newText);
+}
+
+/**
+ * 把已经定位到的那条 run 的文字换成 newText，**格式一概不动**（普通形状与表格那一格共用这一条，§3.2）。
+ *
+ * @param located `locateRun` 或 `locateTableCellRun` 的成功结果（前像 + 已解析的根 + 目标 `<a:r>`）。
+ * @param partPath 所属部件路径，装进 op。
+ * @param newText 新的纯文本。
+ * @returns 成功带 op；该 run 没有 `<a:t>`、`<a:t>` 里嵌了元素（罕见富文本，整段替换会拍平格式，§2.3）、
+ *   或没有可改的文本节点时 `{ ok:false, reason }`。
+ */
+function replaceRunText(located: { beforeXml: string; root: Element; run: Element }, partPath: string, newText: string): SlideEditResult {
   const aT = firstChild(located.run, "a:t");
   if (!aT) return { ok: false, reason: "该 run 没有 <a:t> 文本节点。" };
   // 只接受"单一文本子节点"的 <a:t>：里面还嵌了元素（罕见的富文本）时拒绝，改整段会拍平格式（§2.3）。
@@ -133,7 +185,7 @@ export async function setShapeRunText(file: PptxFile, target: ShapeRunTarget, ne
   const textNode = (aT.children ?? []).find(isText);
   if (!textNode) return { ok: false, reason: "该 run 的 <a:t> 没有可改的文本节点。" };
   textNode.text = newText;
-  return { ok: true, op: toOp(target.partPath, located.beforeXml, located.root) };
+  return { ok: true, op: toOp(partPath, located.beforeXml, located.root) };
 }
 
 /**
@@ -410,7 +462,7 @@ export async function setSlideNotes(file: PptxFile, target: SlideNotesTarget, pa
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由本文件那八个 op 生产者（`setShapeRunText` … `addTextBox`/`removeShape`/`setSlideNotes`）产出的 op。
+ * @param op 由本文件那九个 op 生产者（`setShapeRunText` / `setTableCellRunText` … `addTextBox`/`removeShape`/`setSlideNotes`）产出的 op。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -522,12 +574,51 @@ async function locateRun(file: PptxFile, target: ShapeRunTarget): Promise<Locate
   if (!located.ok) return located;
   const txBody = firstChild(located.shape, "p:txBody");
   if (!txBody) return { ok: false, reason: `形状 id=${target.shapeId} 没有文本体（图片/图形框不可改文字）` };
+  return descendToRun(located, txBody, target.paraIndex, target.runIndex);
+}
+
+/**
+ * 定位到表格里某一格的那条 run：形状→`<a:tbl>`→行→格→段→run 逐层深入。
+ *
+ * @param file 读写器。
+ * @param target 那一格的定位坐标。
+ * @returns 成功带 `{ beforeXml, root, run }`；不是表、行列越界、那一格是合并续格、
+ *   那一格没有文本体或段/run 越界时 `{ ok:false, reason }`。
+ */
+async function locateTableCellRun(file: PptxFile, target: TableCellRunTarget): Promise<LocatedRun> {
+  const located = await locateShape(file, { partPath: target.partPath, shapeId: target.shapeId });
+  if (!located.ok) return located;
+  const tbl = tableElementOf(located.shape);
+  if (!tbl) return { ok: false, reason: `形状 id=${target.shapeId} 不是一张表（图形框里没有 <a:tbl>，多半是图表），改不了格子里的字` };
+  const rows = findChildren(tbl, "a:tr");
+  const row = rows[target.row];
+  if (!row) return { ok: false, reason: `行号越界：${target.row}（这张表有 ${rows.length} 行）` };
+  const cells = findChildren(row, "a:tc");
+  const cell = cells[target.col];
+  if (!cell) return { ok: false, reason: `列号越界：${target.col}（第 ${target.row} 行有 ${cells.length} 格）` };
+  // 续格在 XML 里占一格、在画面上不画字：改了它等于静默无效，那种改动不该落盘（§2.4 的空操作）。
+  if (isMergeContinuationCell(cell)) return { ok: false, reason: `第 ${target.row} 行第 ${target.col} 列是合并区里被并进来的那一格，它不画自己的字，要改的是合并起点那一格` };
+  const txBody = firstChild(cell, "a:txBody");
+  if (!txBody) return { ok: false, reason: `第 ${target.row} 行第 ${target.col} 列没有 <a:txBody>，这一格不可改文字` };
+  return descendToRun(located, txBody, target.paraIndex, target.runIndex);
+}
+
+/**
+ * 从一处文本体往下走到具体 run（形状自己的 `p:txBody` 与表格里那一格的 `a:txBody` 走同一条，§3.2）。
+ *
+ * @param located 已带前像与已解析根元素的上下文。
+ * @param txBody 承载这些段落的 `<a:txBody>`。
+ * @param paraIndex 段落序号（0 基）。
+ * @param runIndex 该段内 run 序号（0 基）。
+ * @returns 成功带 `{ ...located, run }`；任一层越界带 `{ ok:false, reason }`（理由里报出实际有几段/几 run，好让模型改对）。
+ */
+function descendToRun(located: { beforeXml: string; root: Element }, txBody: Element, paraIndex: number, runIndex: number): LocatedRun {
   const paras = findChildren(txBody, "a:p");
-  const para = paras[target.paraIndex];
-  if (!para) return { ok: false, reason: `段落序号越界：${target.paraIndex}（共 ${paras.length} 段）` };
+  const para = paras[paraIndex];
+  if (!para) return { ok: false, reason: `段落序号越界：${paraIndex}（共 ${paras.length} 段）` };
   const runs = findChildren(para, "a:r");
-  const run = runs[target.runIndex];
-  if (!run) return { ok: false, reason: `run 序号越界：${target.runIndex}（该段有 ${runs.length} 个 run）` };
+  const run = runs[runIndex];
+  if (!run) return { ok: false, reason: `run 序号越界：${runIndex}（该段有 ${runs.length} 个 run）` };
   return { ok: true, beforeXml: located.beforeXml, root: located.root, run };
 }
 

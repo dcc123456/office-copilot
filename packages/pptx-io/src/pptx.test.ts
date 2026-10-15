@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { newlyIntroducedIssues } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
-import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes } from "./index.js";
+import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes, setTableCellRunText } from "./index.js";
 import { auditPptxPackage } from "./audit.js";
-import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, textStyleDeckParts } from "./test-deck.js";
+import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, tableDeckParts, textStyleDeckParts } from "./test-deck.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -952,5 +952,76 @@ describe("pptx-io：组合与连接线（读侧展开 + 组内形状的写侧边
     if (!pageLevel.ok) throw new Error(pageLevel.reason);
     expect(pageLevel.op.afterXml).toContain("<a:off x=\"381000\" y=\"381000\"/>");
     expect((await file.partText(partPath))!).toBe(original); // 两条提案阶段都不落地
+  });
+});
+
+describe("pptx-io：幻灯片里的表（读侧逐格 + 改某一格的一条 run）", () => {
+  /** 造一份带表的 deck（形状树里只有一个标题占位符与一张 2×2 的表）。 */
+  async function tableDeck(): Promise<Uint8Array> {
+    return buildDeckBytes(tableDeckParts());
+  }
+
+  it("表里的字逐格读得到：形状自己的 paragraphTexts 仍然空，格子内容在 table 那一格", async () => {
+    const { model } = await readPresentation(await tableDeck());
+    const table = model.slides[0]!.shapes.find((s) => s.shapeId === 5)!;
+    expect(table.kind).toBe("graphicFrame");
+    expect(table.paragraphTexts).toEqual([]);
+    expect(table.table!.rows).toHaveLength(2);
+    expect(table.table!.rows.map((row) => row.map((cell) => cell.paragraphTexts))).toEqual([
+      [["姓名"], ["城市"]],
+      [["张三", "上海"], [""]],
+    ]);
+    // 每行格数恒等于 gridCol 数（合并的那一格仍然占位），续格照实标出来
+    expect(table.table!.rows.map((row) => row.length)).toEqual([2, 2]);
+    expect(table.table!.rows[1]![0]!.gridSpan).toBe(2);
+    expect(table.table!.rows[1]![1]!.isMergeContinuation).toBe(true);
+    expect(table.table!.rows[0]![0]!.isMergeContinuation).toBe(false);
+    // 段里的 run 截数也读得到：那一格「城|市」是两条 run，整段覆盖会拍平粗体（§2.3）
+    expect(table.table!.rows[0]![1]!.paragraphRunCounts).toEqual([2]);
+  });
+  
+  it("改某一格的第二条 run：只有那一截换了字，同段另一截的粗体与别的格一个字节都不动", async () => {
+    const file = await PptxFile.open(await tableDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const result = await setTableCellRunText(file, { partPath, shapeId: 5, row: 0, col: 1, paraIndex: 0, runIndex: 1 }, "镇");
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.op.beforeXml).toBe(original);
+    expect(result.op.afterXml).toContain('<a:rPr b="1"/><a:t>城</a:t>');
+    expect(result.op.afterXml).toContain("<a:t>镇</a:t>");
+    expect(result.op.afterXml).not.toContain("<a:t>市</a:t>");
+    expect(result.op.afterXml).toContain("<a:t>姓名</a:t>"); // 隔壁那格没被牵连
+    applySlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(result.op.afterXml);
+    revertSlideEdit(file, result.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+  
+  it("合并区里被并进来的那一格不许改：它画面上不画字，改了等于静默无效", async () => {
+    const file = await PptxFile.open(await tableDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const refused = await setTableCellRunText(file, { partPath, shapeId: 5, row: 1, col: 1, paraIndex: 0, runIndex: 0 }, "别改");
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) expect(refused.reason).toContain("它不画自己的字");
+    expect((await file.partText(partPath))!).toBe(original); // 提案阶段不落盘，部件逐字节还是原样
+  });
+  
+  it("行、列、形状三层越界各回一句带实际数量的中文理由，不抛异常", async () => {
+    const file = await PptxFile.open(await tableDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const rowOut = await setTableCellRunText(file, { partPath, shapeId: 5, row: 2, col: 0, paraIndex: 0, runIndex: 0 }, "x");
+    expect(rowOut.ok).toBe(false);
+    if (!rowOut.ok) expect(rowOut.reason).toBe("行号越界：2（这张表有 2 行）");
+    const colOut = await setTableCellRunText(file, { partPath, shapeId: 5, row: 0, col: 2, paraIndex: 0, runIndex: 0 }, "x");
+    expect(colOut.ok).toBe(false);
+    if (!colOut.ok) expect(colOut.reason).toBe("列号越界：2（第 0 行有 2 格）");
+    const paraOut = await setTableCellRunText(file, { partPath, shapeId: 5, row: 0, col: 0, paraIndex: 1, runIndex: 0 }, "x");
+    expect(paraOut.ok).toBe(false);
+    if (!paraOut.ok) expect(paraOut.reason).toBe("段落序号越界：1（共 1 段）");
+    // 那一页的标题形状不是一张表：改格子的事它接不了
+    const notTable = await setTableCellRunText(file, { partPath, shapeId: 2, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, "x");
+    expect(notTable.ok).toBe(false);
+    if (!notTable.ok) expect(notTable.reason).toContain("不是一张表");
   });
 });

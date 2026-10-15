@@ -9,7 +9,7 @@ import { Command } from "commander";
 import pc from "picocolors";
 import fs from "node:fs";
 import path from "node:path";
-import { auditPptxPackage, readPresentation, type PresentationModel, type PptxAuditIssue } from "@office-copilot/pptx-io";
+import { auditPptxPackage, readPresentation, type PresentationModel, type PptxAuditIssue, type SlideShape } from "@office-copilot/pptx-io";
 import { describeSlideReadFailure } from "@office-copilot/shared";
 import { clip, emit, fail, log, warn } from "./fsutil.js";
 
@@ -40,6 +40,18 @@ function reportFailure(error: unknown): never {
   fail(error instanceof Error ? error.message : String(error));
 }
 
+/**
+ * 把一个形状的文字念成 CLI 上那一行。
+ *
+ * @param shape 读模型里的一个形状快照。
+ * @returns 普通形状是各段用 ` / ` 隔开；图形框里是**表**时逐行用 ` ⏎ ` 隔开、行内格子用 ` | ` 隔开
+ *   （表里的字不写在形状的文本体里，只念 `paragraphTexts` 会念成"没文字"）；两者都没有时是空串。
+ */
+function shapeText(shape: SlideShape): string {
+  if (!shape.table) return shape.paragraphTexts.join(" / ");
+  return shape.table.rows.map((row) => row.map((cell) => cell.paragraphTexts.join(" / ")).join(" | ")).join(" ⏎ ");
+}
+
 export function registerPptCommands(program: Command): void {
   const ppt = program
     .command("ppt")
@@ -68,7 +80,7 @@ export function registerPptCommands(program: Command): void {
             const tags = [shape.kind, shape.isPlaceholder ? `占位符:${shape.placeholderRef ?? "?"}` : null]
               .filter(Boolean)
               .join(" ");
-            const text = clip(shape.paragraphTexts.join(" / "), opts.maxText);
+            const text = clip(shapeText(shape), opts.maxText);
             log(`    ${pc.yellow(`id=${shape.shapeId}`)} ${shape.name}（${tags}）${text ? `  ${pc.dim(text)}` : ""}`);
           }
           // 没有备注页时这行不打（跟"形状没文字就不打"同一个口径）；有备注页时把"没写字"如实说出来，

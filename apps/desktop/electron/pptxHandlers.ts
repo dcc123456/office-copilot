@@ -22,6 +22,7 @@ import {
   setRunFont,
   setShapeGeometry,
   setShapeRunText,
+  setTableCellRunText,
   type PptxAuditIssue,
   type PresentationModel,
   type PptxEditPayload,
@@ -207,6 +208,8 @@ async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: tr
   switch (edit.kind) {
     case "text":
       return await setShapeRunText(file, edit.target, edit.text);
+    case "table_text":
+      return await setTableCellRunText(file, edit.target, edit.text);
     case "font":
       return await setRunFont(file, edit.target, edit.format);
     case "color":

@@ -65,6 +65,42 @@ export interface SlideShape {
   effectiveBoxPx: ShapeGeometryPatch;
   /** `effectiveBoxPx` 每一轴的来源层，键与它一一对应（spec D3 要求的 `src`）。 */
   boxPxSources: Partial<Record<keyof ShapeBoxPx, BoxAxisSource>>;
+  /**
+   * 图形框里那张**表**（`<a:tbl>`）的逐格文字；其余形状与"图形框里装的是图表"时为 undefined。
+   *
+   * 为什么要单列一格：表里的字不写在形状的 `p:txBody` 里，而是 `a:tc/a:txBody`，所以 `paragraphTexts`
+   * 对一张表恒为空——过去面板与模型就这样把一页的表格念成"图形框，没文字"。这一格只补事实（谁在哪个格），
+   * 不改那条 run 级寻址：段/run 那套定位仍然只针对 `p:txBody`，表格另算行列。
+   */
+  table?: SlideTable;
+}
+
+/** 表格里的一格（`<a:tc>`）。 */
+export interface SlideTableCell {
+  /** 这一格的逐段文字（`a:txBody` 里每条 `<a:p>` 的 `<a:t>` 拼接）。 */
+  paragraphTexts: string[];
+  /** 每段自己的 `<a:r>` 截数，与 `paragraphTexts` 同长同序；>1 表示整段覆盖会拍平局部格式（§2.3）。 */
+  paragraphRunCounts: number[];
+  /** 横向跨度（`@gridSpan`，1 基；默认 1，被并进来的续格也是 1）。 */
+  gridSpan: number;
+  /**
+   * 这一格是不是合并区里的**续格**（`@hMerge="1"` 或 `@vMerge="1"`）。
+   *
+   * 续格在 XML 里照样占一格（所以每行的格数恒等于 `a:gridCol` 数），但 PowerPoint 不画它的文字——
+   * 读侧如实列出来，写侧要按这一格拒绝，否则改了一格屏幕上什么都不变。
+   */
+  isMergeContinuation: boolean;
+}
+
+/** 图形框里的表（`<a:tbl>`，即 `a:graphicData @uri` 指向 drawingml/2006/table 的那一类）。 */
+export interface SlideTable {
+  /**
+   * 逐行逐格，下标就是 `<a:tr>` / `<a:tc>` 在部件里的位置（**含合并续格**，行内格数一致）。
+   *
+   * 刻意不给"逻辑列号"：合并起点写了 `gridSpan="2"` 时，它后面的续格仍在下一列的位置上，
+   * 拿位置下标寻址与 XML 一一对得上，换算成逻辑列反而要在读侧再造一套表格模型。
+   */
+  rows: SlideTableCell[][];
 }
 
 /** 一条 run 自己的字符格式（读侧已换算成 pt 与 `#rrggbb`）。 */
@@ -121,7 +157,7 @@ export interface Slide {
   order: number;
   /** `<p:sldId @id>`，撤销/寻址用的稳定 id。 */
   slideId: number;
-  /** 形状树顶层子元素（组合不展开）。 */
+  /** 形状清单，按文档顺序的**扁平 DFS**：组合自己那一格紧跟它的子形状（子形状带 `groupShapeId`，见 {@link SlideShape.groupShapeId}）。 */
   shapes: SlideShape[];
   /**
    * 这一页**读不懂**的原因；读得懂（哪怕真的一个形状都没有）时 undefined。
@@ -378,7 +414,62 @@ async function readShape(
     boxPx: groupShapeId === undefined ? completeBox(ownAxes) : undefined,
     effectiveBoxPx: groupShapeId === undefined ? effective.box : {},
     boxPxSources: groupShapeId === undefined ? effective.sources : {},
+    table: kind === "graphicFrame" ? readTableOf(el) : undefined,
   };
+}
+
+/**
+ * 从一个图形框里把它那张表读成网格（`a:graphic/a:graphicData/a:tbl`）。
+ *
+ * @param el 图形框元素 `<p:graphicFrame>`。
+ * @returns 逐行逐格的表；图形框里装的是图表（`@uri` 指向 chart 那一族）、表是空的（没有 `<a:tr>`）
+ *   或结构读不动时一律 undefined——宁可不给网格也不给一份猜出来的行列数。
+ */
+function readTableOf(el: Element): SlideTable | undefined {
+  const tbl = tableElementOf(el);
+  if (!tbl) return undefined;
+  const rows = findChildren(tbl, "a:tr").map(
+    (tr): SlideTableCell[] =>
+      findChildren(tr, "a:tc").map((tc) => {
+        const txBody = firstChild(tc, "a:txBody");
+        const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
+        return {
+          paragraphTexts: paragraphs.map((p) => text(p)),
+          paragraphRunCounts: paragraphs.map((p) => findChildren(p, "a:r").length),
+          gridSpan: Number(tc.attributes["gridSpan"]) || 1,
+          isMergeContinuation: isMergeContinuationCell(tc),
+        };
+      }),
+  );
+  return rows.length > 0 ? { rows } : undefined;
+}
+
+/**
+ * 从图形框元素里取出它那张表（`a:graphic/a:graphicData/a:tbl`）。
+ *
+ * 读侧（拼网格）与写侧（定位到某一格）共用这一条链（§3.2），两边各写一遍就会有人改一边忘一边。
+ *
+ * @param el 图形框元素 `<p:graphicFrame>`。
+ * @returns `<a:tbl>` 元素；那是图表（`@uri` 指向 chart 那一族）或结构读不动时 undefined。
+ */
+export function tableElementOf(el: Element): Element | undefined {
+  const graphic = firstChild(el, "a:graphic");
+  const graphicData = graphic ? firstChild(graphic, "a:graphicData") : undefined;
+  return graphicData ? firstChild(graphicData, "a:tbl") : undefined;
+}
+
+/**
+ * 这一格是不是合并区里的**续格**（`@hMerge="1"` 或 `@vMerge="1"`）。
+ *
+ * 依据 ECMA-376 Part 1 §21.2.3.2 `CT_TableCell`：合并只在起点那格写文字并带上 `gridSpan`/`rowSpan`，
+ * 被覆盖的那些格子仍然存在、只是标成续格。PowerPoint 不画续格的文字，所以写侧必须拒绝改它
+ * （改了屏幕上什么都不变），读侧照实列出以保持"每行格数 = `a:gridCol` 数"这个形状。
+ *
+ * @param tc 一格 `<a:tc>`。
+ * @returns 续格为 true；合并起点与普通格为 false。
+ */
+export function isMergeContinuationCell(tc: Element): boolean {
+  return tc.attributes["hMerge"] === "1" || tc.attributes["vMerge"] === "1";
 }
 
 /**

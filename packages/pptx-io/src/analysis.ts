@@ -29,6 +29,16 @@ export interface SlideRunSnapshot {
   format: RunFormat;
 }
 
+/** 表格里一格的快照（行、列就是它在 `rows` 里的位置，与引擎 `TableCellRunTarget` 同一口径）。 */
+export interface SlideTableCellSnapshot {
+  /** 这一格的文字（各段用 `⏎` 隔开，超长已截）；续格画面上没有字，文本仍照实给。 */
+  text: string;
+  /** 每段的 `<a:r>` 截数：>1 表示整段覆盖会拍平局部格式（§2.3），只能逐 run 改。 */
+  paragraphRunCounts: number[];
+  /** 是不是合并区里的**续格**（`hMerge`/`vMerge`）——PowerPoint 不画它的字，对它提改动等于静默无效。 */
+  isMergeContinuation: boolean;
+}
+
 /** 一个形状摊开给模型看的样子。 */
 export interface SlideShapeTextSnapshot {
   /** 形状 `<p:cNvPr @id>`，模型提交改动时用它定位。 */
@@ -41,6 +51,13 @@ export interface SlideShapeTextSnapshot {
   runs: SlideRunSnapshot[];
   /** 每段是否只有一条 run（true 才允许整段覆盖式改文字；false 必须逐 run 改，§2.3）。 */
   singleRunParagraphs: boolean[];
+  /**
+   * 图形框里那张表的逐格快照（`<a:tbl>`）；不是表的形状为 undefined。
+   *
+   * 为什么单列：表的字不写在形状的 `p:txBody` 里，段/run 序号是**每一格里重新数**的，
+   * 上面那套 `runs` 装不下（也不许装——把格压成段就等于编了一套寻址）。
+   */
+  table?: SlideTableCellSnapshot[][];
 }
 
 /** `readSlideText` 的结果。 */
@@ -85,6 +102,11 @@ export interface SlideOutlineEntry {
     inGroup: boolean;
     /** 这一页上这个形状的文字概要（拼接串，超长已截）。 */
     text: string;
+    /**
+     * 图形框里那张表的逐格概要（行、列就是位置下标，续格标了 `isMergeContinuation`）；
+     * 不是表的形状为 null。为什么概要里也要带：`text` 对表恒为空，模型会把一页的表格念成"图形框，没文字"。
+     */
+    table: SlideTableCellSnapshot[][] | null;
   }>;
   /** 形状清单是否被 `maxShapesPerSlide` 截断。 */
   shapesTruncated: boolean;
@@ -132,7 +154,26 @@ export interface DescribeOptions {
  * @returns 各段用 `⏎` 隔开的概要文字。
  */
 function shapeTextSummary(shape: SlideShape): string {
+  // 表里的字不写在 `p:txBody`（在每格自己的文本体里），所以概要保持现状，只额外带出逐格网格。
   return clipText(shape.paragraphTexts.join("⏎"), RUN_TEXT_LIMIT).text;
+}
+
+/**
+ * 把形状里那张表摊成逐格快照（供概要 `table` 与 `readSlideText` 两处上送）。
+ *
+ * @param shape 形状快照。
+ * @returns 逐行逐格（行列下标即位置，与引擎 `TableCellRunTarget` 同一口径）；不是表时 undefined。
+ *   每格文字超长时按 §2.9 逐格截断，续格照实标出来——模型对着续格提改动等于改了个不画出来的地方。
+ */
+function tableSnapshot(shape: SlideShape): SlideTableCellSnapshot[][] | undefined {
+  if (!shape.table) return undefined;
+  return shape.table.rows.map((row) =>
+    row.map((cell) => ({
+      text: clipText(cell.paragraphTexts.join("⏎"), RUN_TEXT_LIMIT).text,
+      paragraphRunCounts: cell.paragraphRunCounts,
+      isMergeContinuation: cell.isMergeContinuation,
+    })),
+  );
 }
 
 /**
@@ -177,6 +218,7 @@ function outlineOfSlide(slide: Slide, slideNumber: number, maxShapesPerSlide: nu
       hasOwnGeometry: shape.hasOwnGeometry,
       inGroup: shape.groupShapeId !== undefined,
       text: shapeTextSummary(shape),
+      table: tableSnapshot(shape) ?? null,
     })),
     shapesTruncated: slide.shapes.length > listed.length,
     readFailure: slide.readFailure ?? null,
@@ -207,7 +249,13 @@ export function readSlideText(
   const shapes: SlideShapeTextSnapshot[] = [];
   let runsTruncated = false;
   for (const shape of slide.shapes) {
-    if (shape.paragraphTexts.length === 0) continue; // 图片/图形框没有文本体：列出来只会误导模型去改它
+    if (shape.paragraphTexts.length === 0) {
+      // 图片/图形框/连接线没有文本体：列出来只会误导模型去改它。
+      // 但**表**是个例外——它的字写在每一格自己的文本体里，`paragraphTexts` 恒空不等于"这格没内容"。
+      const table = tableSnapshot(shape);
+      if (table) shapes.push({ shapeId: shape.shapeId, name: shape.name, hasText: false, runs: [], singleRunParagraphs: [], table });
+      continue;
+    }
     const runs: SlideRunSnapshot[] = [];
     shape.paragraphTexts.forEach((_, paraIndex) => {
       const paragraphRuns = shape.paragraphRunTexts[paraIndex] ?? [];
