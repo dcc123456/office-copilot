@@ -94,6 +94,15 @@ export interface SlideNotes {
   partPath: string;
   /** 备注正文逐段文字（只取 `p:ph type="body"` 那一个形状；页码、幻灯片缩略图那些占位符不算备注）。 */
   paragraphTexts: string[];
+  /**
+   * 备注逐段的 run 截数，与 `paragraphTexts` 同长同序（一段一截就是 `1`）。
+   *
+   * 这是"整篇覆盖会不会拍平"的那半个事实：住在读模型里，装配层（`slideAgent`）才敢在提案阶段就判一刀，
+   * 而不是等用户点确认、主进程整批不落地。
+   */
+  paragraphRunCounts: number[];
+  /** 备注里带字符格式（`<a:rPr>`：颜色、加粗、字号）的 run 总截数；0 表示这一页的备注全是同一种格式。 */
+  styledRunCount: number;
 }
 
 /** 一张幻灯片。 */
@@ -255,7 +264,17 @@ async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<S
   const bodyShape = findNotesBodyShape(notesRoot);
   const txBody = bodyShape ? firstChild(bodyShape, "p:txBody") : undefined;
   const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
-  return { partPath, paragraphTexts: paragraphs.map((p) => text(p)) };
+  const runCounts = paragraphs.map((p) => findChildren(p, "a:r").length);
+  const styledRunCount = paragraphs.reduce(
+    (total, p) => total + findChildren(p, "a:r").filter((run) => firstChild(run, "a:rPr")).length,
+    0,
+  );
+  return {
+    partPath,
+    paragraphTexts: paragraphs.map((p) => text(p)),
+    paragraphRunCounts: runCounts,
+    styledRunCount,
+  };
 }
 
 /**

@@ -37,7 +37,7 @@ describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   });
 });
 
-describe("pptx-tools：提案的七类改动", () => {
+describe("pptx-tools：提案的八类改动", () => {
   const one = (edit: unknown) => parseToolArguments("ppt_submit_proposal", JSON.stringify({ summary: "改一处", edits: [edit] }));
 
   it("set_run_text 合法入参通过", () => {
@@ -100,6 +100,13 @@ describe("pptx-tools：提案的七类改动", () => {
     expect(one({ type: "remove_shape", slideNumber: 2, shapeId: 0 }).ok).toBe(false);
   });
 
+  it('set_notes 只要页号与逐段文字：空串段落合法，空数组、缺字段、单段超 2000 字都被拒', () => {
+    expect(one({ type: "set_notes", slideNumber: 1, paragraphTexts: ["甲", ""] }).ok).toBe(true);
+    expect(one({ type: "set_notes", slideNumber: 1 }).ok).toBe(false);
+    expect(one({ type: "set_notes", slideNumber: 1, paragraphTexts: [] }).ok).toBe(false);
+    expect(one({ type: "set_notes", slideNumber: 1, paragraphTexts: ["x".repeat(2001)] }).ok).toBe(false);
+  });
+
   it("改文字超过 2000 字被拒", () => {
     const r = one({ type: "set_run_text", slideNumber: 1, shapeId: 2, paraIndex: 0, runIndex: 0, text: "x".repeat(2001) });
     expect(r.ok).toBe(false);
@@ -129,6 +136,15 @@ describe("pptx-tools：导出一致性", () => {
       submit.function.parameters.properties as { edits: { items: { oneOf: { properties: { type: { const: string } } }[] } } }
     ).edits.items.oneOf;
     expect(branches.map((branch) => branch.properties.type.const).sort()).toEqual(zodTypes);
-    expect(zodTypes).toEqual(["add_text_box", "move_shape_layer", "remove_shape", "set_run_color", "set_run_font", "set_run_text", "set_shape_geometry"]);
+    expect(zodTypes).toEqual([
+      "add_text_box",
+      "move_shape_layer",
+      "remove_shape",
+      "set_notes",
+      "set_run_color",
+      "set_run_font",
+      "set_run_text",
+      "set_shape_geometry",
+    ]);
   });
 });

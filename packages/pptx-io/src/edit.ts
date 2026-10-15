@@ -346,6 +346,23 @@ export async function removeShape(file: PptxFile, target: ShapeGeometryTarget): 
 }
 
 /**
+ * 整篇覆盖备注会不会把现有格式拍平——只吃两个事实（每段几截 run、其中几截带字符格式）。
+ *
+ * 判定只存这一份（§3.2）：`setSlideNotes` 落地时按现场 XML 数出这两个数，`slideAgent` 在提案阶段按读模型数出来，
+ * 两边念同一句理由。用户点了确认才发现"整批不写"（§2.4）是更坏的结果，所以装配层必须能提前判。
+ *
+ * @param paragraphRunCounts 备注逐段的 run 截数。
+ * @param styledRunCount 带 `<a:rPr>`（颜色、加粗、字号）的 run 总截数。
+ * @returns 一句中文理由；不会拍平时 null。
+ */
+export function notesFlattenNote(paragraphRunCounts: number[], styledRunCount: number): string | null {
+  const multiRun = paragraphRunCounts.filter((count) => count > 1).length;
+  if (multiRun > 0) return `备注里有 ${multiRun} 段带多截不同格式的文字，整篇覆盖会把它们压平，这一档不改。`;
+  if (styledRunCount > 0) return `备注里有 ${styledRunCount} 截带字符格式的文字，整篇覆盖会把它们压平，这一档不改。`;
+  return null;
+}
+
+/**
  * 产出一条"把某页的演讲者备注整篇换成给定的几段"的编辑提案，**不落地**。
  *
  * 只改**文件里已经存在**的备注部件。新建一份 `notesSlide` 按 §2.10 要三处一起登记（部件本体 + 幻灯片侧 `<Relationship>`
@@ -366,15 +383,12 @@ export async function setSlideNotes(file: PptxFile, target: SlideNotesTarget, pa
   const txBody = bodyShape ? firstChild(bodyShape, "p:txBody") : undefined;
   if (!txBody) return { ok: false, reason: `这份备注里没有正文那一格（<p:ph type="body">）：${target.notesPartPath}` };
   const paragraphs = findChildren(txBody, "a:p");
-  const multiRun = paragraphs.filter((p) => findChildren(p, "a:r").length > 1);
-  if (multiRun.length > 0) {
-    return { ok: false, reason: `备注里有 ${multiRun.length} 段带多截不同格式的文字，整篇覆盖会把它们压平，这一档不改。` };
-  }
-  // 带字符格式（`<a:rPr>`：颜色、加粗、字号）的备注同理：新写的 run 只有 `<a:t>`，把那些格式带不过来就是拍平（§2.3）。
-  const styledRuns = paragraphs.flatMap((p) => findChildren(p, "a:r")).filter((run) => firstChild(run, "a:rPr"));
-  if (styledRuns.length > 0) {
-    return { ok: false, reason: `备注里有 ${styledRuns.length} 截带字符格式的文字，整篇覆盖会把它们压平，这一档不改。` };
-  }
+  // 新写的 run 只有 `<a:t>`：现有备注里那些多截格式与字符格式带不过来就是拍平（§2.3），判定与装配层共用那一份。
+  const refusal = notesFlattenNote(
+    paragraphs.map((p) => findChildren(p, "a:r").length),
+    paragraphs.flatMap((p) => findChildren(p, "a:r")).filter((run) => firstChild(run, "a:rPr")).length,
+  );
+  if (refusal) return { ok: false, reason: refusal };
   // 段落自己的 `<a:pPr>`（项目符号、层级）与段末 `<a:endParaRPr>` 从第一段带过来：只换文字，不动这一页已有的版式意图（§2.7）。
   const template = paragraphs[0];
   const pPrXml = template ? firstChild(template, "a:pPr") : undefined;

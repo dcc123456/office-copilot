@@ -12,6 +12,7 @@
  */
 import {
   describeDeck,
+  notesFlattenNote,
   readSlideText,
   type PptxEditRequest,
   type PresentationModel,
@@ -36,9 +37,10 @@ const CONTEXT_MAX_SHAPES_PER_SLIDE = 20;
 
 const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这份文稿的结构画像，不是整份原文。
 - 动手前先调 ppt_describe 拿页号与 shapeId；要改某段文字再调 ppt_read_slide_text 确认 paraIndex / runIndex，不许凭印象数，也不许自己编形状号。
-- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape 七种，
-  前三条指到"某一页某个形状的某段某 run"，中间两条指到形状（叠放方向是 up/down/top/bottom），后两条是结构改动：
-  add_text_box 只给页号与四个几何值加文字（新形状号由引擎落地时分配，同一份提案里引用不到它），remove_shape 给页号与形状号。
+- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape / set_notes 八种，
+  前三条指到"某一页某个形状的某段某 run"，中间两条指到形状（叠放方向是 up/down/top/bottom），后三条是结构或整篇改动：
+  add_text_box 只给页号与四个几何值加文字（新形状号由引擎落地时分配，同一份提案里引用不到它），remove_shape 给页号与形状号，
+  set_notes 给页号与逐段文字，把那一页**已存在**的演讲者备注整篇换掉（不是追加；画像里 notesPartPath 为 null 就是这页没有备注页，提了也落不了）。
   同一批里删掉的形状就别再改它的文字或字体（落地按顺序执行，那条必然失败并整批不写）。改版式与母版这里做不了，遇到就直说做不了。
 - set_shape_geometry 想只改一个轴（比如只把宽改一下），那个形状必须自己写过几何；画像里 hasOwnGeometry=false 的形状（标题/正文那类占位符，值从版式继承）要改就把四个值一起给。
 - 一段里如果有多条 run（read_slide_text 会标出来），必须逐 run 改，整段覆盖会拍平那一截的粗体与字号——这是禁止的。
@@ -99,7 +101,8 @@ export function slideContextOf(deck: PresentationModel): string {
  * 把提案里的条目翻成引擎认的跨界改动（部件路径 + 形状号 + 段/run 序号）。
  *
  * 页号是模型视角的 1 基，部件路径由现场模型算——这是唯一一处做这个映射（§3.3）。
- * 翻不动的（页号越界、该页没有这个形状、几何一条属性都没给、同一批里那个形状已被删掉）逐条记进 `notes`，
+ * 翻不动的（页号越界、该页没有这个形状、几何一条属性都没给、同一批里那个形状已被删掉、那一页根本没有备注页、
+ * 备注带多种格式）逐条记进 `notes`，
  * 不许交出一批主进程必然拒绝、整批不落地的改动（§2.4 的事务语义）。
  *
  * @param deck 提案要落在这份文稿上（页号→部件路径按它算）。
@@ -125,6 +128,21 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
         box: { leftPx: edit.leftPx, topPx: edit.topPx, widthPx: edit.widthPx, heightPx: edit.heightPx },
         text: edit.text,
       });
+      continue;
+    }
+    if (edit.type === "set_notes") {
+      // 备注住在**另一个部件**里，坐标是这一页读模型给的 `notes.partPath`（引擎坐标不上送给模型，与 add_text_box 同一条理由）。
+      // 这一页没有备注部件、或现有备注带多种格式时，引擎那条必然拒绝并让整批不落地（§2.4），所以这里先判一刀再决定交不交。
+      if (!slide.notes) {
+        notes.push(`第 ${edit.slideNumber} 页没有备注页（这份文件里那一页不存在备注部件），这一档只能改已有的备注，这条跳过。`);
+        continue;
+      }
+      const flattenNote = notesFlattenNote(slide.notes.paragraphRunCounts, slide.notes.styledRunCount);
+      if (flattenNote) {
+        notes.push(`第 ${edit.slideNumber} 页的备注改不了：${flattenNote}`);
+        continue;
+      }
+      requests.push({ kind: "set_notes", target: { notesPartPath: slide.notes.partPath }, paragraphTexts: edit.paragraphTexts });
       continue;
     }
     const shape = slide.shapes.find((entry) => entry.shapeId === edit.shapeId);

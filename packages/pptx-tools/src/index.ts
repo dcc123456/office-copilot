@@ -3,8 +3,8 @@
  *
  * 与 `sheet-tools`/`word-tools` 同构，守同一条红线：模型只产出**入参与提案**，定位、落地、撤销全部由
  * `@office-copilot/pptx-io` 做（`AGENTS.md` §2.8、§2.11）。写面只有 `ppt_submit_proposal` 一个出口，
- * 它的七类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状）与
- * `pptx-io/edit.ts` 里**自带逆操作**的七个 op 一一对应——表达不了的（改版式与母版）宁可不提供，
+ * 它的八类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状 / 整篇换备注）与
+ * `pptx-io/edit.ts` 里**自带逆操作**的八个 op 一一对应——表达不了的（改版式与母版、给没备注页的那页造备注）宁可不提供，
  * 也不发一批没有逆操作的直写（§2.5）。
  * 按 spec §三 的包边界，本包只依赖 `zod` 与 `@office-copilot/shared`（那条入参判定共用一份）、**不 import `pptx-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 slideAgent）拿校验过的入参去调引擎函数：把 `slideNumber` 翻成部件路径、
@@ -148,7 +148,27 @@ const RemoveShapeEdit = z
   })
   .strict();
 
-/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状为止。 */
+/**
+ * 一条改某页演讲者备注的请求：**整篇换掉**这一页已经存在的备注，不是追加。
+ *
+ * 模型只交页号，`notesSlideN.xml` 那个路径由装配层按现场模型算（引擎坐标不上送，与 `add_text_box` 同一条理由）。
+ */
+const SetNotesEdit = z
+  .object({
+    type: z.literal("set_notes"),
+    slideNumber: SlideNumber,
+    paragraphTexts: z
+      .array(z.string().max(2000))
+      .min(1)
+      .max(200)
+      .describe(
+        "备注的逐段文字，一段一个字符串（空串表示那一行没字），1~200 段。这是**整篇替换**不是追加；" +
+          "这一页本来没有备注页时这条会被拒（新建备注部件现在做不了），画像里 notesPartPath 为 null 的页就别提。",
+      ),
+  })
+  .strict();
+
+/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状与整篇换备注为止。 */
 export const PptxEdit = z.discriminatedUnion("type", [
   SetRunTextEdit,
   SetRunFontEdit,
@@ -157,12 +177,13 @@ export const PptxEdit = z.discriminatedUnion("type", [
   MoveShapeLayerEdit,
   AddTextBoxEdit,
   RemoveShapeEdit,
+  SetNotesEdit,
 ]);
 
 /**
  * `ppt_submit_proposal` 的入参。
  *
- * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这七项。
+ * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这八项。
  * "字体/几何至少给一项"这种跨字段约束不能放进 `discriminatedUnion`（会把成员包成 ZodEffects 而非法），所以在外层校验。
  */
 export const SubmitProposalArgs = z
@@ -279,14 +300,16 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
       name: "ppt_submit_proposal",
       description:
         "把你打算对幻灯片做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
-        "七类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
+        "八类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
         "set_run_color 改某个 run 的颜色（#rrggbb）；set_shape_geometry 移动/缩放某个形状（leftPx/topPx/widthPx/heightPx 至少一个，单位 px；" +
         "画像是占位符/母版形状那种（没有自己的几何、值从版式继承）时四个必须一起给，只给一轴会被拒）；" +
         "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
         "add_text_box 在某页新加一个文本框（四个几何值都要给，文字必填，形状号由引擎在落地时分配，这一份提案里引用不到它）；" +
         "remove_shape 删掉某个形状（连同它的文字一起没，可撤销）。" +
-        "改版式与母版、删整页现在提不了。",
+        "set_notes 把某一页的演讲者备注整篇换成你给的几段（一段一个字符串，不是追加；" +
+        "只对**本来就有备注页**的页有效，画像里 notesPartPath 为 null 的页提了会被拒，现有备注带多种格式时也会被拒，因为整篇覆盖会拍平那些格式）。" +
+        "改版式与母版、删整页、给没有备注页的那一页新建备注现在都提不了。",
       parameters: {
         type: "object",
         properties: {
@@ -368,6 +391,21 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                     shapeId: { type: "integer", minimum: 1, maximum: 1_000_000 },
                   },
                   required: ["type", "slideNumber", "shapeId"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "set_notes" },
+                    slideNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    paragraphTexts: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 200,
+                      items: { type: "string", maxLength: 2000 },
+                    },
+                  },
+                  required: ["type", "slideNumber", "paragraphTexts"],
                   additionalProperties: false,
                 },
               ],

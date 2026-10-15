@@ -262,6 +262,12 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
       const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
       return `第 ${edit.slideNumber} 页 加文本框「${value}」（${Math.round(edit.leftPx)},${Math.round(edit.topPx)}px 起 ${Math.round(edit.widthPx)}×${Math.round(edit.heightPx)}px）`;
     }
+    // 备注那条没有形状号：它换掉的是那一页的备注部件，卡片上给段数与逐段的字。
+    if (edit.type === "set_notes") {
+      const preview = edit.paragraphTexts.map((line) => line || "（空行）").join(" / ");
+      const shown = preview.length > 40 ? `${preview.slice(0, 40)}…` : preview;
+      return `第 ${edit.slideNumber} 页 备注整篇换成 ${edit.paragraphTexts.length} 段「${shown}」`;
+    }
     const where = `第 ${edit.slideNumber} 页 · 形状 ${edit.shapeId}`;
     // 段号与 run 号只有 run 级改动才带：几何、叠放与删形状条目上没有这两项，取用之前先按类型分岔。
     const atRun =

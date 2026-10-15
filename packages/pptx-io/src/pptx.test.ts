@@ -151,6 +151,15 @@ describe("pptx-io：演讲者备注的读侧（spec 阶段 2 那条「notes 仍�
     );
     expect((await readPresentation(out)).model.slides[0]!.notes?.paragraphTexts).toEqual(["原样带过的备注"]);
   });
+
+  it("读侧把「每段几截 run」与「带字符格式的 run 截数」也带出来：装配层靠这两个数提前拦，不必等主进程整批拒（§2.4）", async () => {
+    const bytes = await notesDeckWithBody(
+      '<a:p><a:r><a:t>甲</a:t></a:r></a:p><a:p><a:r><a:rPr b="1"/><a:t>乙</a:t></a:r><a:r><a:t>丙</a:t></a:r></a:p>',
+    );
+    const notes = (await readPresentation(bytes)).model.slides[0]!.notes;
+    expect(notes?.paragraphRunCounts).toEqual([1, 2]);
+    expect(notes?.styledRunCount).toBe(1);
+  });
 });
 
 describe("pptx-io：保真回写", () => {

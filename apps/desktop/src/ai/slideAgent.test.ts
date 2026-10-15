@@ -6,12 +6,25 @@
  * 主进程的事务语义是"任一条失败就整批不写"（§2.4），代理交一批注定失败的改动等于让用户白点一次确认。
  */
 import { describe, expect, it } from "vitest";
-import type { PresentationModel } from "@office-copilot/pptx-io";
+import type { PresentationModel, SlideNotes } from "@office-copilot/pptx-io";
 import type { ToolTurnRequest, ToolTurnResult } from "../global.js";
 import { runSlideAgent, slideContextOf, slideRequestsOfProposal } from "./slideAgent.js";
 
-/** 两页夹具：第 1 页有标题占位符（id=2，单 run）与一个自带几何的文本框（id=4，一段两条 run）与一张图片（id=7）。 */
-function sampleDeck(): PresentationModel {
+/** 第 1 页那份备注：一段一截、没字符格式，正是"整篇换"允许的那一种。 */
+const SAMPLE_NOTES: SlideNotes = {
+  partPath: "ppt/notesSlides/notesSlide1.xml",
+  paragraphTexts: ["旧备注一句"],
+  paragraphRunCounts: [1],
+  styledRunCount: 0,
+};
+
+/**
+ * 两页夹具：第 1 页有标题占位符（id=2，单 run）与一个自带几何的文本框（id=4，一段两条 run）与一张图片（id=7），
+ * 第 2 页是空页且**没有备注部件**（`notesSlide` 那一档只能改已有的备注页，所以"有没有那一页"是要分开测的事实）。
+ *
+ * @param notesOfFirstSlide 第 1 页的备注快照；默认给一份一段一截的，传 null 表示这页没有备注页。
+ */
+function sampleDeck(notesOfFirstSlide: SlideNotes | null = SAMPLE_NOTES): PresentationModel {
   return {
     slideSizeEmu: { cx: 9144000, cy: 6858000 },
     slides: [
@@ -64,6 +77,7 @@ function sampleDeck(): PresentationModel {
             boxPxSources: { leftPx: "shape", topPx: "shape", widthPx: "shape", heightPx: "shape" },
           },
         ],
+        ...(notesOfFirstSlide ? { notes: notesOfFirstSlide } : {}),
       },
       { partPath: "ppt/slides/slide2.xml", order: 1, slideId: 257, shapes: [] },
     ],
@@ -217,6 +231,37 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     ]);
     expect(requests).toEqual([]);
     expect(notes[0]).toContain("文字来自字段");
+  });
+
+  it("set_notes 把页号翻成备注部件路径：这一档只改整篇，带的是那一页自己的 partPath", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "set_notes", slideNumber: 1, paragraphTexts: ["新备注一句", "第二句"] },
+    ]);
+    expect(notes).toEqual([]);
+    expect(requests).toEqual([
+      {
+        kind: "set_notes",
+        target: { notesPartPath: "ppt/notesSlides/notesSlide1.xml" },
+        paragraphTexts: ["新备注一句", "第二句"],
+      },
+    ]);
+  });
+
+  it("那一页根本没有备注部件时不交出（新建 notesSlide 这一档还没做，交出去主进程必然拒，整批就不写了，§2.4）", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "set_notes", slideNumber: 2, paragraphTexts: ["第 2 页没有备注页"] },
+    ]);
+    expect(requests).toEqual([]);
+    expect(notes[0]).toContain("没有备注页");
+  });
+
+  it("备注里有多截不同格式的文字时不交出：整篇覆盖会压平那一截（§2.3），理由用引擎那份共用判定", () => {
+    const styled = { ...SAMPLE_NOTES, paragraphRunCounts: [1, 2], styledRunCount: 1 };
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(styled), [
+      { type: "set_notes", slideNumber: 1, paragraphTexts: ["压平了不行"] },
+    ]);
+    expect(requests).toEqual([]);
+    expect(notes[0]).toContain("压平");
   });
 });
 
