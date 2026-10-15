@@ -173,3 +173,72 @@ export function inheritanceDeckParts(): DeckParts {
       "</Relationships>",
   };
 }
+
+/**
+ * 一份带**主题色**的 deck（在 {@link inheritanceDeckParts} 的继承链上再接一层 `theme1.xml`），给 `theme.ts` 的解色用例用。
+ *
+ * 色板刻意挑成一眼能核对的三个值，并按 `p:clrMap` 的映射错位一次，防止"按同名回退"蒙对：
+ * - `lt1` = `#ffffff`、`dk1` = `#000000`（且用 `a:sysClr @lastClr` 写，测 `sysClr` 这条路）、`accent1` = `#ff0000`。
+ * - 母版写的是 `bg1="lt1" tx1="dk1" accent1="accent3"`：所以 `schemeClr val="accent1"` 实际落在 `#ffffff`，
+ *   `val="tx1"` 落在 `#000000`。
+ * - 四条 run 各占一种情形：`accent1`（无变换，能解）、`tx1`（走 `dk1`）、带 `a:lumMod`/`a:lumOff` 的 `accent1`
+ *   与 `val="phClr"`（都**不许**给 hex）、`srgbClr`（不经主题，直接要）。
+ *
+ * 主题部件是新部件，所以本体、母版的关系、`[Content_Types].xml` 的 Override 三处一起登记（§2.10）。
+ *
+ * @param withTheme 传 false 时整条主题链都不给（母版关系与部件都缺），用来断言"链路断了就不猜色"。
+ * @returns 直接传给 {@link buildDeckBytes} 的部件表。
+ */
+export function colorDeckParts(withTheme = true): DeckParts {
+  const parts: DeckParts = {
+    ...inheritanceDeckParts(),
+    "ppt/slides/slide1.xml":
+      '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      '<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p>" +
+      '<a:r><a:rPr><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:rPr><a:t>标题甲</a:t></a:r>' +
+      '<a:r><a:rPr><a:solidFill><a:schemeClr val="tx1"/></a:solidFill></a:rPr><a:t>标题乙</a:t></a:r>' +
+      "</a:p></p:txBody></p:sp>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="Body 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>' +
+      '<p:spPr><a:xfrm><a:off x="952500" y="1143000"/><a:ext cx="2857500" cy="762000"/></a:xfrm></p:spPr>' +
+      "<p:txBody><a:bodyPr/><a:lstStyle/><a:p>" +
+      '<a:r><a:rPr><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="60000"/><a:lumOff val="40000"/></a:schemeClr></a:solidFill></a:rPr><a:t>正文甲</a:t></a:r>' +
+      '<a:r><a:rPr><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:rPr><a:t>正文乙</a:t></a:r>' +
+      '<a:r><a:rPr><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:rPr><a:t>正文丙</a:t></a:r>' +
+      "</a:p></p:txBody></p:sp>" +
+      "</p:spTree></p:cSld></p:sld>",
+  };
+  // 把 `accent1` 这一档故意映射到 `accent3`（#ffffff），这样"按同名回退"会解成 #ff0000，一眼看出映射有没有真的走。
+  parts["ppt/slideMasters/slideMaster1.xml"] = (parts["ppt/slideMasters/slideMaster1.xml"] ?? "").replace(
+    'accent1="accent1"',
+    'accent1="accent3"',
+  );
+  if (!withTheme) return parts;
+  parts["[Content_Types].xml"] = (parts["[Content_Types].xml"] ?? "").replace(
+    "</Types>",
+    '<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>',
+  );
+  parts["ppt/slideMasters/_rels/slideMaster1.xml.rels"] =
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>' +
+    '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>' +
+    "</Relationships>";
+  parts["ppt/theme/theme1.xml"] =
+    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office">' +
+    '<a:themeElements><a:clrScheme name="Office">' +
+    '<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>' +
+    '<a:lt1><a:srgbClr val="FFFFFF"/></a:lt1>' +
+    '<a:dk2><a:srgbClr val="44546A"/></a:dk2>' +
+    '<a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>' +
+    '<a:accent1><a:srgbClr val="FF0000"/></a:accent1>' +
+    '<a:accent2><a:srgbClr val="ED7D31"/></a:accent2>' +
+    '<a:accent3><a:srgbClr val="FFFFFF"/></a:accent3>' +
+    '<a:accent4><a:srgbClr val="70AD47"/></a:accent4>' +
+    '<a:accent5><a:srgbClr val="5B9BD5"/></a:accent5>' +
+    '<a:accent6><a:srgbClr val="7030A0"/></a:accent6>' +
+    '<a:hlink><a:srgbClr val="0563C1"/></a:hlink>' +
+    '<a:folHlink><a:srgbClr val="954F72"/></a:folHlink>' +
+    "</a:clrScheme></a:themeElements></a:theme>";
+  return parts;
+}

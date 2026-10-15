@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { PptxFile } from "./pptx-file.js";
 import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
+import { auditPptxPackage } from "./audit.js";
+import { buildDeckBytes, colorDeckParts } from "./test-deck.js";
 
 /**
  * 造一份最小 `.pptx` 字节，部件形状照抄本机 python-pptx 产物（spec §取证）。
@@ -641,5 +643,42 @@ describe("pptx-io：写进去再读回来，单位与颜色形态原样对上（
     expect(title.paragraphRunFormats).toEqual([[{ sizePt: 24.5, bold: true, hex: "#3cb371" }]]);
     expect(title.boxPx).toEqual({ leftPx: 120, topPx: 60, widthPx: 500, heightPx: 250 });
     expect(title.hasOwnGeometry).toBe(true); // 用户明示覆盖后，这份几何就是形状自己的了
+  });
+});
+
+describe("pptx-io：主题色 a:schemeClr 解成 hex（母版 p:clrMap + theme a:clrScheme 两层都得走）", () => {
+  it("没有变换子元素的 schemeClr 给出 #rrggbb，且 role 真的按母版映射查槽位", async () => {
+    const { model } = await readPresentation(await buildDeckBytes(colorDeckParts()));
+    const title = model.slides[0]!.shapes.find((s) => s.shapeId === 2)!;
+    // 第 1 条 run 写 val="accent1"，母版把它映射到 accent3（#ffffff）——按同名回退会错成 #ff0000。
+    // 第 2 条写 val="tx1" → dk1，而主题里 dk1 是 `<a:sysClr lastClr="000000">`，测 sysClr 这条路。
+    expect(title.paragraphRunFormats).toEqual([[{ hex: "#ffffff" }, { hex: "#000000" }]]);
+  });
+
+  it("夹具本身过了结构审计：新部件 theme 的三处登记（本体 / 母版关系 / Override）齐", async () => {
+    expect(await auditPptxPackage(await buildDeckBytes(colorDeckParts()))).toEqual([]);
+  });
+
+  it("带 lumMod/lumOff 的主题色与 phClr 都不给 hex，同段的 srgbClr 照旧直接要（不算错色）", async () => {    const { model } = await readPresentation(await buildDeckBytes(colorDeckParts()));
+    const body = model.slides[0]!.shapes.find((s) => s.shapeId === 3)!;
+    // 变换的 HSL 语义本机没有能核对 PowerPoint 画面的通道，回 undefined 让视图显示"继承/未知"，
+    // 而不是交一份猜的色；phClr 要由继承上下文定，单独一层同样解不出来。
+    expect(body.paragraphRunFormats).toEqual([[{}, {}, { hex: "#00ff00" }]]);
+  });
+
+  it("母版没有指向主题的链时回 undefined，不许拿 Office 默认色板凑", async () => {
+    const { model } = await readPresentation(await buildDeckBytes(colorDeckParts(false)));
+    const title = model.slides[0]!.shapes.find((s) => s.shapeId === 2)!;
+    expect(title.paragraphRunFormats).toEqual([[{}, {}]]);
+  });
+
+  it("解出来的色只读不烤：读完再原样回写，幻灯片部件逐字不变", async () => {
+    const bytes = await buildDeckBytes(colorDeckParts());
+    const file = await PptxFile.open(bytes);
+    const partPath = file.model.slides[0]!.partPath;
+    const before = (await file.partText(partPath))!;
+    const after = await (await PptxFile.open(await file.toBytes())).partText(partPath);
+    expect(after).toBe(before);
+    expect(before).not.toContain("#ffffff"); // 解析结果是只读事实，不是新写进部件的颜色
   });
 });

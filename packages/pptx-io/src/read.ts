@@ -14,6 +14,7 @@
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
 import { createGeometryInheritance, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance, type PlaceholderKey } from "./inherit.js";
 import { PRESENTATION_PART, isNotesSlideRelationship } from "./parts.js";
+import { createColorInheritance, type ColorInheritance } from "./theme.js";
 import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
 /** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
@@ -63,7 +64,7 @@ export interface RunFormat {
   sizePt?: number;
   /** 粗体；只有显式写了 `b` 才给值，没写给 undefined（同样是继承）。 */
   bold?: boolean;
-  /** 文字颜色 `#rrggbb`（§2.2）；只有 `<a:solidFill><a:srgbClr @val>` 读得出来，`schemeClr` 给 undefined。 */
+  /** 文字颜色 `#rrggbb`（§2.2）：`srgbClr` 直接要，`schemeClr` 沿母版 `p:clrMap` 与主题 `a:clrScheme` 解出来；带变换的、`phClr` 与继承来的都给 undefined。 */
   hex?: string;
 }
 
@@ -157,13 +158,14 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
   const idList = firstChild(root, "p:sldIdLst");
   const sldIds = idList ? findChildren(idList, "p:sldId") : [];
   const inheritance = createGeometryInheritance(pkg);
+  const colors = createColorInheritance(pkg);
   const slides: Slide[] = [];
   for (const [order, sldId] of sldIds.entries()) {
     const relId = sldId.attributes["r:id"];
     const rel = rels.find((entry) => entry.id === relId);
     if (!rel) continue; // 关系解析不到：跳过这张，宁可少读也不凭空造一张空幻灯片
     const partPath = resolveTarget(PRESENTATION_PART, rel.target);
-    const { shapes, readFailure } = await readSlideShapes(pkg, partPath, inheritance);
+    const { shapes, readFailure } = await readSlideShapes(pkg, partPath, inheritance, colors);
     slides.push({
       partPath,
       order,
@@ -182,6 +184,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
  * @param pkg 已加载的包。
  * @param partPath 幻灯片部件路径。
  * @param inheritance 整份 deck 共用一个的几何继承解析器（版式/母版只解析一次）。
+ * @param colors 整份 deck 共用一个的主题色解析器（母版 `clrMap` 与 theme 的 `clrScheme` 只解析一次）。
  * @returns 形状数组 + 失败码：部件缺失 `missing-part`、XML 解析失败 `invalid-xml`、没有 `cSld > spTree` `no-sp-tree`；
  *          读得动时 `readFailure` 为 undefined，**这时空数组就是"这一页真的没有形状"**。
  */
@@ -189,6 +192,7 @@ async function readSlideShapes(
   pkg: OpcPackage,
   partPath: string,
   inheritance: GeometryInheritance,
+  colors: ColorInheritance,
 ): Promise<{ shapes: SlideShape[]; readFailure?: SlideReadFailure }> {
   const xml = await readText(pkg.zip, partPath);
   if (xml === undefined) return { shapes: [], readFailure: "missing-part" };
@@ -205,7 +209,7 @@ async function readSlideShapes(
   for (const el of children(spTree)) {
     const kind = SHAPE_TAGS[el.name];
     if (!kind) continue; // nvGrpSpPr / grpSpPr 等非形状子元素跳过
-    shapes.push(await readShape(el, kind, partPath, inheritance));
+    shapes.push(await readShape(el, kind, partPath, inheritance, colors));
   }
   return { shapes };
 }
@@ -256,9 +260,16 @@ async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<S
  * @param kind 已在 `readSlideShapes` 里判定的大类。
  * @param slidePartPath 所属幻灯片的部件路径，用来找它自己的版式（只有占位符会用到）。
  * @param inheritance 几何继承解析器。
+ * @param colors 主题色解析器（run 上只写了 `a:schemeClr` 时用它解成 hex）。
  * @returns 只读快照：自己写的事实（`boxPx`/`hasOwnGeometry`）与算完继承的事实（`effectiveBoxPx`/`boxPxSources`）。
  */
-async function readShape(el: Element, kind: SlideShape["kind"], slidePartPath: string, inheritance: GeometryInheritance): Promise<SlideShape> {
+async function readShape(
+  el: Element,
+  kind: SlideShape["kind"],
+  slidePartPath: string,
+  inheritance: GeometryInheritance,
+  colors: ColorInheritance,
+): Promise<SlideShape> {
   const nvPr = firstChild(el, "p:nvSpPr") ?? firstChild(el, "p:nvPicPr") ?? firstChild(el, "p:nvGraphicFramePr") ?? firstChild(el, "p:nvGrpSpPr");
   const cNvPr = nvPr ? firstChild(nvPr, "p:cNvPr") : undefined;
   const phHost = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
@@ -284,7 +295,8 @@ async function readShape(el: Element, kind: SlideShape["kind"], slidePartPath: s
     paragraphTexts: paragraphs.map((p) => text(p)),
     paragraphRunCounts: runsByParagraph.map((runs) => runs.length),
     paragraphRunTexts: runsByParagraph.map((runs) => runs.map((run) => text(run))),
-    paragraphRunFormats: runsByParagraph.map((runs) => runs.map(readRunFormat)),
+    // run 格式可能要吃一次继承链（schemeClr 解色要读母版与主题），所以逐 run 异步算、并发读，顺序不变。
+    paragraphRunFormats: await Promise.all(runsByParagraph.map((runs) => Promise.all(runs.map((run) => readRunFormat(run, colors, slidePartPath))))),
     boxPx: completeBox(ownAxes),
     effectiveBoxPx: effective.box,
     boxPxSources: effective.sources,
@@ -292,12 +304,15 @@ async function readShape(el: Element, kind: SlideShape["kind"], slidePartPath: s
 }
 
 /**
- * 读一条 run 自己的 `<a:rPr>`：字号（半磅→pt）、粗体、`srgbClr` 颜色。
+ * 读一条 run 自己的 `<a:rPr>`：字号（半磅→pt）、粗体、颜色（`srgbClr` 直接要，`schemeClr` 沿母版与主题解成 hex）。
  *
  * @param run 段落里的 `<a:r>` 元素。
+ * @param colors 主题色解析器（只在写了 `a:schemeClr` 时才会用到）。
+ * @param slidePartPath 所属幻灯片部件路径，解色时从这里找版式→母版→theme。
  * @returns 只填了该 run **显式写了**的属性；没写的一律 undefined，表示"这个值是从版式继承的"（D3 不许烘焙）。
+ *   带 `a:lumMod`/`a:tint` 这类变换的主题色**不给 hex**（本机没有能核对 PowerPoint 画面的通道，算错的颜色比没有颜色更坏）。
  */
-function readRunFormat(run: Element): RunFormat {
+async function readRunFormat(run: Element, colors: ColorInheritance, slidePartPath: string): Promise<RunFormat> {
   const rPr = firstChild(run, "a:rPr");
   if (!rPr) return {};
   const format: RunFormat = {};
@@ -309,7 +324,16 @@ function readRunFormat(run: Element): RunFormat {
   const solidFill = firstChild(rPr, "a:solidFill");
   const srgbClr = solidFill ? firstChild(solidFill, "a:srgbClr") : undefined;
   const val = srgbClr?.attributes["val"];
-  if (val && /^[0-9a-fA-F]{6}$/.test(val)) format.hex = `#${val.toLowerCase()}`;
+  if (val && /^[0-9a-fA-F]{6}$/.test(val)) {
+    format.hex = `#${val.toLowerCase()}`;
+    return format;
+  }
+  const schemeClr = solidFill ? firstChild(solidFill, "a:schemeClr") : undefined;
+  const role = schemeClr?.attributes["val"];
+  if (schemeClr && role && children(schemeClr).length === 0) {
+    const hex = await colors.resolve(slidePartPath, role);
+    if (hex) format.hex = hex;
+  }
   return format;
 }
 

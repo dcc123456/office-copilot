@@ -203,12 +203,15 @@ function placeholderOf(shapeEl: xml.Element): PlaceholderKey | undefined {
 /**
  * 顺着一条关系找到目标部件的包内路径。
  *
+ * 几何链（这里）与主题色链（`theme.ts` 的 版式 → 母版 → theme）走的是同一件事：按关系类型 URI 结尾找目标，
+ * 所以只有这一份实现（§3.2）。
+ *
  * @param pkg 已加载的包。
  * @param sourcePart 起点部件路径。
  * @param typeSuffix 关系类型 URI 的结尾（如 `/slideLayout`）。
  * @returns 目标部件路径；没有这条关系、是外部目标或路径算不出来时 undefined。
  */
-function relatedPartPath(pkg: OpcPackage, sourcePart: string, typeSuffix: string): string | undefined {
+export function relatedPartPath(pkg: OpcPackage, sourcePart: string, typeSuffix: string): string | undefined {
   const rel = (pkg.relsBySourcePart.get(sourcePart) ?? []).find((entry) => entry.targetMode !== "External" && entry.type.endsWith(typeSuffix));
   return rel ? resolveTarget(sourcePart, rel.target) : undefined;
 }
