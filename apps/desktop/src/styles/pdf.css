@@ -125,3 +125,35 @@
   color: var(--text-muted);
   font-size: 12px;
 }
+
+/* 打开时那次结构体检的结论条（spec D8 的 `oc pdf check` 同一份判定）。
+   颜色只有两档：黄色 = 打得开但有一部分改不了，红色 = 可能打不开或丢内容，与 --warning / --danger 对齐。 */
+.pdf-view-notice {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--warning);
+  font-size: 12px;
+}
+
+.pdf-view-notice.is-broken {
+  color: var(--danger);
+}
+
+.pdf-view-notice-head {
+  font-weight: 600;
+}
+
+.pdf-view-notice-list {
+  margin: 0;
+  padding: 0 var(--space-2);
+  list-style: disc;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+}

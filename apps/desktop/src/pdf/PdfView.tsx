@@ -2,12 +2,14 @@
  * PDF 视图（`docs/office-parity-spec.md` 阶段 7）：按页列出显示文字，改其中若干条，再一批落地。
  *
  * 这里只做装配：哪些 run 能改、草稿怎么攒、错误码怎么回给人听，全在 `pdfRuns.ts`；
+ * 结构体检的那句中文在 `@office-copilot/shared`，与 `oc pdf check` 念的是同一份（§3.2）。
  * 改写与撤销都只有 `App.tsx` 那一个落地口，组件不碰内容流原文、也不碰 Node 能力（§3.3 / §5.2）。
  * 字节预算不在这里判——编码规则属于 `pdf-io`，视图再算一遍就是第二套换算（§2.1），
  * 所以改长了交给引擎回 `length-mismatch`，这里只把它翻成中文（§5.7）。
  */
 import { useCallback, useMemo, useState } from "react";
 import { isRunEditable, pdfTargetKey, targetOfRun, type PdfReadModel, type PdfTextEdit } from "@office-copilot/pdf-io/pure";
+import { describePdfAuditIssue, summarizePdfAudit, type PdfAuditIssue } from "@office-copilot/shared";
 import type { PdfEditOutcome } from "../global.js";
 import { toast } from "../components/ui/Toast.js";
 import { byteBudgetNote, pdfFailureText, pendingPdfEdits, readOnlyReason, runsOfPage, type PdfDrafts } from "./pdfRuns.js";
@@ -16,6 +18,12 @@ import "../styles/pdf.css";
 export interface PdfViewProps {
   /** 主进程读出来的 PDF 模型；落地成功后换成主进程重读磁盘那份。 */
   document: PdfReadModel;
+  /**
+   * 打开这份文件时一起跑完的结构体检结论（与 `oc pdf check` 同一份引擎判定）。
+   *
+   * 空数组就不显示；非空时原样念出来——这里不自己判坏没坏，也不重排结论顺序（§3.3）。
+   */
+  audit: PdfAuditIssue[];
   /** 这份文件的历史里还有没撤销的 pdf 批次时，撤销按钮才给点（凭据只对那份文件有效）。 */
   canRevert: boolean;
   /** 落地这一批改动：与以后 AI 提案共用同一个写盘口，回包带刷新后的模型。 */
@@ -36,7 +44,7 @@ function pageSummary(runCount: number, editableCount: number): string {
   return `显示文字 ${runCount} 段，可改 ${editableCount} 段`;
 }
 
-export function PdfView({ document, canRevert, onCommit, onRevert }: PdfViewProps): React.ReactElement {
+export function PdfView({ document, audit, canRevert, onCommit, onRevert }: PdfViewProps): React.ReactElement {
   const [pageIndex, setPageIndex] = useState(0);
   const [drafts, setDrafts] = useState<PdfDrafts>({});
   const [busy, setBusy] = useState(false);
@@ -103,6 +111,18 @@ export function PdfView({ document, canRevert, onCommit, onRevert }: PdfViewProp
         </button>
         <span className="pdf-view-count">{pageSummary(pageRuns.length, pageRuns.filter(isRunEditable).length)}</span>
       </div>
+
+      {/* 打开时那次体检的结论：有问题才占地方，一份健康的 PDF 不给用户加噪音。 */}
+      {audit.length > 0 ? (
+        <div className={`pdf-view-notice${audit.some((issue) => issue.severity === "broken") ? " is-broken" : ""}`}>
+          <div className="pdf-view-notice-head">{summarizePdfAudit(audit)}</div>
+          <ul className="pdf-view-notice-list">
+            {audit.map((issue) => (
+              <li key={`${issue.code}-${issue.pageNumber ?? "-"}-${issue.detail}`}>{describePdfAuditIssue(issue)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       <ul className="pdf-runs">
         {pageRuns.map((run) => {

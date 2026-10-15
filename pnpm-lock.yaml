@@ -90,6 +90,9 @@ importers:
       '@office-copilot/pptx-tools':
         specifier: workspace:*
         version: link:../../packages/pptx-tools
+      '@office-copilot/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@office-copilot/sheet-io':
         specifier: workspace:*
         version: link:../../packages/sheet-io

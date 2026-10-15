@@ -3,7 +3,8 @@
  *
  * 钉三件事：① 落地方式是**增量更新**——写盘的是"原文件逐字节 + 追加的 delta"，原前缀一字不动（spec D8）；
  * ② 事务语义——任一条改不动就整批不写，磁盘一个字节都不动（§2.4）；③ 撤销的凭据以现场为准，
- * 那条 run 后来又被改过时整条撤不动（§2.5）。引擎侧的解码与错误码本身在 `packages/pdf-io` 测，这里只测出入口。
+ * 那条 run 后来又被改过时整条撤不动（§2.5）；④ 打开的回包顺带把结构体检结论带出去（面板那句提示的唯一来源）。
+ * 引擎侧的解码与错误码本身在 `packages/pdf-io` 测，这里只测出入口。
  * 夹具用 `@office-copilot/pdf-io/testing`，与引擎单测共用（§3.1）。
  */
 import { describe, expect, it, vi } from "vitest";
@@ -50,6 +51,37 @@ describe("pdf 出入口的扩展名分派", () => {
     expect(PDF_EXT.test("报表.pdf")).toBe(true);
     expect(PDF_EXT.test("/tmp/a.PDF")).toBe(true);
     expect(PDF_EXT.test("/tmp/a.docx")).toBe(false);
+  });
+});
+
+describe("pdf 出入口随打开一起跑完的结构体检", () => {
+  it("健康夹具的回包带空结论（面板因此不出提示条）", async () => {
+    const file = await writePdf("体检.pdf");
+    const opened = await openPdfDoc(file);
+    expect(opened.ok && opened.audit).toEqual([]);
+  });
+
+  it("砍掉尾巴的夹具还是打得开（读模型 0 条 run），结论跟着回包出去让面板念", async () => {
+    const file = await writePdf("截断.pdf");
+    const bytes = await fs.readFile(file);
+    await fs.writeFile(file, bytes.subarray(0, Math.floor(bytes.length / 2)));
+    const opened = await openPdfDoc(file);
+    // 实测：`PDFDocument.load` 对半截文件不抛，读模型给出 2 页 0 条 run——面板挂得上，红色那条提示才有地方念。
+    const codes = opened.ok ? opened.audit.map((issue) => issue.code) : [];
+    expect(codes).toContain("eof-missing");
+    expect(codes).toContain("content-stream-undecodable");
+  });
+
+  it("连读模型都建不起来的文件也只回一句英文异常不够：失败分支同样带结论出去", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "oc-pdf-"));
+    const file = path.join(dir, "只有文件头.pdf");
+    // 实测：这样的文件 `readPdfModel` 抛 `Cannot read properties of undefined`（对用户没用），
+    // 而体检仍然答得出「文件尾没有 %%EOF」「目录查不到」。
+    await fs.writeFile(file, Buffer.from("%PDF-1.7\n", "latin1"));
+    const opened = await openPdfDoc(file);
+    expect(opened.ok).toBe(false);
+    const codes = !opened.ok && opened.audit ? opened.audit.map((issue) => issue.code) : [];
+    expect(codes).toEqual(["eof-missing", "catalog-missing"]);
   });
 });
 

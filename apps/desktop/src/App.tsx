@@ -52,6 +52,7 @@ import { EdgeResizer } from "./components/EdgeResizer.js";
 import { SheetView } from "./sheet/SheetView.js";
 import type { PptxEditRequest, PresentationModel } from "@office-copilot/pptx-io";
 import type { PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io/pure";
+import { describePdfAuditIssue, type PdfAuditIssue } from "@office-copilot/shared";
 import { SlideDeck } from "./slides/SlideDeck.js";
 import { PdfView } from "./pdf/PdfView.js";
 import { pickLatestSheetEdit, sheetEditRecordOf, undoSheetEdit } from "./sheet/sheetHistory.js";
@@ -159,6 +160,13 @@ export function App() {
    * 与幻灯片同口径：内容流原文只在主进程，这里只有页号 + 定位键 + 解出的文字（spec 阶段 7）。
    */
   const [pdfDoc, setPdfDoc] = useState<PdfReadModel | null>(null);
+  /**
+   * 打开 `.pdf` 时一起跑完的结构体检结论（与 `oc pdf check` 同一份引擎判定）。
+   *
+   * 只在 pdf 那条路上读：`pdfDoc` 为 null 时面板不渲染，这份结论也就无从显示，所以换文档不需要专门清空——
+   * 下一次打开 PDF 会整份换掉它。
+   */
+  const [pdfAudit, setPdfAudit] = useState<PdfAuditIssue[]>([]);
   /** pdf 面板「撤销上一次保存」的可用态：这份文件的历史里还有没撤销的 pdf 批次才给点（凭据在 modlog，不在内存）。 */
   const [hasPdfUndo, setHasPdfUndo] = useState(false);
   const [showFind, setShowFind] = useState(false);
@@ -448,7 +456,15 @@ export function App() {
       if (/\.pdf$/i.test(p)) {
         const opened = await window.officeCopilot.readPdf(p);
         if (!opened.ok || !opened.document) {
-          if (opened.message) toast(opened.message, "error");
+          // 读不动时那句"为什么"只剩结构体检还答得出（引擎的原始异常是一句英文 `Cannot read properties of undefined`，
+          // 对用户没用），所以只念红色那几条、且不带字节原文（toast 放不下）。文案在这里组装，不在主进程（§5.7）。
+          const diagnosis = (opened.audit ?? [])
+            .filter((issue) => issue.severity === "broken")
+            .slice(0, 2)
+            .map((issue) => describePdfAuditIssue(issue, false))
+            .join("；");
+          const text = diagnosis || opened.message;
+          if (text) toast(text, "error");
           return;
         }
         stopTracking();
@@ -456,6 +472,7 @@ export function App() {
         setPendingCharts([]);
         setDeck(null);
         setPdfDoc(opened.document);
+        setPdfAudit(opened.audit ?? []);
         setFilePath(opened.path ?? p);
         setDirty(false);
         setStarted(true);
@@ -1464,6 +1481,7 @@ export function App() {
             <PdfView
               key={filePath ?? "pdf"}
               document={pdfBridge.document}
+              audit={pdfAudit}
               canRevert={pdfBridge.canRevert}
               onCommit={pdfBridge.onCommit}
               onRevert={pdfBridge.onRevert}

@@ -14,6 +14,7 @@ import { dialog, type BrowserWindow, type IpcMain } from "electron";
 import fs from "node:fs/promises";
 import {
   applyPdfTextEdits,
+  auditPdfStructure,
   readPdfModel,
   revertPdfTextEdits,
   type PdfAppliedEdit,
@@ -21,16 +22,23 @@ import {
   type PdfReadModel,
   type PdfTextEdit,
 } from "@office-copilot/pdf-io";
+import type { PdfAuditIssue } from "@office-copilot/shared";
 import { fileExists, writeFileAtomically } from "./fsutil.js";
 
 /** 渲染层据此决定走 pdf 那条路。 */
 export const PDF_EXT = /\.pdf$/i;
 
-/** 打开一份 `.pdf` 的回包。 */
+/**
+ * 打开一份 `.pdf` 的回包。
+ *
+ * `audit` 是随打开一起跑完的结构体检结论（与 `oc pdf check` 同一份引擎判定，§3.3）：
+ * 渲染层只把结论念出来，不自己判文档坏没坏（§5.7）。**读不动时它也带着**——那种情况下它是唯一说得出
+ * "为什么打不开"的东西（实测：截断到一半的文件 `readPdfModel` 直接抛，只有体检还能报出文件尾缺 `%%EOF`）。
+ */
 export type PdfOpenResult =
-  | { ok: true; path: string; document: PdfReadModel }
+  | { ok: true; path: string; document: PdfReadModel; audit: PdfAuditIssue[] }
   | { ok: false; canceled: true }
-  | { ok: false; message: string };
+  | { ok: false; message: string; audit?: PdfAuditIssue[] };
 
 /** 一次改写或撤销的回包：引擎的拒绝是**结构化错误码**，中文文案由渲染层组装（§5.7）。 */
 export type PdfEditResult =
@@ -93,15 +101,26 @@ export function registerPdfHandlers(ipc: IpcMain, getWindow: () => BrowserWindow
 /**
  * 打开一份 `.pdf` 并压成跨界载荷。
  *
+ * 读模型与体检各自解析一次：读模型要的是"有哪些字"，体检要的是"这页会不会是空白"，
+ * 引擎那两条判定已经写好且互不依赖（`auditPdfStructure` 自己不抛异常），所以这里串行跑完一起交出去，
+ * 免得渲染层再发第二次 IPC 去问。顺序也是定的：**先跑体检**，因为读模型对坏文件会抛，
+ * 而抛出去的时候那句"为什么打不开"只剩体检还答得出。
+ *
  * @param filePath 磁盘路径。
- * @returns ok:true + 读模型（页数与全部文字 run）；不是 PDF 或读不动时 ok:false + 可读消息。
+ * @returns ok:true + 读模型（页数与全部文字 run）+ 体检结论（空数组 = 结构没问题）；不是 PDF 或读不动时 ok:false + 可读消息（尽量带上同一份结论）。
  */
 export async function openPdfDoc(filePath: string): Promise<PdfOpenResult> {
+  let bytes: Uint8Array;
   try {
-    const bytes = await fs.readFile(filePath);
-    return { ok: true, path: filePath, document: await readPdfModel(bytes) };
+    bytes = new Uint8Array(await fs.readFile(filePath));
   } catch (err) {
     return { ok: false, message: `打开失败：${err instanceof Error ? err.message : String(err)}` };
+  }
+  const audit = await auditPdfStructure(bytes);
+  try {
+    return { ok: true, path: filePath, document: await readPdfModel(bytes), audit };
+  } catch (err) {
+    return { ok: false, message: `打开失败：${err instanceof Error ? err.message : String(err)}`, audit };
   }
 }
 

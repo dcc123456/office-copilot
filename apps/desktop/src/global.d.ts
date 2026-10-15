@@ -1,6 +1,7 @@
 import type { ResolvedChart, SheetPayload, WorkbookPayload } from "@office-copilot/sheet-io";
 import type { PptxEditPayload, PptxRevertPayload, PresentationModel, SlideEditOp } from "@office-copilot/pptx-io";
 import type { PdfAppliedEdit, PdfEditFailure, PdfReadModel, PdfTextEdit } from "@office-copilot/pdf-io/pure";
+import type { PdfAuditIssue } from "@office-copilot/shared";
 
 /** 打开 `.xlsx` 的结果：跨界只有结构化格子，工作表 XML 原文留在主进程。 */
 export interface SheetOpenResult {
@@ -138,6 +139,9 @@ export interface PptxEditOutcome {
 
 /**
  * 打开 `.pdf` 的结果：跨界只有页号 + 定位键 + 解出的文字，内容流原文留在主进程。
+ *
+ * `audit` 是随打开一起跑完的结构体检结论（与 `oc pdf check` 同一份引擎判定），空数组表示没问题；
+ * 这里只带结论，句子里的中文由 `@office-copilot/shared` 那份文案组装（§5.7）。
  */
 export interface PdfOpenOutcome {
   ok: boolean;
@@ -145,6 +149,7 @@ export interface PdfOpenOutcome {
   message?: string;
   path?: string;
   document?: PdfReadModel;
+  audit?: PdfAuditIssue[];
 }
 
 /**
