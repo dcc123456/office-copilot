@@ -1,8 +1,9 @@
 /**
  * `.pdf` 的结构体检（spec D8 的 `oc pdf check`）：这份文件**办公软件会不会判损坏**、以及**我们这一档能不能改**。
  *
- * 与 `auditPptxPackage` 同一条纪律：判定住在引擎里，只出问题码 + 数字，中文文案由装配层组（`AGENTS.md` §5.7），
- * CLI 与桌面 app 用同一份（§3.3）。这里的每条硬约束都对着 ISO 32000-1 的**显式**要求，不掺风格偏好：
+ * 与 `auditPptxPackage` 同一条纪律：判定住在引擎里，只出问题码 + 数字，中文文案在装配层（`AGENTS.md` §5.7），
+ * CLI 与桌面 app 共用 `@office-copilot/shared` 的 `describePdfAuditIssue` 那一份（§3.2，同一逻辑不许各长一套）。
+ * 这里的每条硬约束都对着 ISO 32000-1 的**显式**要求，不掺风格偏好：
  * - §7.5.2：文件第一行必须是 `%PDF-1.x`，每条交叉引用段以 `%%EOF` 结束——缺了就是截断或不是 PDF；
  * - §7.7.3.4：`/Pages` 的 `/Count` 必须等于 `/Kids` 的实际长度——不等时阅读器按自己那套猜，页数会错；
  * - §7.3.5：流字典声明 `/Filter` 却解不出字节，这一页的内容显示不出来。
@@ -11,27 +12,14 @@
  * 本机没有能产出这两类文件的工具链，写一条测不到的分支不如不写。
  */
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFNumber } from "@cantoo/pdf-lib";
+import type { PdfAuditIssue, PdfAuditSeverity } from "@office-copilot/shared";
 import { targetOfRun, type PdfTextRun } from "./pdf-model.js";
 import { readPdfModel } from "./pdf-file.js";
 import { contentKeys, decodeStream, filtersOf, streamOf } from "./streams.js";
 
-/** 体检结论的严重程度：`broken` = 办公软件可能打不开或丢内容；`limited` = 打得开，但我们这一档改不动。 */
-export type PdfAuditSeverity = "broken" | "limited";
-
-/** 问题码。文案不在引擎里（§5.7），CLI 与桌面各自翻一句。 */
-export type PdfAuditCode = "parse-failed" | "header-missing" | "eof-missing" | "catalog-missing" | "page-count-mismatch" | "content-stream-undecodable" | "text-not-editable";
-
-/** 一条体检结论。 */
-export interface PdfAuditIssue {
-  /** 问题码。 */
-  code: PdfAuditCode;
-  /** 严重程度。 */
-  severity: PdfAuditSeverity;
-  /** 出问题的页号（**1 基**，与模型坐标同一口径）；整份文件级别的问题是 null。 */
-  pageNumber: number | null;
-  /** 引擎看到的数字或原文片段，装配层直接念给人听。 */
-  detail: string;
-}
+// 三个类型住在 `@office-copilot/shared`（装配层与引擎都要用，§5.1 允许 pdf-io 依赖 shared），
+// 这里按公开面原样再导出一次，`oc pdf check` 与桌面的 import 路径不用改。
+export type { PdfAuditCode, PdfAuditIssue, PdfAuditSeverity } from "@office-copilot/shared";
 
 /** 头尾探测的窗口：真文件的 `%PDF-` 一定在第 1 行，`%%EOF` 在最后几字节，1 KB 足够覆盖带 BOM 与注释行的写法。 */
 const EDGE_WINDOW_BYTES = 1024;
