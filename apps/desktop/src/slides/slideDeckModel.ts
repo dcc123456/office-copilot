@@ -4,7 +4,7 @@
  * 这里决定**什么会被写进文件**，所以单独成模块、单独测（与 `sheet/sheetGridModel.ts` 同一个分工）：
  * 视图只负责显示，落地范围由这两个函数说一不二。
  */
-import { notesFlattenNote, type BoxAxisSource, type PptxEditRequest, type PresentationModel, type RunFontFormat, type RunFormat, type RunTarget, type ShapeBoxPx, type ShapeGeometryPatch, type SizePtSource, type Slide, type SlideLayerDirection, type SlideNotes, type SlideShape } from "@office-copilot/pptx-io";
+import { notesFlattenNote, type BoxAxisSource, type PptxEditRequest, type PresentationModel, type RunFontFormat, type RunFormat, type RunTarget, type ShapeBoxPx, type ShapeGeometryPatch, type SizePtSource, type Slide, type SlideLayerDirection, type SlideShape } from "@office-copilot/pptx-io";
 
 /**
  * 形状几何的四个字段，按视图显示的顺序（左、上、宽、高）。
@@ -323,30 +323,40 @@ function changedBoxFields(box: ShapeGeometryPatch, current: ShapeBoxPx): ShapeGe
 /**
  * 那一页的备注能不能存，不能存时说为什么。
  *
- * 备注住在**另一个部件**里（`ppt/notesSlides/notesSlideN.xml`），落地是整篇换掉那一格，所以这里按三段判：
- * ① 这一页没有备注部件——新建 `notesSlide` 那一档还没做（要 §2.10 三处登记），不许凭空造一份；
- * ② 输入框与现场逐字一样——没有要保存的东西，按钮就该是灰的；
- * ③ 现有备注带多截格式——整篇覆盖会拍平那些格式（§2.3），这条判定与引擎共用 `notesFlattenNote` 那一份。
+ * 备注住在**另一个部件**里（`ppt/notesSlides/notesSlideN.xml`），两档各有判据：
+ * ① 这一页**有**备注部件 → 整篇换掉那一格：输入框与现场逐字一样就没要保存的东西；现有备注带多截格式时
+ *   整篇覆盖会拍平那些格式（§2.3），这条判定与引擎共用 `notesFlattenNote` 那一份；
+ * ② 这一页**没有**备注部件 → 走新建那一档：这份文件没有备注母版时建不了（新建的备注页没有可继承的版式，
+ *   引擎那条会整条拒绝，§2.7），一个字都没写也不建（那等于造一份空备注页）。
  *
  * @param slide 该页的读模型快照。
  * @param draftText 输入框里的整段备注，一行一段（`\n` 分段，与 `paragraphTexts` 一一对应）。
+ * @param hasNotesMaster 这份文件有没有备注母版（读模型 `PresentationModel.hasNotesMaster` 给的那一份）。
  * @returns 一句中文理由；能存时返回 null。
  */
-export function notesSaveBlock(slide: Slide, draftText: string): string | null {
-  if (!slide.notes) return "这一页没有备注页（新建备注页这一档还没做，只能改已有的备注）。";
+export function notesSaveBlock(slide: Slide, draftText: string, hasNotesMaster: boolean): string | null {
+  if (!slide.notes) {
+    if (!hasNotesMaster) return "这份文稿没有备注母版（notesMaster），新建的备注页没有可继承的版式，这一页建不了备注页。";
+    return draftText === "" ? "这一页还没有备注，先写一句再建。" : null;
+  }
   if (draftText === slide.notes.paragraphTexts.join("\n")) return "备注没有改动。";
   return notesFlattenNote(slide.notes.paragraphRunCounts, slide.notes.styledRunCount);
 }
 
 /**
- * 把输入框那句备注翻成主进程认的那条改动。
+ * 把输入框那句备注翻成主进程认的那条改动：那一格存在就是 `set_notes`，不存在就是 `create_notes`。
  *
- * 只在 {@link notesSaveBlock} 返回 null 时调用：备注部件路径直接用地读模型给的那份，视图不算路径也不换单位（§2.1）。
+ * 只在 {@link notesSaveBlock} 返回 null 时调用：两档的坐标都直接用地读模型给的那两份（备注部件路径 /
+ * 幻灯片部件路径），视图不算路径也不换单位（§2.1）。**这一处是两档唯一的分岔点**（§3.2），
+ * 面板与别的装配层要新建备注页都调这一份，别在视图里再判一次 `slide.notes`。
  *
- * @param notes 该页的备注快照（`notesSaveBlock` 已经确认这一页有备注部件）。
+ * @param slide 该页的读模型快照。
  * @param draftText 输入框里的整段备注，一行一段；空行就是空串那一段。
- * @returns 一条 `set_notes` 请求，确认后原样送 `ppt:edit` 即可落地并拿到逆操作。
+ * @returns 一条改动请求，确认后原样送 `ppt:edit` 即可落地并拿到逆操作（新建那一档的逆操作是删部件）。
  */
-export function notesRequestOf(notes: SlideNotes, draftText: string): PptxEditRequest {
-  return { kind: "set_notes", target: { notesPartPath: notes.partPath }, paragraphTexts: draftText.split("\n") };
+export function notesRequestOf(slide: Slide, draftText: string): PptxEditRequest {
+  const paragraphTexts = draftText.split("\n");
+  return slide.notes
+    ? { kind: "set_notes", target: { notesPartPath: slide.notes.partPath }, paragraphTexts }
+    : { kind: "create_notes", target: { partPath: slide.partPath }, paragraphTexts };
 }

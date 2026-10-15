@@ -37,10 +37,12 @@ const CONTEXT_MAX_SHAPES_PER_SLIDE = 20;
 
 const SLIDE_SYSTEM = `你是演示文稿（.pptx）代理，看得见的是这份文稿的结构画像，不是整份原文。
 - 动手前先调 ppt_describe 拿页号与 shapeId；要改某段文字再调 ppt_read_slide_text 确认 paraIndex / runIndex，不许凭印象数，也不许自己编形状号。
-- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_table_cell_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape / set_notes 九种，
-  前四条指到"某一页某个形状的某段某 run"（表格那条还要给行与列），中间两条指到形状（叠放方向是 up/down/top/bottom），后三条是结构或整篇改动：
+- 要改只能调 ppt_submit_proposal，条目只有 set_run_text / set_table_cell_text / set_run_font / set_run_color / set_shape_geometry / move_shape_layer / add_text_box / remove_shape / set_notes / create_notes 十种，
+  前四条指到"某一页某个形状的某段某 run"（表格那条还要给行与列），中间两条指到形状（叠放方向是 up/down/top/bottom），后四条是结构或整篇改动：
   add_text_box 只给页号与四个几何值加文字（新形状号由引擎落地时分配，同一份提案里引用不到它），remove_shape 给页号与形状号，
-  set_notes 给页号与逐段文字，把那一页**已存在**的演讲者备注整篇换掉（不是追加；画像里 notesPartPath 为 null 就是这页没有备注页，提了也落不了）。
+  set_notes 给页号与逐段文字，把那一页**已存在**的演讲者备注整篇换掉（不是追加）；
+  create_notes 同样给页号与逐段文字，用在画像里 notesPartPath 为 null 的那一页（**给它新建一份备注页**）——两档各管一半，别给已有备注页的页提 create，也别给没有备注页的页提 set。
+  画像顶层的 hasNotesMaster=false 时这两档都提不了（这份文件没有备注母版，新建的备注页没有可继承的版式）。
   同一批里删掉的形状就别再改它的文字或字体（落地按顺序执行，那条必然失败并整批不写）。改版式与母版这里做不了，遇到就直说做不了。
 - 表格住在图形框（kind=graphicFrame）里：那个形状自己没有文字体，ppt_read_slide_text 会改成逐格列出（row / col 都是 0 基，shapeId 用图形框那个）。
   改表格里的字就提 set_table_cell_text；改那一格某一截的字号/粗体/颜色就提 set_run_font / set_run_color 并**把 row 与 col 一起带上**（只给一个会被拒）；合并区里被并进来的那一格（列表里标了续格）不画自己的字，提了会被拒，要改就改合并起点那一格。
@@ -103,7 +105,8 @@ export function slideContextOf(deck: PresentationModel): string {
  * 把提案里的条目翻成引擎认的跨界改动（部件路径 + 形状号 + 段/run 序号）。
  *
  * 页号是模型视角的 1 基，部件路径由现场模型算——这是唯一一处做这个映射（§3.3）。
- * 翻不动的（页号越界、该页没有这个形状、几何一条属性都没给、同一批里那个形状已被删掉、那一页根本没有备注页、
+ * 翻不动的（页号越界、该页没有这个形状、几何一条属性都没给、同一批里那个形状已被删掉、备注那一档提错了对象
+ * （有备注页却提 create / 没有备注页却提 set）、这份文件没有备注母版、同一批里那一页已建过备注页、
  * 备注带多种格式、图形框里不是表、表格的行列/段/run 越界或落在合并续格）逐条记进 `notes`，
  * 不许交出一批主进程必然拒绝、整批不落地的改动（§2.4 的事务语义）。
  *
@@ -116,6 +119,8 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
   const notes: string[] = [];
   // 同一批里已经删掉的形状（`部件路径#形状号`）：按顺序落地时它们后面那条必然定位失败，整批就不写了（§2.4）。
   const removedInBatch = new Set<string>();
+  // 同一批里已经给它建过备注页的那几页（按幻灯片部件路径记）：第二条会在引擎那儿撞上"已经有备注页了"，整批就不写了。
+  const createdNotesInBatch = new Set<string>();
   for (const edit of edits) {
     const slide = deck.slides.find((entry) => entry.order + 1 === edit.slideNumber);
     if (!slide) {
@@ -145,6 +150,27 @@ export function slideRequestsOfProposal(deck: PresentationModel, edits: PptxEdit
         continue;
       }
       requests.push({ kind: "set_notes", target: { notesPartPath: slide.notes.partPath }, paragraphTexts: edit.paragraphTexts });
+      continue;
+    }
+    if (edit.type === "create_notes") {
+      // 新建与改已有各管一半，所以这里先判三刀，理由与引擎那三条一一对上（§2.4：交出一条引擎必拒的就是整批不落地）：
+      // ① 这一页已经有备注部件——那条路是 set_notes 的，提 create 会造出第二份备注页；
+      // ② 这份文件没有备注母版——新建的备注页没有可继承的版式，绝不自己造一份（§2.7）；
+      // ③ 同一批里这一页已经建过一次——落地按顺序执行，第二条在引擎那儿必然看到"已经有备注页了"。
+      if (slide.notes) {
+        notes.push(`第 ${edit.slideNumber} 页已经有备注页了，那一份要改用 set_notes，这条新建跳过。`);
+        continue;
+      }
+      if (!deck.hasNotesMaster) {
+        notes.push(`这份文稿没有备注母版（notesMaster），新建的备注页没有可继承的版式，第 ${edit.slideNumber} 页这条跳过。`);
+        continue;
+      }
+      if (createdNotesInBatch.has(slide.partPath)) {
+        notes.push(`第 ${edit.slideNumber} 页的备注页在同一批里已经建过一次，这条是多余的，跳过。`);
+        continue;
+      }
+      createdNotesInBatch.add(slide.partPath);
+      requests.push({ kind: "create_notes", target: { partPath: slide.partPath }, paragraphTexts: edit.paragraphTexts });
       continue;
     }
     const shape = slide.shapes.find((entry) => entry.shapeId === edit.shapeId);

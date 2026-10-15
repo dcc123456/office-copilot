@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
 import { newlyIntroducedIssues } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
-import { addTextBox, applySlideEdit, createSlideNotes, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes, setTableCellRunText } from "./index.js";
+import { addTextBox, applySlideEdit, createSlideNotes, describeDeck, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes, setTableCellRunText } from "./index.js";
 import { auditPptxPackage } from "./audit.js";
 import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, minimalDeckParts, notesMasterDeckParts, tableDeckParts, textStyleDeckParts } from "./test-deck.js";
 
@@ -785,6 +785,16 @@ describe("pptx-io：新建备注页那一档（四处一起登记，撤销是删
       .filter((name) => !zip.files[name]!.dir)
       .sort();
   }
+
+  it("读模型与画像都带 hasNotesMaster：装配层要在提交之前判出来，而不是靠引擎整批不写（§2.4）", async () => {
+    const withMaster = await readPresentation(await buildDeckBytes(notesMasterDeckParts()));
+    expect(withMaster.model.hasNotesMaster).toBe(true);
+    expect(describeDeck(withMaster.model, { maxSlides: 20, maxShapesPerSlide: 20 }).hasNotesMaster).toBe(true);
+    // 最小夹具没有 notesMaster 关系：这一档建不了，装配层据此先把入口禁掉并说清理由
+    const withoutMaster = await readPresentation(await buildDeckBytes(minimalDeckParts()));
+    expect(withoutMaster.model.hasNotesMaster).toBe(false);
+    expect(describeDeck(withoutMaster.model, { maxSlides: 20, maxShapesPerSlide: 20 }).hasNotesMaster).toBe(false);
+  });
 
   it("一次交出四条 op：两件新部件的前像是 null，幻灯片侧的关系表与内容类型是原像加追加", async () => {
     const bytes = await deckWithNotesMaster();

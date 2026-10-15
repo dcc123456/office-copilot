@@ -37,7 +37,7 @@ describe("pptx-tools：入参解析永不抛异常（验收 B9）", () => {
   });
 });
 
-describe("pptx-tools：提案的九类改动", () => {
+describe("pptx-tools：提案的十类改动", () => {
   const one = (edit: unknown) => parseToolArguments("ppt_submit_proposal", JSON.stringify({ summary: "改一处", edits: [edit] }));
 
   it("set_run_text 合法入参通过", () => {
@@ -107,6 +107,17 @@ describe("pptx-tools：提案的九类改动", () => {
     expect(one({ type: "set_notes", slideNumber: 1, paragraphTexts: ["x".repeat(2001)] }).ok).toBe(false);
   });
 
+  it('create_notes 与 set_notes 是两条 kind、同一套边界：页号 1 基，段落 1~200 条，单段 ≤2000 字', () => {
+    expect(one({ type: "create_notes", slideNumber: 2, paragraphTexts: ["甲", ""] }).ok).toBe(true);
+    expect(one({ type: "create_notes", slideNumber: 0, paragraphTexts: ["页号是 1 基"] }).ok).toBe(false);
+    expect(one({ type: "create_notes", slideNumber: 2 }).ok).toBe(false);
+    expect(one({ type: "create_notes", slideNumber: 2, paragraphTexts: [] }).ok).toBe(false);
+    expect(one({ type: "create_notes", slideNumber: 2, paragraphTexts: ["x".repeat(2001)] }).ok).toBe(false);
+    expect(one({ type: "create_notes", slideNumber: 2, paragraphTexts: Array.from({ length: 201 }, () => "一段") }).ok).toBe(false);
+    // strict：新建那一档不吃备注部件路径（那是引擎落地时分配的，模型不许自己编）
+    expect(one({ type: "create_notes", slideNumber: 2, paragraphTexts: ["甲"], notesPartPath: "ppt/notesSlides/notesSlide9.xml" }).ok).toBe(false);
+  });
+
   it("set_table_cell_text 要页号/图形框号/行列/段/run/文字：合法通过，缺任一项或负数被拒", () => {
     const cell = { type: "set_table_cell_text", slideNumber: 1, shapeId: 5, row: 0, col: 1, paraIndex: 0, runIndex: 1, text: "城市" };
     expect(one(cell).ok).toBe(true);
@@ -171,6 +182,7 @@ describe("pptx-tools：导出一致性", () => {
     expect(branches.map((branch) => branch.properties.type.const).sort()).toEqual(zodTypes);
     expect(zodTypes).toEqual([
       "add_text_box",
+      "create_notes",
       "move_shape_layer",
       "remove_shape",
       "set_notes",
@@ -180,6 +192,24 @@ describe("pptx-tools：导出一致性", () => {
       "set_shape_geometry",
       "set_table_cell_text",
     ]);
+  });
+
+  it("两档备注在给模型的 JSON 里长得一样（只差 type 那个 const）：段落边界不许一档宽一档窄", () => {
+    const submit = PPTX_TOOLS.find((tool) => tool.function.name === "ppt_submit_proposal");
+    if (!submit) throw new Error("没有 ppt_submit_proposal 这条工具定义");
+    const branches = (
+      submit.function.parameters.properties as {
+        edits: { items: { oneOf: { properties: { type: { const: string } } & Record<string, unknown>; required: string[] }[] } };
+      }
+    ).edits.items.oneOf;
+    const byType = new Map(branches.map((branch) => [branch.properties.type.const, branch]));
+    const created = byType.get("create_notes");
+    const existing = byType.get("set_notes");
+    if (!created || !existing) throw new Error("备注那两档的 JSON 分支少了一条");
+    expect(created.required).toEqual(["type", "slideNumber", "paragraphTexts"]);
+    expect(Object.keys(created.properties)).toEqual(Object.keys(existing.properties));
+    expect(created.properties.slideNumber).toEqual(existing.properties.slideNumber);
+    expect(created.properties.paragraphTexts).toEqual(existing.properties.paragraphTexts);
   });
 
   it("表格行列在给模型的 JSON 里：字体/颜色那条是可选、表格文字那条是必填（只加 zod 忘了声明，模型就看不见这两个下标）", () => {

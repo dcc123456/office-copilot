@@ -109,7 +109,7 @@ function tableShapeOf(shapeId: number, rows: CellSpec[][]): SlideShape {
  * @returns 演示文稿模型（页面尺寸与几何无关，给个真实值即可）。
  */
 function deckOf(shapes: SlideShape[]): PresentationModel {
-  return { slideSizeEmu: { cx: 9144000, cy: 6858000 }, slides: [{ partPath: PART, order: 0, slideId: 256, shapes }] };
+  return { slideSizeEmu: { cx: 9144000, cy: 6858000 }, hasNotesMaster: true, slides: [{ partPath: PART, order: 0, slideId: 256, shapes }] };
 }
 
 describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
@@ -228,6 +228,7 @@ describe("pendingEdits：视图只把能安全落地的字段交出去", () => {
     const secondPageShape = shapeOf(2, [["第二页标题", 1]]);
     const deck = {
       slideSizeEmu: { cx: 9144000, cy: 6858000 },
+      hasNotesMaster: true,
       slides: [
         {
           partPath: PART,
@@ -433,27 +434,42 @@ describe("notesSaveBlock / notesRequestOf：备注那一格的落地范围", () 
     styledRunCount: 0,
   };
 
-  it("这一页没有备注部件时不给存，并说清新建那一档还没做", () => {
-    expect(notesSaveBlock(slideWithNotes(null), "随便写点")).toContain("没有备注页");
+  it("这一页没有备注部件但有备注母版：写了字就给存，一个字没写不建空备注页", () => {
+    const slide = slideWithNotes(null);
+    expect(notesSaveBlock(slide, "", true)).toContain("先写一句再建");
+    expect(notesSaveBlock(slide, "第一句备注", true)).toBeNull();
+  });
+
+  it("这一页没有备注母版就不给建：新建的备注页没有可继承的版式，不许自己造一份（§2.7）", () => {
+    expect(notesSaveBlock(slideWithNotes(null), "第一句备注", false)).toContain("没有备注母版");
   });
 
   it("输入框与现场逐字一样时不给存（磁盘上就是一行一段，join 与 split 是同一份对应关系）", () => {
     const slide = slideWithNotes(plain);
-    expect(notesSaveBlock(slide, plain.paragraphTexts.join("\n"))).toBe("备注没有改动。");
+    expect(notesSaveBlock(slide, plain.paragraphTexts.join("\n"), true)).toBe("备注没有改动。");
   });
 
   it("现有备注带多截格式时不给存，理由是会被拍平（§2.3，判定与引擎共用那一份）", () => {
     const styled = slideWithNotes({ ...plain, paragraphRunCounts: [1, 2], styledRunCount: 1 });
-    expect(notesSaveBlock(styled, "换成一句")).toContain("压平");
+    expect(notesSaveBlock(styled, "换成一句", true)).toContain("压平");
   });
 
   it("同一种格式的备注改过就给存：坐标是现场那份备注部件路径，一行一段", () => {
     const slide = slideWithNotes(plain);
-    expect(notesSaveBlock(slide, "新备注一句\n\n新备注三句")).toBeNull();
-    expect(notesRequestOf(plain, "新备注一句\n\n新备注三句")).toEqual({
+    expect(notesSaveBlock(slide, "新备注一句\n\n新备注三句", true)).toBeNull();
+    expect(notesRequestOf(slide, "新备注一句\n\n新备注三句")).toEqual({
       kind: "set_notes",
       target: { notesPartPath: "ppt/notesSlides/notesSlide1.xml" },
       paragraphTexts: ["新备注一句", "", "新备注三句"],
+    });
+  });
+
+  it("没有备注部件那一页的存法翻成 create_notes：坐标是**幻灯片**部件路径，不是备注路径（引擎要按它挂新部件）", () => {
+    const slide = slideWithNotes(null);
+    expect(notesRequestOf(slide, "新建的备注")).toEqual({
+      kind: "create_notes",
+      target: { partPath: PART },
+      paragraphTexts: ["新建的备注"],
     });
   });
 });

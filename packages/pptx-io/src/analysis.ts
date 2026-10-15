@@ -139,6 +139,13 @@ export interface DeckOutline {
   slides: SlideOutlineEntry[];
   /** 页清单是否被截断。 */
   slidesTruncated: boolean;
+  /**
+   * 这份文件里有没有备注母版——决定"给没有备注页的那一页新建备注页"（`create_notes`）这一档能不能做。
+   *
+   * 放在整份而不是每一页上：notesMaster 是文档级的一件东西，一页一页报会把几百字节重复送进上下文。
+   * 模型看得见这一条才不会提一条必然整批不落地的 `create_notes`（§2.4）。
+   */
+  hasNotesMaster: boolean;
 }
 
 /** `describeDeck` 的入参上限。 */
@@ -196,6 +203,7 @@ export function describeDeck(model: PresentationModel, options: DescribeOptions)
     slideSizePx: { widthPx: emuToPx(model.slideSizeEmu.cx), heightPx: emuToPx(model.slideSizeEmu.cy) },
     slides,
     slidesTruncated: model.slides.length > slides.length,
+    hasNotesMaster: model.hasNotesMaster,
   };
 }
 

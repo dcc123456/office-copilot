@@ -13,7 +13,7 @@
  */
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
 import { createGeometryInheritance, placeholderKeyOf, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance } from "./inherit.js";
-import { PRESENTATION_PART, isNotesSlideRelationship } from "./parts.js";
+import { PRESENTATION_PART, isNotesMasterRelationship, isNotesSlideRelationship } from "./parts.js";
 import { createColorInheritance, type ColorInheritance } from "./theme.js";
 import { createTextStyleInheritance, readShapeTextStyles, type InheritedSizePt, type SizePtSource, type TextStyleInheritance } from "./text-styles.js";
 import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
@@ -185,6 +185,13 @@ export interface PresentationModel {
   slideSizeEmu: { cx: number; cy: number };
   /** 按放映顺序排列的幻灯片。 */
   slides: Slide[];
+  /**
+   * 这份文件里有没有备注母版（`ppt/notesSlides/**` 之外的另一件事：`presentation.xml` 的关系里有没有 notesMaster）。
+   *
+   * 只给一个布尔，不给路径：新建的备注页要靠它才能继承版式，所以装配层（面板与 AI）必须能**在提交之前**判出来
+   * 这一档能不能建——引擎那条会整批拒绝（§2.4），拿它当唯一防线就等于让用户点一次确认才发现做不了。
+   */
+  hasNotesMaster: boolean;
 }
 
 const SHAPE_TAGS: Record<string, SlideShape["kind"]> = {
@@ -222,6 +229,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
     cy: Number(slideSize?.attributes["cy"] ?? 0),
   };
   const rels = pkg.relsBySourcePart.get(PRESENTATION_PART) ?? [];
+  const hasNotesMaster = rels.some((rel) => isNotesMasterRelationship(rel.type));
   const idList = firstChild(root, "p:sldIdLst");
   const sldIds = idList ? findChildren(idList, "p:sldId") : [];
   const inheritance = createGeometryInheritance(pkg);
@@ -243,7 +251,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
       notes: await readSlideNotes(pkg, partPath),
     });
   }
-  return { slideSizeEmu, slides };
+  return { slideSizeEmu, slides, hasNotesMaster };
 }
 
 /**

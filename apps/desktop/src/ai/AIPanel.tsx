@@ -274,11 +274,11 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
       const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
       return `第 ${edit.slideNumber} 页 加文本框「${value}」（${Math.round(edit.leftPx)},${Math.round(edit.topPx)}px 起 ${Math.round(edit.widthPx)}×${Math.round(edit.heightPx)}px）`;
     }
-    // 备注那条没有形状号：它换掉的是那一页的备注部件，卡片上给段数与逐段的字。
-    if (edit.type === "set_notes") {
+    // 备注那两档都没有形状号：一条换掉已有的整篇、一条给没有的那一页新建，卡片上都是段数与逐段的字。
+    if (edit.type === "set_notes" || edit.type === "create_notes") {
       const preview = edit.paragraphTexts.map((line) => line || "（空行）").join(" / ");
       const shown = preview.length > 40 ? `${preview.slice(0, 40)}…` : preview;
-      return `第 ${edit.slideNumber} 页 备注整篇换成 ${edit.paragraphTexts.length} 段「${shown}」`;
+      return `第 ${edit.slideNumber} 页 ${edit.type === "set_notes" ? "备注整篇换成" : "新建备注页，共"} ${edit.paragraphTexts.length} 段「${shown}」`;
     }
     // 表格那一格比别的 run 级改动多两个坐标（行、列，0 基）：用户对着面板上那张表数格子就能核对。
     if (edit.type === "set_table_cell_text") {

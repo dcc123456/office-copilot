@@ -182,6 +182,21 @@ const RemoveShapeEdit = z
   .strict();
 
 /**
+ * 备注的逐段文字：`set_notes` 与 `create_notes` 共用同一份界限（一段一个字符串，1~200 段，每段 ≤2000 字）。
+ *
+ * 抽出来是因为这两档**语义只差"那一格存不存在"**，段数与单段长度的界限必须一致，否则模型按一档的界限
+ * 提交、换到另一档就被拒（§3.2 同一逻辑出现第二次就抽）。
+ */
+const NoteParagraphs = z
+  .array(z.string().max(2000))
+  .min(1)
+  .max(200)
+  .describe(
+    "备注的逐段文字，一段一个字符串（空串表示那一行没字），1~200 段。这是**整篇替换**不是追加；" +
+      "空行会落成一份真正的空段落，不会被吞掉。",
+  );
+
+/**
  * 一条改某页演讲者备注的请求：**整篇换掉**这一页已经存在的备注，不是追加。
  *
  * 模型只交页号，`notesSlideN.xml` 那个路径由装配层按现场模型算（引擎坐标不上送，与 `add_text_box` 同一条理由）。
@@ -190,18 +205,30 @@ const SetNotesEdit = z
   .object({
     type: z.literal("set_notes"),
     slideNumber: SlideNumber,
-    paragraphTexts: z
-      .array(z.string().max(2000))
-      .min(1)
-      .max(200)
-      .describe(
-        "备注的逐段文字，一段一个字符串（空串表示那一行没字），1~200 段。这是**整篇替换**不是追加；" +
-          "这一页本来没有备注页时这条会被拒（新建备注部件现在做不了），画像里 notesPartPath 为 null 的页就别提。",
-      ),
+    paragraphTexts: NoteParagraphs.describe(
+      "上面那两条只对**本来就有备注页**的页有效：画像里 notesPartPath 不是 null 的页提这条，带多种格式时会被拒，因为整篇覆盖会拍平那些格式。",
+    ),
   })
   .strict();
 
-/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状与整篇换备注为止。 */
+/**
+ * 一条给没有备注页的那一页**新建**备注页的请求（§2.10 那四处登记由引擎一次交出）。
+ *
+ * 与 `set_notes` 的分工只有一句：这一页本来没有备注部件才提这条，有就提那条。
+ * 这份文件没有备注母版（画像里 hasNotesMaster=false）时两条都不成立——新建的备注页没有可继承的版式。
+ */
+const CreateNotesEdit = z
+  .object({
+    type: z.literal("create_notes"),
+    slideNumber: SlideNumber,
+    paragraphTexts: NoteParagraphs.describe(
+      "这一档只对画像里 notesPartPath 为 null 的页有效（那一页已经有备注页就提 set_notes，别新建第二份）；" +
+        "画像里 hasNotesMaster 为 false 时这条提不了——新建的备注页没有可继承的版式。",
+    ),
+  })
+  .strict();
+
+/** 提案里的一条改动。只给有安全逆操作的这几类（AGENTS.md §2.5），结构类到增删形状与备注的两档为止。 */
 export const PptxEdit = z.discriminatedUnion("type", [
   SetRunTextEdit,
   SetTableCellTextEdit,
@@ -212,12 +239,13 @@ export const PptxEdit = z.discriminatedUnion("type", [
   AddTextBoxEdit,
   RemoveShapeEdit,
   SetNotesEdit,
+  CreateNotesEdit,
 ]);
 
 /**
  * `ppt_submit_proposal` 的入参。
  *
- * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这九项。
+ * **不在这里**的是改版式/母版与删整页（还没建成带逆操作的 op），模型只能提这十项。
  * "字体/几何至少给一项"这种跨字段约束不能放进 `discriminatedUnion`（会把成员包成 ZodEffects 而非法），所以在外层校验。
  */
 export const SubmitProposalArgs = z
@@ -345,7 +373,7 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
       name: "ppt_submit_proposal",
       description:
         "把你打算对幻灯片做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
-        "九类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
+        "十类改动：set_run_text 改某个 run 的文字（只动这一个 run，不拍平同段其它格式）；" +
         "set_table_cell_text 改表格里某一格的某个 run（除 shapeId 还要给 row/col，都是 0 基，取自 ppt_read_slide_text 列出的行列；" +
         "shapeId 给的是那个**图形框**自己的 id，不是格子的 id；落在合并续格上会被拒，那一格不画自己的字，要改就改合并起点那一格）；" +
         "set_run_font 改某个 run 的粗体/字号（bold 与 sizePt 至少给一个，字号单位 pt）；" +
@@ -356,9 +384,11 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
         "move_shape_layer 改某个形状的叠放次序（up/down 相邻挪一层，top/bottom 到两端）；" +
         "add_text_box 在某页新加一个文本框（四个几何值都要给，文字必填，形状号由引擎在落地时分配，这一份提案里引用不到它）；" +
         "remove_shape 删掉某个形状（连同它的文字一起没，可撤销）。" +
-        "set_notes 把某一页的演讲者备注整篇换成你给的几段（一段一个字符串，不是追加；" +
-        "只对**本来就有备注页**的页有效，画像里 notesPartPath 为 null 的页提了会被拒，现有备注带多种格式时也会被拒，因为整篇覆盖会拍平那些格式）。" +
-        "改版式与母版、删整页、给没有备注页的那一页新建备注现在都提不了。",
+        "set_notes 把某一页**已经存在**的演讲者备注整篇换成你给的几段（一段一个字符串，不是追加；" +
+        "只对画像里 notesPartPath 不是 null 的页有效，现有备注带多种格式时会被拒，因为整篇覆盖会拍平那些格式）；" +
+        "create_notes 给**没有备注页**的那一页新建一份备注页（notesPartPath 为 null 的页提这条，段数与单段长度界限与 set_notes 相同；" +
+        "画像里 hasNotesMaster 为 false 时提不了——新建的备注页没有可继承的版式，绝不凭空造一份备注母版）。" +
+        "改版式与母版、删整页现在都提不了。",
       parameters: {
         type: "object",
         properties: {
@@ -463,6 +493,21 @@ export const PPTX_TOOLS: PptxToolDefinition[] = [
                   type: "object",
                   properties: {
                     type: { const: "set_notes" },
+                    slideNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    paragraphTexts: {
+                      type: "array",
+                      minItems: 1,
+                      maxItems: 200,
+                      items: { type: "string", maxLength: 2000 },
+                    },
+                  },
+                  required: ["type", "slideNumber", "paragraphTexts"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "create_notes" },
                     slideNumber: { type: "integer", minimum: 1, maximum: 500 },
                     paragraphTexts: {
                       type: "array",

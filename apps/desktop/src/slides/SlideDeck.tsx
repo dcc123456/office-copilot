@@ -281,23 +281,24 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
   );
 
   /**
-   * 把某一页的演讲者备注整篇换成输入框里的内容，点一次当场落盘。
+   * 把某一页的演讲者备注落成输入框里的内容，点一次当场落盘：那一格存在就整篇换掉，不存在就新建一份备注页。
    *
-   * 能不能存由 `notesSaveBlock` 说一不二（没有备注部件 / 与现场一样 / 会拍平那三种都不给点），
-   * 落地走 `commitNow` 那一个口，所以存前审计、modlog、撤销前像全都复用现成那条通道（§3.4）。
+   * 能不能存由 `notesSaveBlock` 说一不二（没有备注母版 / 还没写字 / 与现场一样 / 会拍平那几种都不给点），
+   * 两档的分岔只在 `notesRequestOf` 一处（§3.2），落地走 `commitNow` 那一个口，
+   * 所以存前审计、modlog、撤销前像与"撤销新建那次就是把部件删掉"全都复用现成那条通道（§3.4）。
    * 成功后把这一页的备注草稿丢掉：回包里带的是主进程重读磁盘的模型，输入框该跟着新现场走。
    *
    * @param slide 那一页的读模型快照。
    */
   const saveNotes = useCallback(
     async (slide: Slide) => {
-      if (!slide.notes) return;
-      const text = notesDrafts[slide.partPath] ?? slide.notes.paragraphTexts.join("\n");
+      const text = notesDrafts[slide.partPath] ?? slide.notes?.paragraphTexts.join("\n") ?? "";
+      const summary = slide.notes ? `改了第 ${slide.order + 1} 页的演讲者备注` : `给第 ${slide.order + 1} 页新建了备注页`;
       const done = await commitNow(
-        notesRequestOf(slide.notes, text),
-        `改了第 ${slide.order + 1} 页的演讲者备注`,
+        notesRequestOf(slide, text),
+        summary,
         "这份演示文稿已经不在了，备注没有改动。",
-        "已保存那一页的备注，要回退点「撤销上一次保存」",
+        slide.notes ? "已保存那一页的备注，要回退点「撤销上一次保存」" : "已给那一页新建备注页，要回退点「撤销上一次保存」",
       );
       if (done) {
         setNotesDrafts((current) => {
@@ -449,6 +450,7 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
             })}
             <SlideNotesField
               slide={slide}
+              hasNotesMaster={deck.hasNotesMaster}
               isBusy={isBusy}
               draft={notesDrafts[slide.partPath]}
               onPatch={(partPath, text) => setNotesDrafts((current) => ({ ...current, [partPath]: text }))}
@@ -462,33 +464,38 @@ export function SlideDeck({ deck, canRevert, onCommit, onRevert }: SlideDeckProp
 }
 
 /**
- * 一页的演讲者备注那一格：输入框 + 「保存备注」。
+ * 一页的演讲者备注那一格：输入框 + 「保存备注」或「新建备注页」。
  *
- * 三种现场各有各的说法（判据在 `notesSaveBlock`，视图不自己数段数）：有备注页就给输入框，
- * 没备注页只给一句"这一档做不了"，现有备注带多截格式时把理由**明写在框下面**而不是只藏在 title 里——
+ * 现场分四种（判据在 `notesSaveBlock`，视图不自己数段数也不自己判该提哪一档）：有备注页就给输入框整篇换；
+ * 没备注页但这份文件有备注母版时同样给输入框，点下去是**新建**那一档（四处登记由引擎一次交出）；
+ * 没有备注母版只给一句"建不了"；带多截格式时把理由**明写在框下面**而不是只藏在 title 里——
  * 那种页用户能看见旧备注却不能改，不写清楚像坏了。
  *
  * @param slide 那一页的读模型快照。
+ * @param hasNotesMaster 这份文件有没有备注母版（决定"没有备注页"那一档能不能建）。
  * @param isBusy 有落地在跑时全线禁用，避免连点排出两批。
  * @param draft 该页还没落盘的输入；undefined 表示没动过，输入框显示磁盘上那份。
  * @param onPatch 输入框改了字（第一参是该页部件路径）。
- * @param onSave 点「保存备注」：整篇换掉那一格，当场落盘并拿到逆操作。
+ * @param onSave 点那一颗：换掉或新建那一格，当场落盘并拿到逆操作（新建那次的逆操作是删部件）。
  */
 function SlideNotesField({
   slide,
+  hasNotesMaster,
   isBusy,
   draft,
   onPatch,
   onSave,
 }: {
   slide: Slide;
+  hasNotesMaster: boolean;
   isBusy: boolean;
   draft?: string;
   onPatch: (partPath: string, text: string) => void;
   onSave: (slide: Slide) => Promise<void>;
 }) {
   const text = draft ?? slide.notes?.paragraphTexts.join("\n") ?? "";
-  const block = notesSaveBlock(slide, text);
+  const block = notesSaveBlock(slide, text, hasNotesMaster);
+  const canEdit = slide.notes !== undefined || hasNotesMaster;
   return (
     <div className="slide-notes">
       <div className="slide-notes-head">
@@ -498,24 +505,30 @@ function SlideNotesField({
           className="slide-notes-save"
           onClick={() => void onSave(slide)}
           disabled={isBusy || block !== null}
-          title={block ?? "整篇换掉这一页的备注，点完当场落盘，可点「撤销上一次保存」回退"}
+          title={
+            block ??
+            (slide.notes
+              ? "整篇换掉这一页的备注，点完当场落盘，可点「撤销上一次保存」回退"
+              : "给这一页新建一份备注页（部件、关系与内容类型一起登记），点完当场落盘，撤销就是把它删掉")
+          }
         >
-          保存备注
+          {slide.notes ? "保存备注" : "新建备注页"}
         </button>
       </div>
-      {slide.notes ? (
+      {canEdit ? (
         <textarea
           className="slide-notes-input"
           rows={3}
           value={text}
           spellCheck={false}
           disabled={isBusy}
+          placeholder={slide.notes ? undefined : "写一句就给这一页建一份备注页"}
           onChange={(event) => onPatch(slide.partPath, event.target.value)}
         />
       ) : (
         <p className="slide-notes-note">{block}</p>
       )}
-      {slide.notes && draft !== undefined && block ? <p className="slide-notes-note">{block}</p> : null}
+      {canEdit && draft !== undefined && block ? <p className="slide-notes-note">{block}</p> : null}
     </div>
   );
 }

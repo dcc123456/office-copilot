@@ -20,13 +20,15 @@ const SAMPLE_NOTES: SlideNotes = {
 
 /**
  * 两页夹具：第 1 页有标题占位符（id=2，单 run）与一个自带几何的文本框（id=4，一段两条 run）与一张图片（id=7），
- * 第 2 页是空页且**没有备注部件**（`notesSlide` 那一档只能改已有的备注页，所以"有没有那一页"是要分开测的事实）。
+ * 第 2 页是空页且**没有备注部件**（两档备注各管一半：`set_notes` 只改已有的，`create_notes` 只给没有的那一页新建）。
  *
  * @param notesOfFirstSlide 第 1 页的备注快照；默认给一份一段一截的，传 null 表示这页没有备注页。
+ * @param hasNotesMaster 这份文件里有没有备注母版；默认 true，传 false 用来测"新建这一档整机提不了"那条预拒。
  */
-function sampleDeck(notesOfFirstSlide: SlideNotes | null = SAMPLE_NOTES): PresentationModel {
+function sampleDeck(notesOfFirstSlide: SlideNotes | null = SAMPLE_NOTES, hasNotesMaster = true): PresentationModel {
   return {
     slideSizeEmu: { cx: 9144000, cy: 6858000 },
+    hasNotesMaster,
     slides: [
       {
         partPath: "ppt/slides/slide1.xml",
@@ -408,7 +410,7 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     ]);
   });
 
-  it("那一页根本没有备注部件时不交出（新建 notesSlide 这一档还没做，交出去主进程必然拒，整批就不写了，§2.4）", () => {
+  it("那一页根本没有备注部件时不交出：那是 create_notes 的地盘，set 这一档交出去主进程必然拒，整批就不写了（§2.4）", () => {
     const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
       { type: "set_notes", slideNumber: 2, paragraphTexts: ["第 2 页没有备注页"] },
     ]);
@@ -423,6 +425,38 @@ describe("slideRequestsOfProposal：模型视角的坐标翻成引擎坐标", ()
     ]);
     expect(requests).toEqual([]);
     expect(notes[0]).toContain("压平");
+  });
+
+  it("create_notes 把页号翻成**幻灯片**部件路径：引擎要在那一页上挂新备注页，不是拿备注路径当坐标", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      { type: "create_notes", slideNumber: 2, paragraphTexts: ["第 2 页的第一句备注"] },
+    ]);
+    expect(notes).toEqual([]);
+    expect(requests).toEqual([
+      { kind: "create_notes", target: { partPath: "ppt/slides/slide2.xml" }, paragraphTexts: ["第 2 页的第一句备注"] },
+    ]);
+  });
+
+  it("create_notes 的三种提不了：已经有备注页、这份文件没有备注母版、同一批里已经建过——一条都不许交出（§2.4 整批不落地）", () => {
+    const { requests, notes } = slideRequestsOfProposal(sampleDeck(), [
+      // ① 那一页已经有备注部件，那是 set_notes 的地盘；提 create 会在同一页上造出第二份备注页
+      { type: "create_notes", slideNumber: 1, paragraphTexts: ["第 1 页已经有备注页了"] },
+      // ③ 同一页在同一批里排了两条：落地按顺序执行，第二条在引擎那儿必然看到"已经有备注页了"
+      { type: "create_notes", slideNumber: 2, paragraphTexts: ["第一份"] },
+      { type: "create_notes", slideNumber: 2, paragraphTexts: ["多余的第二份"] },
+    ]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.kind).toBe("create_notes");
+    const all = notes.join("\n");
+    expect(all).toContain("已经有备注页了");
+    expect(all).toContain("已经建过一次");
+
+    // ② 这份文件没有备注母版：新建的备注页没有可继承的版式，绝不自己造一份（§2.7）
+    const noMaster = slideRequestsOfProposal(sampleDeck(null, false), [
+      { type: "create_notes", slideNumber: 2, paragraphTexts: ["没有备注母版就建不了"] },
+    ]);
+    expect(noMaster.requests).toEqual([]);
+    expect(noMaster.notes[0]).toContain("没有备注母版");
   });
 });
 
