@@ -16,14 +16,12 @@
  * `@cantoo/pdf-lib`，渲染层一引就把 Node 能力带进浏览器（§5.2 的红线），所以渲染层经 `@office-copilot/pdf-io/pure`
  * 取无 Node 的那一半，本文件只留给主进程用。
  */
-import { deflateSync, inflateSync } from "node:zlib";
+import { deflateSync } from "node:zlib";
 import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, type PDFObject, type PDFRef, type PDFStream } from "@cantoo/pdf-lib";
 import { decodeOperandText, encodeOperandToken, parseToUnicodeCMap, standardEncodingMap, type CodeMap } from "./code-map.js";
 import { scanContentStream } from "./content-stream.js";
+import { contentKeys, decodeStream, plainName, streamOf } from "./streams.js";
 import { pdfTargetKey, type PdfAppliedEdit, type PdfEditFailure, type PdfReadModel, type PdfTextRun, type PdfTextEdit, type PdfTextTarget } from "./pdf-model.js";
-
-/** 内容流解压上限：超过这个字节数就不解（挡住把整份大文件读进字符串的失控情况）。 */
-const MAX_STREAM_BYTES = 8_388_608;
 
 /** 改写结果：要么给出新的完整字节，要么给出全部失败项且不产出任何改动（§2.4 整批语义）。 */
 export type PdfEditResult = { ok: true; bytes: Uint8Array; deltaBytes: number; applied: PdfAppliedEdit[] } | { ok: false; failures: PdfEditFailure[] };
@@ -169,7 +167,7 @@ function collectRuns(doc: PDFDocument): LocatedRun[] {
   doc.getPages().forEach((page, pageIndex) => {
     const pageDict = page.node;
     const resources = pageDict.lookupMaybe(PDFName.of("Resources"), PDFDict);
-    for (const contents of contentKeys(doc, pageDict.get(PDFName.of("Contents")))) {
+    for (const contents of contentKeys(pageDict.get(PDFName.of("Contents")))) {
       walkStream(doc, contents, pageIndex, null, resources, new Set<string>(), runs);
     }
   });
@@ -261,43 +259,10 @@ function toUnicodeMap(doc: PDFDocument, font: PDFDict): CodeMap | null {
   return null;
 }
 
-/**
- * 解压一个流并给出可扫描的文本。
- *
- * @param stream 流对象。
- * @returns `{ text, flate }`；压缩比不正常或超过 {@link MAX_STREAM_BYTES} 时 null（跳过，不抛）。
- */
-function decodeStream(stream: PDFRawStream): { text: string; flate: boolean } | null {
-  const raw = Buffer.from(stream.getContents());
-  const flate = filtersOf(stream).includes("FlateDecode");
-  if (raw.length > MAX_STREAM_BYTES) return null;
-  try {
-    const bytes = flate ? inflateSync(raw) : raw;
-    if (bytes.length > MAX_STREAM_BYTES) return null;
-    return { text: bytes.toString("latin1"), flate };
-  } catch {
-    return null;
-  }
-}
-
-/** 一个流的 `/Filter` 名字列表（可能是单名或数组）。 */
-function filtersOf(stream: PDFRawStream): string[] {
-  const filter = stream.dict.get(PDFName.of("Filter"));
-  if (filter instanceof PDFArray) return Array.from({ length: filter.size() }, (_, index) => plainName(filter.get(index)) ?? "");
-  const single = plainName(filter);
-  return single ? [single] : [];
-}
-
 /** 打开一条已定位内容流，准备收集替换位。 */
 function openStream(stream: PDFRawStream): { decoded: string; flate: boolean; splices: Splice[] } | null {
   const decoded = decodeStream(stream);
   return decoded ? { decoded: decoded.text, flate: decoded.flate, splices: [] } : null;
-}
-
-/** 一个键（引用 / 直接对象 / null）对应的流对象。 */
-function streamOf(doc: PDFDocument, key: unknown): PDFRawStream | null {
-  const value = key instanceof PDFRawStream ? key : key ? doc.context.lookup(key as PDFObject) : undefined;
-  return value instanceof PDFRawStream ? value : null;
 }
 
 /** 一个键对应的字典对象。 */
@@ -310,13 +275,6 @@ function dictOf(doc: PDFDocument, key: PDFObject): PDFDict | undefined {
 function refOf(doc: PDFDocument, object: PDFObject): PDFRef | null {
   for (const [ref, value] of doc.context.enumerateIndirectObjects()) if (value === object) return ref;
   return null;
-}
-
-/** 把 `/Contents` 的值（单引用、数组或直接流）摊成键列表。 */
-function contentKeys(doc: PDFDocument, value: PDFObject | undefined): PDFObject[] {
-  if (!value) return [];
-  if (value instanceof PDFArray) return Array.from({ length: value.size() }, (_, index) => value.get(index));
-  return [value];
 }
 
 /** 按倒序把 token 拼回内容流文本（同长替换，所以前面的下标不受影响）。 */
@@ -334,9 +292,4 @@ function byPosition(left: PdfTextRun, right: PdfTextRun): number {
 /** Form XObject 的嵌套深度：主内容流是 0，`Fr1` 是 1，`Fr1/Fr2` 是 2。 */
 function formDepth(withinForm: string | null): number {
   return withinForm === null ? 0 : withinForm.split("/").length;
-}
-
-/** PDFName → 去掉前导 `/` 的文本；不是名字时 null。 */
-function plainName(value: unknown): string | null {
-  return value instanceof PDFName ? value.decodeText() : null;
 }
