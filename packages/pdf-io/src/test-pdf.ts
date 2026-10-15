@@ -76,11 +76,24 @@ export async function cidNoToUnicodeFixturePdf(): Promise<Uint8Array> {
 }
 
 /**
+ * WPS 那种**一个字形一条 `Tj`** 的 CID 夹具：「中文标题」拆成四条 run（每字后跟一条 `Td` 推进 8pt），仍挂 `/ToUnicode`。
+ *
+ * 为什么单开一份：四个 CID 写成一条 `Tj` 时拼行只有一行一条 run，引擎"按该行每条 run 的原字数切片"（spec D8 的
+ * W2 第三刀）没有对象可切，整行改写能不能落盘、前缀字节会不会被撑开，就只有真形状的文件能回答。
+ *
+ * @returns 完整的 `.pdf` 字节。
+ */
+export async function cidPerGlyphFixturePdf(): Promise<Uint8Array> {
+  return cidFixture(true, "BT /F2 16 Tf 60 760 Tm <0001> Tj 8 0 Td <0002> Tj 8 0 Td <0003> Tj 8 0 Td <0004> Tj ET\n");
+}
+
+/**
  * CID/Identity-H 夹具的共用构造：`withToUnicode` 决定字体字典里挂不挂 `/ToUnicode` CMap。
  *
  * @param withToUnicode 是否登记那四条 `1→中`、`2→文`、`3→标`、`4→题`。
+ * @param content 内容流文本；默认把四个 CID 写成一条 `Tj`（Word / Google 那种一行一条 run 的形态）。
  */
-async function cidFixture(withToUnicode: boolean): Promise<Uint8Array> {
+async function cidFixture(withToUnicode: boolean, content = "BT /F2 16 Tf 60 760 Tm <0001000200030004> Tj ET\n"): Promise<Uint8Array> {
   const doc = await PDFDocument.create();
   const page = doc.addPage([595, 842]);
   const cmap = [
@@ -139,7 +152,7 @@ async function cidFixture(withToUnicode: boolean): Promise<Uint8Array> {
       ...(withToUnicode ? { ToUnicode: cmapRef } : {}),
     }) as PDFDict,
   );
-  await addContent(doc, page.node, "BT /F2 16 Tf 60 760 Tm <0001000200030004> Tj ET\n", { F2: fontRef });
+  await addContent(doc, page.node, content, { F2: fontRef });
   return await doc.save();
 }
 

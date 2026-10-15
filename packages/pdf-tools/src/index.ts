@@ -3,16 +3,17 @@
  *
  * 与 `sheet-tools`/`word-tools`/`pptx-tools` 同构，守同一条红线：模型只产出**入参与提案**，定位、落地、撤销
  * 全部由 `@office-copilot/pdf-io` 做（`AGENTS.md` §2.8、§2.11）。写面只有 `pdf_submit_proposal` 一个出口，
- * 而它现在只容得下**一类改动**——`set_run_text`（同位置、同字数的整条替换，spec D8 的 W1 档）。
+ * 而它现在只容得下**两类改动**——`set_run_text`（同位置、同字数的整条替换）与 `set_line_text`（同字数的整行替换，
+ * 由引擎拆回逐 run，spec D8 的 W1.5）。
  * 改字体、改颜色、改几何、删页这些还没建成自带逆操作的 op，宁可不提供，也不发一批没有逆操作的直写（§2.5）。
  *
  * 按 spec §三 的包边界，本包只依赖 `zod` 与 `@office-copilot/shared`（入参判定共用一份）、**不 import `pdf-io`**：
  * 它只管"这套入参合不合法"，执行由调用方（桌面 `pdfAgent`）拿校验过的入参去调引擎函数——
- * 把 `{pageNumber, runIndex}` 按现场模型翻成 `PdfTextTarget`（内容流引用 + Form 链 + 起始下标），
+ * 把 `{pageNumber, runIndex}` 或 `{pageNumber, lineIndex}` 按现场模型翻成 `PdfTextTarget`（内容流引用 + Form 链 + 起始下标），
  * 再交给 `applyPdfTextEdits`。那几个引擎内部坐标跨不出这道边，模型既看不到也不许编。
  *
- * 坐标一律是"模型视角"：页 1 基（`pdf_describe` 报第几页）、页内 run 序号 0 基（与 `pdf_read_page_text` 列出的
- * `runIndex` 一致）。等长这条规则说在描述里，但**判定在引擎编码时**做（§2.1：字节换算只发生在 `pdf-io` 进出口）。
+ * 坐标一律是"模型视角"：页 1 基（`pdf_describe` 报第几页）、页内 run 序号与页内行号 0 基（与 `pdf_read_page_text`
+ * 列出的 `runIndex`/`lineIndex` 一致）。等长这条规则说在描述里，但**判定在引擎编码时**做（§2.1：字节换算只发生在 `pdf-io` 进出口）。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
  */
 import { z } from "zod";
@@ -23,6 +24,9 @@ const PageNumber = z.number().int().min(1).max(500).describe("PDF 页号，1 基
 
 /** 页内 run 序号，0 基（该页第几条显示文字；上限取宽一点，长表格页的 run 本来就多）。 */
 const RunIndex = z.number().int().min(0).max(5000).describe("该页内的显示文字条序号，0 基。必须与 pdf_read_page_text 列出的 runIndex 一致，别凭印象数。");
+
+/** 页内逻辑行号，0 基（该行由几条 run 拼成都不影响它——引擎按现场模型算，模型只管报第几行）。 */
+const LineIndex = z.number().int().min(0).max(5000).describe("该页内的逻辑文本行号，0 基。必须与 pdf_read_page_text 列出的 lineIndex 一致，别凭印象数。");
 
 /**
  * `pdf_describe` 的入参：读整份 PDF 的页概要，让模型先知道有几页、每页大概念什么。
@@ -63,8 +67,29 @@ const SetRunTextEdit = z
   })
   .strict();
 
+/**
+ * 一条改**整行**的请求（spec D8 的 W1.5）：中文产物一个字发一条 run，"改一句话"要发几十条 `set_run_text`，
+ * 所以这一类由引擎把那行拆回逐 run 的等长替换——**每条 run 分到它原来那几个字**，硬约束仍然是整行字数不变。
+ */
+const SetLineTextEdit = z
+  .object({
+    type: z.literal("set_line_text"),
+    pageNumber: PageNumber,
+    lineIndex: LineIndex,
+    text: z
+      .string()
+      .min(1)
+      .max(2000)
+      .describe(
+        "这一行要换成的新文字。**总字数必须与 pdf_read_page_text 报的该行 charCount 完全相同**（不等长整行不动），" +
+          "而且只许用这一页里已经出现过的字——文件里的字体是子集，没带的字补不出来。" +
+          "引擎会按每条 run 原有的字数依次切开，所以你只管报第几行与整句新文字，不用管那行由几条 run 拼成。",
+      ),
+  })
+  .strict();
+
 /** 提案里的一条改动。只给有安全逆操作的那一类（AGENTS.md §2.5），其余等引擎补上带逆操作的 op 再开。 */
-export const PdfEdit = z.discriminatedUnion("type", [SetRunTextEdit]);
+export const PdfEdit = z.discriminatedUnion("type", [SetRunTextEdit, SetLineTextEdit]);
 
 /**
  * `pdf_submit_proposal` 的入参。
@@ -143,9 +168,11 @@ export const PDF_TOOLS: PdfToolDefinition[] = [
     function: {
       name: "pdf_read_page_text",
       description:
-        "把某一页的每条显示文字摊开列出（含 runIndex、现文字、charCount 原文字数、encodedBytes、字体与是否 CID、" +
-        "在哪个 Form 里，以及改不了的话卡在哪一类：内联内容流 inline-stream / 认不出原文 undecoded）。" +
-        "提交 set_run_text 前用它确认 runIndex 并照着 charCount 写等长的新文字，别凭印象数。",
+        "把某一页摊开列出两种粒度：**逐条显示文字**（runIndex、现文字、charCount 原文字数、encodedBytes、字体与是否 CID、" +
+        "在哪个 Form 里，以及改不了的话卡在哪一类：内联内容流 inline-stream / 认不出原文 undecoded）与" +
+        "**逐逻辑行**（lineIndex、整行文字、整行 charCount、这一行由第几条到第几条 run 拼成）。" +
+        "提交 set_run_text 前照着 run 的 charCount 写等长的新文字，提交 set_line_text 前照着该行的 charCount 写等长的整句；" +
+        "两个序号都来自这一份现场模型，别凭印象数。",
       parameters: {
         type: "object",
         properties: {
@@ -163,10 +190,12 @@ export const PDF_TOOLS: PdfToolDefinition[] = [
       name: "pdf_submit_proposal",
       description:
         "把你打算对 PDF 做的修改打包成提案返回。用户会看到逐条改动并确认后才落地，一次回答只提交一份提案。" +
-        "现在只有一类改动：set_run_text 换掉某页某条 run 的文字（同位置整条替换，可撤销）。" +
+        "现在有两类改动：set_run_text 换掉某页某条显示文字（同位置整条替换，可撤销）；" +
+        "set_line_text 换掉某页某**逻辑文本行**的整句文字（引擎按该行原来每条 run 的字数依次切开，同样可撤销）。" +
+        "**中文产物往往一个字就是一条 run**，改一句话要几十条 set_run_text，那种情形直接用 set_line_text 报整行，别一条条拼。" +
         "硬约束是**新文字与原文字数完全相同**（PDF 没有回流，字节数变了引擎会整批不写并报长度不符），" +
         "并且新文字里每个字都得是这一页已经用过的字（文件里的字体是子集，缺的字补不出来）。" +
-        "改字体、改颜色、改几何、删页、合并跨条 run 的那句完整话现在都提不了，遇到就直说做不了。",
+        "改字体、改颜色、改几何、删页现在都提不了，遇到就直说做不了。",
       parameters: {
         type: "object",
         properties: {
@@ -176,15 +205,30 @@ export const PDF_TOOLS: PdfToolDefinition[] = [
             minItems: 1,
             maxItems: 200,
             items: {
-              type: "object",
-              properties: {
-                type: { const: "set_run_text" },
-                pageNumber: { type: "integer", minimum: 1, maximum: 500 },
-                runIndex: { type: "integer", minimum: 0, maximum: 5000 },
-                text: { type: "string", minLength: 1, maxLength: 2000 },
-              },
-              required: ["type", "pageNumber", "runIndex", "text"],
-              additionalProperties: false,
+              anyOf: [
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "set_run_text" },
+                    pageNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    runIndex: { type: "integer", minimum: 0, maximum: 5000 },
+                    text: { type: "string", minLength: 1, maxLength: 2000 },
+                  },
+                  required: ["type", "pageNumber", "runIndex", "text"],
+                  additionalProperties: false,
+                },
+                {
+                  type: "object",
+                  properties: {
+                    type: { const: "set_line_text" },
+                    pageNumber: { type: "integer", minimum: 1, maximum: 500 },
+                    lineIndex: { type: "integer", minimum: 0, maximum: 5000 },
+                    text: { type: "string", minLength: 1, maxLength: 2000 },
+                  },
+                  required: ["type", "pageNumber", "lineIndex", "text"],
+                  additionalProperties: false,
+                },
+              ],
             },
           },
         },

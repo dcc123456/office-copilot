@@ -4,7 +4,8 @@
  * `ask` 一律打桩（`AGENTS.md` §7.1 禁止测试碰真实端点）；真实端点行为由一次性探针负责（§6.5）。
  * 这里钉的是两条红线：**模型给的页号/run 序号对不上现场模型时，那一条不许交出去**——主进程的事务语义是
  * "任一条失败就整批不写"（§2.4），代理交一批注定失败的改动等于让用户白点一次确认；以及
- * **内容流引用与起始下标只能由代理按现场模型填**，模型自己报的坐标一律不进请求。
+ * **内容流引用与起始下标只能由代理按现场模型填**，模型自己报的坐标一律不进请求；整行那一档（`set_line_text`）
+ * 拆成哪几条 run 由引擎的 `pdfLineEditsOf` 决定，代理不许自己数行数（§2.1 换算单点、§3.2 不许第二份账）。
  */
 import { describe, expect, it } from "vitest";
 import type { PdfReadModel, PdfTextRun } from "@office-copilot/pdf-io/pure";
@@ -41,6 +42,15 @@ function sampleDoc(): PdfReadModel {
       run({ pageIndex: 1, streamRef: null, text: "内联的文字" }),
       run({ pageIndex: 1, start: 12, text: null, baseFont: null }),
     ],
+  };
+}
+
+/** 一页 WPS 形状的夹具：「姓名：丁长长」六个字各一条 run，另有一条整行的 Word 形状 run。 */
+function glyphDoc(): PdfReadModel {
+  const glyphs = [..."姓名：丁长长"].map((char, index) => run({ text: char, start: 100 + index * 24, encodedBytes: 2, tokenLength: 6, fontSizePt: 10.45, origin: { x: 90 + index * 10.45, y: 615 } }));
+  return {
+    pageCount: 2,
+    runs: [...glyphs, run({ pageIndex: 1, streamRef: null, text: "内联的那行" }), run({ pageIndex: 1, start: 400, text: "One line run", origin: { x: 72, y: 500 } })],
   };
 }
 
@@ -104,6 +114,41 @@ describe("pdfRequestsOfProposal：模型视角→引擎坐标", () => {
     expect(notes[4]).toContain("原文是 21 个字，新文字是 6 个字");
     expect(notes[5]).toContain("与原文一样");
   });
+
+  it("整行那一档：模型报一条 set_line_text，代理交出去的是引擎按行内各 run 字数拆出的那批替换", () => {
+    const { requests, notes, units } = pdfRequestsOfProposal(glyphDoc(), [
+      { type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "姓名：丁短长" },
+    ]);
+    expect(notes).toEqual([]);
+    expect(units).toBe(1);
+    expect(requests.map((request) => request.text)).toEqual(["姓", "名", "：", "丁", "短", "长"]);
+    expect(requests.map((request) => request.target.start)).toEqual([100, 124, 148, 172, 196, 220]);
+  });
+
+  it("行号越界、字数不等、行内有一条改不了：逐条给理由，units 一处也不涨", () => {
+    const { requests, notes, units } = pdfRequestsOfProposal(glyphDoc(), [
+      { type: "set_line_text", pageNumber: 1, lineIndex: 5, text: "凑够六个字吧" },
+      { type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "只有三个字" },
+      { type: "set_line_text", pageNumber: 2, lineIndex: 0, text: "内联的那行" },
+      { type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "姓名：丁长长" },
+    ]);
+    expect(requests).toEqual([]);
+    expect(units).toBe(0);
+    expect(notes[0]).toContain("只有 1 行，没有第 5 行");
+    expect(notes[1]).toContain("原文是 6 个字，新文字是 5 个字");
+    expect(notes[2]).toContain("内联");
+    expect(notes[3]).toContain("与原文一样");
+  });
+
+  it("两类混着报：units 按模型提交的条数算，卡片上就是用户确认的那几处", () => {
+    const { requests, notes, units } = pdfRequestsOfProposal(glyphDoc(), [
+      { type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "姓名：丁短长" },
+      { type: "set_run_text", pageNumber: 2, runIndex: 1, text: "One line fun" },
+    ]);
+    expect(notes).toEqual([]);
+    expect(units).toBe(2);
+    expect(requests).toHaveLength(7);
+  });
 });
 
 describe("runPdfAgent：工具回合与收口", () => {
@@ -134,6 +179,23 @@ describe("runPdfAgent：工具回合与收口", () => {
     expect(toolMessage?.content).toContain('"charCount":10');
     expect(toolMessage?.content).toContain('"runIndex":1');
     expect(outcome.edits).toHaveLength(1);
+  });
+
+  it("模型报行号提一条改动：收尾时 edits 已是引擎拆好的那批，units 仍是用户确认的一处", async () => {
+    const ask = stubAsk([
+      turnWithTool("pdf_read_page_text", '{"pageNumber":1}'),
+      turnWithTool("pdf_submit_proposal", '{"summary":"把姓名那行的末字换掉","edits":[{"type":"set_line_text","pageNumber":1,"lineIndex":0,"text":"姓名：丁短长"}]}'),
+    ]);
+    const outcome = await runPdfAgent({ doc: glyphDoc(), instruction: "把姓名那一行改成 姓名：丁短长", ask: ask.ask });
+    expect(outcome.kind).toBe("proposal");
+    if (outcome.kind !== "proposal") return;
+    expect(outcome.units).toBe(1);
+    expect(outcome.edits.map((edit) => edit.text)).toEqual(["姓", "名", "：", "丁", "短", "长"]);
+    expect(outcome.proposed[0]).toMatchObject({ type: "set_line_text", pageNumber: 1, lineIndex: 0 });
+    // 读面的回包里行号与字数都上了送，模型照它写才可能等长。
+    const toolMessage = outcome.messages.find((message) => message.role === "tool");
+    expect(toolMessage?.content).toContain('"lineIndex":0');
+    expect(toolMessage?.content).toContain('"charCount":6');
   });
 
   it("非法入参回给模型一句理由，不抛异常也不结束回合", async () => {

@@ -9,12 +9,13 @@
  *
  * 交出去的 `edits` 就是视图"保存"用的那批 `PdfTextEdit`（`pdf-io/pdf-file.ts`）：确认后原样送 `pdf:edit`，
  * 主进程做增量写盘并回 `applied`（撤销凭据）——所以这里不需要、也不许再长第二套落地或撤销通道（§3.2）。
- * 模型视角的坐标只有**页号（1 基）与页内 run 序号（0 基）**；内容流引用、Form 链、起始下标由本文件的
- * `pdfRequestsOfProposal` 按现场模型翻出来，这是唯一一处做这个映射（§3.3）。
+ * 模型视角的坐标只有**页号（1 基）、页内 run 序号（0 基）与页内行号（0 基）**；内容流引用、Form 链、起始下标由本文件的
+ * `pdfRequestsOfProposal` 按现场模型翻出来（整行那一档交给引擎的 `pdfLineEditsOf` 拆），这是唯一一处做这个映射（§3.3）。
  */
 import {
   describePdf,
   isRunEditable,
+  pdfLineEditsOf,
   readPdfPageText,
   targetOfRun,
   type PdfReadModel,
@@ -30,15 +31,16 @@ const MAX_TOOL_TURNS = 8;
 /** 首条用户消息里那份画像的上限：给模型看得见全貌，但不许把整份 PDF 摊上去（§2.9）。 */
 const CONTEXT_MAX_PAGES = 20;
 
-const PDF_SYSTEM = `你是 PDF（.pdf）代理，看得见的是这份文档的结构画像与逐条显示文字，不是内容流原文。
-- 动手前先调 pdf_describe 拿页号；要改某条文字再调 pdf_read_page_text 确认 runIndex 与那条的 charCount（原文字数），不许凭印象数，也不许自己编坐标。
-- 要改只能调 pdf_submit_proposal，条目只有一种 set_run_text，指到"第几页第几条显示文字"，把那条整条换成新文字。
+const PDF_SYSTEM = `你是 PDF（.pdf）代理，看得见的是这份文档的结构画像、逐条显示文字与逐逻辑行，不是内容流原文。
+- 动手前先调 pdf_describe 拿页号；要改哪条/哪行再调 pdf_read_page_text 确认 runIndex 或 lineIndex 与那一档的 charCount（原文字数），不许凭印象数，也不许自己编坐标。
+- 要改只能调 pdf_submit_proposal，条目有两种：set_line_text 把**一整行**换成新文字（引擎自己按行内每条 run 原有的字数切开），set_run_text 把某一条显示文字整条换新。
+  真实中文产物**一个字就是一条 run**——改一句话别发几十条 set_run_text，一律报行号提一条 set_line_text。
 - 硬约束是**新文字的字数必须与 charCount 完全相同**：PDF 没有回流，长度变了装不回原来的位置，整批一个字节都不会写。
   需要短一点就自己删字凑等长、需要留白就用空格补位，凑不出等长的说法就别提这条，直接回用户做不了。
 - 新文字里每个字都得是这一页已经出现过的字——文件里的字体是子集，没带的字补不出来（这一条由引擎判定，但你能先避开）。
-- editable=false 的那条改不了（内联内容流 / 认不出原文），别对着它提改动。
-- 改字体、改颜色、改几何、删页、把跨条 run 拼成一句完整的话再改，这些现在都做不了，遇到直接说做不了并解释原因。
-- 换算字节、编内容流引用这类事不归你管，只交给页号与 run 序号。
+- editable=false 的那条或那行改不了（内联内容流 / 认不出原文），别对着它提改动。
+- 改字体、改颜色、改几何、删页这些现在都做不了，遇到直接说做不了并解释原因。
+- 换算字节、编内容流引用这类事不归你管，只交给页号与行号（或 run 序号）。
 - 纯分析的问题直接回答，用中文，带上你实际读到的页号与文字，不要为了回答去提提案。`;
 
 /** `runPdfAgent` 的输入。 */
@@ -64,6 +66,11 @@ export type PdfAgentOutcome =
       summary: string;
       /** 翻成引擎坐标的那批改动（定位键 + 新文字），确认后原样送 `pdf:edit` 即可落地并拿到撤销凭据（§2.5）。 */
       edits: PdfTextEdit[];
+      /**
+       * 用户确认的那一档粒度有几条：一条 `set_line_text` 会展开成逐 run 的多条 `edits`，
+       * 卡片头部要说"1 处改动"而不是"6 处改动"（与表格侧 D8 同一判据：条数按提交的那批算）。
+       */
+      units: number;
       /** 提案里没能变成改动的条目，逐条中文理由，不许静默丢掉（§2.5）。 */
       notes: string[];
       /** 模型原样的提案条目（给用户看"它到底提了什么"，坐标是模型视角）。 */
@@ -82,7 +89,7 @@ export type PdfAgentOutcome =
  */
 export function pdfContextOf(doc: PdfReadModel): string {
   const outline = describePdf(doc, { maxPages: CONTEXT_MAX_PAGES });
-  const lines = [`PDF：${outline.pageCount} 页，其中 ${outline.pages.reduce((sum, page) => sum + page.editableCount, 0)} 条显示文字可改。`, `画像：${JSON.stringify(outline.pages)}`];
+  const lines = [`PDF：${outline.pageCount} 页，其中 ${outline.pages.reduce((sum, page) => sum + page.editableCount, 0)} 条显示文字可改、${outline.pages.reduce((sum, page) => sum + page.editableLineCount, 0)} 行可整行改。`, `画像：${JSON.stringify(outline.pages)}`];
   if (outline.pagesTruncated) lines.push(`页太多，只描述了前 ${outline.pages.length} 页，剩下的页要用 pdf_describe 加大 maxPages 才看得见。`);
   return lines.join("\n");
 }
@@ -90,20 +97,35 @@ export function pdfContextOf(doc: PdfReadModel): string {
 /**
  * 把提案里的条目翻成引擎认的跨界改动（内容流引用 + Form 链 + 起始下标）。
  *
- * 页号是模型视角的 1 基，run 序号是该页显示文字的 0 基序号——两者都按现场模型算，这是唯一一处做这个映射（§3.3）。
- * 翻不动的（页号越界、该页没有这么条 run、那条本来改不了、字数不等装不回去、与原文一模一样）逐条记进 `notes`，
+ * 页号是模型视角的 1 基，run 序号与行号是该页的 0 基序号——两者都按现场模型算，这是唯一一处做这个映射（§3.3）。
+ * `set_line_text` 交给引擎的 `pdfLineEditsOf` 拆成逐 run 的等长替换（一条提案条目 → 若干条 `PdfTextEdit`），
+ * 这里不自己切字符，免得第二套换算漂出引擎（§2.1、§3.2）。
+ * 翻不动的（页号越界、该页没有这么条 run/这么一行、那条改不了、字数不等装不回去、与原文一模一样）逐条记进 `notes`，
  * 不许交一批主进程必然拒绝、整批不落地的改动（§2.4 的事务语义）。
  *
  * @param doc 提案要落在这份文档上（页号 → 内容流坐标按它算）。
  * @param edits `pdf_submit_proposal` 校验过的条目。
- * @returns `edits` 按提案顺序排好；`notes` 是没变成改动的条目的中文说明。
+ * @returns `requests` 按提案顺序排好；`notes` 是没变成改动的条目的中文说明；`units` 是**落地了的提案条目数**
+ *   （行级条目会展开成多条 request，用户在卡片上确认的是条目那一档，条数按它算）。
  */
-export function pdfRequestsOfProposal(doc: PdfReadModel, edits: PdfEditT[]): { requests: PdfTextEdit[]; notes: string[] } {
+export function pdfRequestsOfProposal(doc: PdfReadModel, edits: PdfEditT[]): { requests: PdfTextEdit[]; notes: string[]; units: number } {
   const requests: PdfTextEdit[] = [];
   const notes: string[] = [];
+  let units = 0;
   for (const edit of edits) {
     if (edit.pageNumber > doc.pageCount) {
       notes.push(`没有第 ${edit.pageNumber} 页（这份 PDF 共 ${doc.pageCount} 页），这条跳过。`);
+      continue;
+    }
+    // 整行那一档：展开由引擎做，它才知道这一行由哪几条 run 拼成、每条几个字。
+    if (edit.type === "set_line_text") {
+      const expanded = pdfLineEditsOf(doc, edit.pageNumber, edit.lineIndex, edit.text);
+      if (!expanded.ok) {
+        notes.push(expanded.reason);
+        continue;
+      }
+      requests.push(...expanded.edits);
+      units += 1;
       continue;
     }
     const runs = runsOfPage(doc, edit.pageNumber - 1);
@@ -131,8 +153,9 @@ export function pdfRequestsOfProposal(doc: PdfReadModel, edits: PdfEditT[]): { r
       continue;
     }
     requests.push({ target, text: edit.text });
+    units += 1;
   }
-  return { requests, notes };
+  return { requests, notes, units };
 }
 
 /**
@@ -202,8 +225,8 @@ export async function runPdfAgent(input: PdfAgentInput): Promise<PdfAgentOutcome
       const executed = executeToolCall(input.doc, call);
       messages.push({ role: "tool", tool_call_id: call.id, content: executed.content });
       if (!executed.proposal) continue;
-      const { requests, notes } = pdfRequestsOfProposal(input.doc, executed.proposal.edits);
-      return { kind: "proposal", summary: executed.proposal.summary, edits: requests, notes, proposed: executed.proposal.edits, messages };
+      const { requests, notes, units } = pdfRequestsOfProposal(input.doc, executed.proposal.edits);
+      return { kind: "proposal", summary: executed.proposal.summary, edits: requests, units, notes, proposed: executed.proposal.edits, messages };
     }
   }
   return { kind: "failed", message: `工具回合到了 ${MAX_TOOL_TURNS} 轮上限，模型还没交提案或给出结论，先停下。`, messages };

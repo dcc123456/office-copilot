@@ -138,8 +138,12 @@ type ToolLand =
   /** 图表不是 op：它随保存写进 `.xlsx`，撤销栈管不到，卡片要如实说这句（§2.5 的边界）。 */
   | { kind: "chart"; chart: ResolvedChart }
   | { kind: "slide"; requests: PptxEditRequest[] }
-  /** PDF 的批次就是视图「保存」用的那批改动：确认后原样送同一条 `pdf:edit`，落地口只有一份。 */
-  | { kind: "pdf"; edits: PdfTextEdit[] };
+  /**
+   * PDF 的批次就是视图「保存」用的那批改动：确认后原样送同一条 `pdf:edit`，落地口只有一份。
+   * `units` 是用户在卡片上确认的那一档有几条（一条整行改动会在引擎里展开成逐 run 的多条 `edits`，
+   * 头部条数按 `units` 报，与表格侧 D8"按提交的那批算"同一条判据）。
+   */
+  | { kind: "pdf"; edits: PdfTextEdit[]; units: number };
 
 /** 工具回合卡的格式：一次任务只可能问一个代理，卡片靠它挑文案与代理。 */
 type ToolFormat = "sheet" | "slide" | "pdf";
@@ -304,7 +308,10 @@ function slideEditLines(edits: readonly PptxEditT[]): string[] {
 function pdfEditLines(edits: readonly PdfEditT[]): string[] {
   return edits.map((edit) => {
     const value = edit.text.length > 40 ? `${edit.text.slice(0, 40)}…` : edit.text;
-    return `第 ${edit.pageNumber} 页 · 第 ${edit.runIndex} 条文字改为「${value}」`;
+    // 整行那一档在引擎里会拆成逐 run 的多条替换，但用户确认的是"这一行"，清单就说这一行。
+    return edit.type === "set_line_text"
+      ? `第 ${edit.pageNumber} 页 · 第 ${edit.lineIndex} 行改为「${value}」`
+      : `第 ${edit.pageNumber} 页 · 第 ${edit.runIndex} 条文字改为「${value}」`;
   });
 }
 
@@ -323,7 +330,7 @@ function toolLandTally(land: ToolLand): { count: number; label: string } {
     case "slide":
       return { count: land.requests.length, label: `${land.requests.length} 处改动` };
     case "pdf":
-      return { count: land.edits.length, label: `${land.edits.length} 处改动` };
+      return { count: land.units, label: `${land.units} 处改动` };
     case "idle":
       return { count: 0, label: "0 处改动" };
   }
@@ -382,7 +389,7 @@ function slideToolOutcome(outcome: SlideAgentOutcome): ToolAskOutcome {
  * PDF 代理的结果 → 同一种形状。
  *
  * @param outcome `runPdfAgent` 的回包；`edits` 已是引擎坐标（内容流引用 + 起始下标），`proposed` 是模型视角的条目。
- * @returns 归一化后的 `ToolAskOutcome`（清单给人看页号与 run 序号，落地用引擎坐标）。
+ * @returns 归一化后的 `ToolAskOutcome`（清单给人看页号与行号/run 序号，落地用引擎坐标）。
  */
 function pdfToolOutcome(outcome: PdfAgentOutcome): ToolAskOutcome {
   if (outcome.kind !== "proposal") return outcome;
@@ -391,7 +398,7 @@ function pdfToolOutcome(outcome: PdfAgentOutcome): ToolAskOutcome {
     summary: outcome.summary,
     lines: pdfEditLines(outcome.proposed),
     notes: outcome.notes,
-    land: { kind: "pdf", edits: outcome.edits },
+    land: { kind: "pdf", edits: outcome.edits, units: outcome.units },
     messages: outcome.messages,
   };
 }

@@ -3,6 +3,7 @@
  *
  * 与 `pptx-tools`/`sheet-tools` 那两份同形：坏 JSON、缺字段、多字段、越界、不存在的工具名、
  * 未被提供的改动类型（`set_run_font` 这一类现在根本不开）都只回理由；另外钉住上送的定义与 schema 表键一致。
+ * 写面开着的是两类：`set_run_text`（逐条）与 `set_line_text`（整行，由引擎拆回逐条），两类都不许带引擎坐标。
  */
 import { describe, expect, it } from "vitest";
 import { PDF_TOOLS, PDF_TOOL_SCHEMAS, parseToolArguments } from "./index.js";
@@ -54,7 +55,37 @@ describe("pdf_submit_proposal 的入参", () => {
     expect(parsed.args.edits[0]).toMatchObject({ type: "set_run_text", pageNumber: 1, runIndex: 0 });
   });
 
-  it("现在只有 set_run_text 一类：改字体/颜色/几何那一类条目直接拒", () => {
+  it("整行那一档照收：模型报的只有页号 + 页内行号，拆成哪几条 run 归引擎算", () => {
+    const parsed = proposal({ summary: "把姓名那一行换掉", edits: [{ type: "set_line_text", pageNumber: 1, lineIndex: 2, text: "姓名：丁短短" }] });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.args.edits[0]).toMatchObject({ type: "set_line_text", pageNumber: 1, lineIndex: 2, text: "姓名：丁短短" });
+  });
+
+  it("两类混着报也收，顺序与条数原样交给代理（一张卡上既能改一行也能改一条）", () => {
+    const parsed = proposal({
+      summary: "一行加一条",
+      edits: [
+        { type: "set_line_text", pageNumber: 1, lineIndex: 2, text: "姓名：丁短短" },
+        { type: "set_run_text", pageNumber: 3, runIndex: 7, text: "2026 年度" },
+      ],
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.args.edits.map((edit: { type: string }) => edit.type)).toEqual(["set_line_text", "set_run_text"]);
+  });
+
+  it("set_line_text 少行号、行号越界、空文字、自己报字数都拒", () => {
+    const cases: unknown[] = [
+      { summary: "没有行号", edits: [{ type: "set_line_text", pageNumber: 1, text: "姓名：丁短短" }] },
+      { summary: "行号越界", edits: [{ type: "set_line_text", pageNumber: 1, lineIndex: 5001, text: "姓名：丁短短" }] },
+      { summary: "空文字", edits: [{ type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "" }] },
+      { summary: "多字段", edits: [{ type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "姓名：丁短短", charCount: 6 }] },
+    ];
+    for (const raw of cases) expect(proposal(raw).ok).toBe(false);
+  });
+
+  it("开着的只有 set_run_text 与 set_line_text 两类：改字体/颜色/几何那一类条目直接拒", () => {
     for (const type of ["set_run_font", "set_run_color", "set_shape_geometry", "remove_shape", "add_text_box"]) {
       const parsed = proposal({ summary: "试一条不给的改动", edits: [{ type, pageNumber: 1, runIndex: 0, text: "一样长" }] });
       expect(parsed.ok).toBe(false);
@@ -73,10 +104,12 @@ describe("pdf_submit_proposal 的入参", () => {
   });
 
   it("提案里不给字节数、内容流引用这类引擎坐标：模型想塞也塞不进去", () => {
-    const parsed = proposal({ summary: "自己报坐标", edits: [{ type: "set_run_text", pageNumber: 1, runIndex: 0, text: "一样长", streamRef: "6 0 R", start: 32 }] });
-    expect(parsed.ok).toBe(false);
-    if (parsed.ok) return;
-    expect(parsed.reason).toContain("streamRef");
+    const runCase = proposal({ summary: "自己报坐标", edits: [{ type: "set_run_text", pageNumber: 1, runIndex: 0, text: "一样长", streamRef: "6 0 R", start: 32 }] });
+    expect(runCase.ok).toBe(false);
+    if (runCase.ok) return;
+    expect(runCase.reason).toContain("streamRef");
+    const lineCase = proposal({ summary: "自己报行范围", edits: [{ type: "set_line_text", pageNumber: 1, lineIndex: 0, text: "一样长", runFrom: 10, runTo: 16 }] });
+    expect(lineCase.ok).toBe(false);
   });
 });
 
@@ -87,9 +120,14 @@ describe("上送的工具定义", () => {
     for (const tool of PDF_TOOLS) expect(tool.function.parameters.additionalProperties).toBe(false);
   });
 
-  it("写面那份描述里把「字数完全相同」这条硬约束说了出来（模型不看代码只看描述）", () => {
+  it("写面那份描述里把「字数完全相同」这条硬约束与整行那一档都说了出来（模型不看代码只看描述）", () => {
     const submit = PDF_TOOLS.find((tool) => tool.function.name === "pdf_submit_proposal");
     expect(submit?.function.description).toContain("字数完全相同");
     expect(submit?.function.description).toContain("提不了");
+    expect(submit?.function.description).toContain("set_line_text");
+    // 描述里说了不够，JSON schema 也得真开这一类，否则模型报 lineIndex 会当场被拒。
+    expect(JSON.stringify(submit?.function.parameters)).toContain("lineIndex");
+    const read = PDF_TOOLS.find((tool) => tool.function.name === "pdf_read_page_text");
+    expect(read?.function.description).toContain("行");
   });
 });

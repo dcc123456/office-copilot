@@ -13,7 +13,8 @@ import {
   revertPdfTextEdits,
 } from "./pdf-file.js";
 import { isRunEditable, pdfTargetKey, runEditBlock, targetOfRun, type PdfTextRun, type PdfTextTarget } from "./pdf-model.js";
-import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, cidNoToUnicodeFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
+import { pdfLineEditsOf } from "./analysis.js";
+import { simpleWinAnsiFixturePdf, cidIdentityHFixturePdf, cidNoToUnicodeFixturePdf, cidPerGlyphFixturePdf, flateWinAnsiFixturePdf } from "./test-pdf.js";
 
 /** 按解出来的文字找定位键。 */
 function targetOfText(runs: PdfTextRun[], text: string): PdfTextTarget {
@@ -104,6 +105,20 @@ describe("applyPdfTextEdits：同长度替换 + 增量更新", () => {
     if (!result.ok) throw new Error("该改成功的：" + JSON.stringify(result.failures));
     const after = await readPdfModel(result.bytes);
     expect(after.runs[0]?.text).toBe("标题文中");
+  });
+
+  it("整行那一档在逐字形的真形状上落盘：引擎拆成四条各一字，前缀字节仍逐字不变、只追加 delta", async () => {
+    const bytes = await cidPerGlyphFixturePdf();
+    const model = await readPdfModel(bytes);
+    expect(model.runs.map((run) => run.text)).toEqual(["中", "文", "标", "题"]);
+    const expanded = pdfLineEditsOf(model, 1, 0, "标题文中");
+    if (!expanded.ok) throw new Error("该展开的：" + expanded.reason);
+    expect(expanded.edits.map((edit) => edit.text)).toEqual(["标", "题", "文", "中"]);
+    const result = await applyPdfTextEdits(bytes, expanded.edits);
+    if (!result.ok) throw new Error("该改成功的：" + JSON.stringify(result.failures));
+    expect(Buffer.compare(Buffer.from(bytes.subarray(0, bytes.length)), Buffer.from(result.bytes.subarray(0, bytes.length))) === 0).toBe(true);
+    const after = await readPdfModel(result.bytes);
+    expect(after.runs.map((run) => run.text)).toEqual(["标", "题", "文", "中"]);
   });
 
   it("新文字变长就整批不写，理由给 length-mismatch（PDF 没有回流）", async () => {
