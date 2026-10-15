@@ -100,7 +100,9 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 第二套 pptx / pdf 读写（`.pdf` 的内容流解压只有 `packages/pdf-io/src/streams.ts` 那一份，读侧与结构体检共用；
 逻辑行、串形态、CID 解码同理）、
 第二套单位/颜色换算、第二套 diff 引擎、第二套撤销栈、第二套 LLM 客户端、第二套设置存储、
-第二个 SQLite 连接、第二套样式体系。
+第二个 SQLite 连接、第二套样式体系、第二套 zip 序列化（`.docx`/`.xlsx`/`.pptx` 的 `toBytes` 共用
+`@office-copilot/opc` 的 `serializePackage`——JSZip 会给嵌套路径**顺手造出目录对象**且 `createFolders:false` 挡不住，
+只有那份序列化会清掉它们）。
 跨包能力一律经包名（`@office-copilot/*`）的公开入口引用，**禁止深 import 到别人的 `src/`**
 （现存唯一例外：`apps/desktop/electron/fileHandlers.ts` → `@office-copilot/docx-io/src/pm-schema.js`，
 不要再新增这类口子）。
