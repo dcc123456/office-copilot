@@ -484,7 +484,7 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 ### 阶段 6 · 图表与表格（D9）— `[ ]`
 **完成判定**：新建图表的 `c:numCache` 与内嵌 `.xlsx` 的值由 openpyxl 独立读回且一致；改数据后两者同步；撤销逐格回原样。
 
-### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[~] 读模型（两种串形态 / Form XObject 递归 / CID+ToUnicode / 压缩流）+ W1 同长度替换 + 增量更新 + 引擎侧按内容寻址撤销 + 桌面装配（pdf:read/edit/revert/save-as 四条通道、PdfView 面板、modlog 落盘）已落（两份真文件 + QuickLook 肉眼核对 + 真 app 实跑截图）；`print:pdf` 旁路模型、AI 工具面、`oc pdf check`、逻辑行拼接仍缺`
+### 阶段 7 · pdf 线：读 + 审计 + 甲档正文改写（D8 甲）— `[~] 读模型（两种串形态 / Form XObject 递归 / CID+ToUnicode / 压缩流）+ W1 同长度替换 + 增量更新 + 引擎侧按内容寻址撤销 + 桌面装配（pdf:read/edit/revert/save-as 四条通道、PdfView 面板、modlog 落盘）+ AI 工具面（`packages/pdf-tools` 三条工具 + `src/ai/pdfAgent.ts` 提案面，落地复用 `commitPdfEdits` 那一个口）已落（两份真文件 + QuickLook 肉眼核对 + 真 app 实跑截图）；`print:pdf` 旁路模型、`oc pdf check`、逻辑行拼接仍缺`
 `packages/pdf-io` 读页/文本块/字体/内容流偏移，`print:pdf` 通路带旁路模型。
 **完成判定**：本仓自产的 PDF 改一处正文 → pdf.js 读回新文字、其他页字节不动、能撤销；对无 ToUnicode/扫描件/签名文件
 **给出中文拒绝理由而不是静默改坏**（逐条有单测）。
@@ -494,8 +494,20 @@ D6 的通用 schema 核心 + `PPT_TOOLS`（分析/整理/生成三类），提�
 先按**内容**比对再动手，所以撤那一条不会把用户后来的手工编辑一起冲掉（§2.5）。
 装配那一半已落（2026-10-15）：`electron/pdfHandlers.ts` 开四条通道，`src/pdf/{pdfRuns,PdfView}` 是判定层与视图（草稿只交定位键，
 字节预算不在渲染层判——编码规则属于 `pdf-io`，再算一遍就是第二套换算，§2.1），`src/pdf/pdfHistory.ts` 复用同一份 modlog
-（记录标签「PDF 改动」，签名是 `applied`，与文档 / 表格 / 幻灯片那三类同存一个 docKey）。**还没接**：AI 工具面（面板里那句
-docx 引导语在 pdf 模式下是错的，等 `pdf-tools` 一起改）、`print:pdf` 旁路、`oc pdf check`。
+（记录标签「PDF 改动」，签名是 `applied`，与文档 / 表格 / 幻灯片那三类同存一个 docKey）。
+**AI 工具面已落（2026-10-15，阶段 5 的 pdf 那一半）**：`packages/pdf-tools` 给三条工具（`pdf_describe` / `pdf_read_page_text` /
+`pdf_submit_proposal`），zod 入参解析与 OpenAI 形态声明逐项相等（沿用 `ppt-tools` 那条单测口径）；**模型只看 pageNumber（1 基）与
+runIndex（该页第 0 基条），引擎坐标 `streamRef`/`withinForm`/`start` 绝不上送**，换算只发生一次，在 `apps/desktop/src/ai/pdfAgent.ts`
+的 `pdfRequestsOfProposal` 里——页码越界、runIndex 越界、`runEditBlock` 判不可改（内联流 / 认不出念作什么）、与原文相同、字数不等
+这五种各给一句中文 `notes` 而不是把坏条目送去写（§2.4 是整批不写，混进去等于让用户白点一次确认；字数那条只是**预筛注定失败的项**，
+字节权威仍在引擎）。落地仍是 `App.commitPdfEdits` → `pdf:edit` 那一个口，所以 modlog 记录、撤销凭据、失败文案（`pdfFailureText`）
+都只有一份；卡片不新开第三张，`TOOL_CARD_COPY.pdf` 加进 docx/表格/幻灯片共用的那一张工具回合卡。pdf 模式下 docx 那套
+快捷指令与选区改写入口一并关掉（它们改的是 Tiptap 编辑器，对着 PDF 点了会误导），引导语换成 PDF 那条。
+**这一批顺手抓出并修掉一条 §5.2 红线缺陷**：渲染层 import 了 `pdf-io` 的**主入口**，Vite 于是把 `require("zlib")` 与 `@cantoo/pdf-lib`
+打进浏览器包，真 app 里 PDF 视图挂载前就抛 `ReferenceError: require is not defined`，整页空白——`pnpm build` 与 `pnpm test` 全都能过，
+只有实跑 CDP 才看得见。修法是把包分两半：无 Node 的那一半（`pdf-model.ts` 的类型与判定 + `analysis.ts` 的 AI 读面）经新子入口
+`@office-copilot/pdf-io/pure` 给渲染层，带 `node:zlib`/pdf-lib 的 `pdf-file.ts` 只留主进程；并补 `apps/desktop/src/pdf/rendererIoEntry.test.ts`
+作机检（`src/` 下任何文件 import 主入口即失败）。**还没接**：`print:pdf` 旁路、`oc pdf check`、逻辑行拼接（W2 前置）。
 
 ### 阶段 8 · 收口：CLI、文档、规则落地 — `[~] oc ppt info / oc ppt check 与 README 的 PPT 事实已落；`oc pdf check`、AGENTS.md 更新仍缺`
 **完成判定**：`oc ppt check`/`oc pdf check` 可用；`README.md` 与 `AGENTS.md` 里四类格式的既有事实更新；
@@ -514,7 +526,7 @@ docx 引导语在 pdf 模式下是错的，等 `pdf-tools` 一起改）、`print
 | 4 | `packages/pptx-io/src/edit.ts`（op + 逆操作 + 现场核对）、`apps/desktop/src/slides/slideHistory.ts` | 复用 modlog，不新建历史栈；落点与初稿写的 `slide-edit.ts`/`src/slide/` 的差别同 D7 的"已落" |
 | 5 | `packages/agent-tools`（新，D6）、`packages/ppt-tools`、`apps/desktop/src/ai/slideAgent.ts` | 工具循环复用 `ai:tool-turn` |
 | 6 | `packages/pptx-io/src/chart-spec.ts` + 复用 `packages/sheet-io` 公开入口 | D9 |
-| 7 | `packages/pdf-io/src/{pdf-file,content-stream,xref,text-map}.ts`、`apps/electron/printHandlers.ts` | D8 甲档 |
+| 7 | `packages/pdf-io/src/{pdf-file,pdf-model,pure,content-stream,xref,text-map}.ts`、`packages/pdf-tools/src/index.ts`、`apps/desktop/src/ai/pdfAgent.ts`、`apps/electron/printHandlers.ts` | D8 甲档；渲染层只准走 `@office-copilot/pdf-io/pure`（§5.2，见阶段 7 那条白屏缺陷） |
 | 8 | `apps/cli/src/{ppt,pdf}.ts`、`README.md`、`AGENTS.md`（由 dcc 改） | — |
 
 ---
@@ -604,6 +616,7 @@ docx 引导语在 pdf 模式下是错的，等 `pdf-tools` 一起改）、`print
 | 本次（pdf 线第一档：`packages/pdf-io` W1） | 7（读模型 + 同长度替换 + 增量更新） | `pnpm build` EXIT=0（`tsc` 抓到 `test-pdf.ts` 漏 `deflateSync` 导入——vitest 不做类型检查，所以只有 build 能抓到）；`pnpm test` EXIT=0，逐包：**pdf-io 13（新包）** / pptx-io 74 / opc 15 / desktop 503 / sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1199 条**（`packages/shared` 仍无测试文件） | 两份真实文件读回：WPS 简历 6 页 **5196 条 run 全解出**、`printToPDF` 产物 1 页 1113 条（932 条有文字，缺 ToUnicode 那 181 条如实给 `null` 而不是猜）。改→存→读回：`ps-cols-OLD.edited.pdf` **前缀 33 706 字节逐字不变 + delta 1 657 字节**，Apple **PDFKit** 抽取到"第 1 是这：段"且第二栏文字一字未动，**QuickLook 出的 PNG 肉眼核对**只有那四个 CID 字形换位、无豆腐块；自造 Helvetica 两页文件同样只改第一页。**依赖只有 `@cantoo/pdf-lib`（MIT），无原生模块** | `[~]` W1 那一档闭环（同长度、同框、同字体）；真实中文产物一条 run 一个字，"改一句话"要先拼逻辑行 → 归 W2 前置 |
 | 本次（pdf 线 W1 的撤销那一半） | 7（`revertPdfTextEdits` + `text-drifted` + 无 `/ToUnicode` 夹具） | `pnpm build` EXIT=0（`tsc` 抓到一处 `run.text` 可能为 null 就写进 `fromText` 的缺陷——不是类型洁癖：那条 run 我们**不知道原文念作什么**，现在改成 `no-encoding` 整批拒绝）；`pnpm test` EXIT=0，逐包：**pdf-io 17（+4：撤销回原文且那次也只追加 delta 1、别处后来的编辑一字不动、对不上内容给 `text-drifted` 且不产出字节、缺 ToUnicode 的读+拒）** / pptx-io 74 / opc 15 / desktop 503 / sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1 203 条** | 真文件（`tmp/ps-cols-OLD.pdf`）改→撤→读回：撤销那一次同样**前缀 35 363 字节逐字不变 + 再追加 1 644 字节**，新读模型里旧句"段：这是"回来了、改过的"是这：段"一条不剩，**Apple PDFKit 抽取第一句就是原文"第 1 段：这是一段足够长的中文正文"**；再拿一条对不上内容的 `applied` 去撤，只回 `text-drifted` 且不产出字节 | `[~]` §2.5 那一半在引擎侧闭环；modlog 落盘与真 app 通道归下一批 |
 | 本次（pdf 线的桌面装配那一半） | 13（`electron/pdfHandlers` 6 + `pdf/pdfRuns` 4 + `pdf/pdfHistory` 3）+ 四条通道进 preload 白名单 | `pnpm build` EXIT=0（`tsc` 抓到两处：测试里拿 `PdfTextRun` 当定位键用（`streamRef` 可为 null）、以及一处 JSX 少括号）；`pnpm test` EXIT=0，逐包：pdf-io 17 / pptx-io 74 / opc 15 / desktop **516**（+13）/ sheet-io 245 / docx-io 296 / pptx-tools 20 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1 216 条**（`packages/shared` 仍无测试文件） | **真 app（`dist` + CDP）跑第三方文件**（`~/Downloads/Modern Resume-edited.pdf`，一份 `printToPDF` 简历）：面板挂上后念"显示文字 14 段，可改 14 段"、每行带 `/BaseFont` 与"原位只有 N 字节"→ 把 "Jane Q. Doe" 改成同长度换位 "ane Q. DoeJ"（**新文字只用这条 run 自己出现过的字符**，所以字体子集必然收得下）→ 保存 toast「追加 402 字节增量，原来的字节没重排」→ 磁盘实测**前缀逐字节不变**、新读模型里新文字在 / 旧文字一条不剩 → `userData/modlog/<那份>.json` 出现一条「PDF 改动」（`applied` 带旧新文字）→ 撤销按钮随之可用，点下去旧文字回到文件里、那条记录 `undone:true`、文件仍是只追加。**截图留证** `tmp/pdf-ui/panel.png`。**AI 面板在 pdf 模式下仍是 docx 引导语**（工具面未开工，等 `pdf-tools` 一起改） | `[x]` 阶段 7 的"打开→改→存→撤"真 app 通道闭环；`oc pdf check`、AI 工具面、逻辑行拼接（W2 前置）归入后续 |
+| 本次（pdf 线的 AI 工具面，含顺手修掉的 §5.2 白屏缺陷） | 32 新条（`pdf-io/src/analysis.ts` 的 AI 读面 8 + 新包 `packages/pdf-tools` 10 + `src/ai/pdfAgent.test.ts` 10 + `src/pdf/rendererIoEntry.test.ts` 1；`pdf-io` 现 28 = 读写 20 + 读面 8） | `pnpm build` EXIT=0；`pnpm test` EXIT=0，逐包：**pdf-io 28** / **pdf-tools 10（新包）** / pptx-io 74 / pptx-tools 20 / opc 15 / desktop **527** / sheet-io 245 / docx-io 296 / sheet-tools 12 / word-client 8 / word-tools 6 / cli 5 / server 2 = **1 248 条**（`packages/shared` 仍无测试文件）。提交分六刀：`6a7e403` 读面 → `823fc8f` 工具包 → `26dca36` 入参判定去重 → `f99a4a6` 代理 → `1f7ace9` 装配 → `1bbb4fa` 白屏修复 | **真 app（`dist` + CDP，同一份第三方 `printToPDF` 简历）**：① 面板挂上（14 段）＋ PDF 引导语 ＋ PDF 那句输入提示；② docx 才有的两个入口（快捷指令开关、自动排版）在 pdf 模式下回 `false`——它们改的是 Tiptap 编辑器，对着 PDF 点了会误导；③ 模式说明是"…点「应用到 PDF」才写文件，之后可在 PDF 面板点「撤销上一次保存」回退"；④ 发一句话后卡头 **AI PDF 提案**、正文「还没有配置模型。点右上角⚙️…」、状态 **未写入**。**探针 profile 没配 Key，所以这轮证的是装配面**（工具回合卡、needsSetup 分支、落地共用 `commitPdfEdits`→`pdf:edit`）；模型会不会点对 `pdf_*` 工具名与页内 runIndex **仍待真端点探针**，与 B5 同口径。**缺陷实跑记录**：第一次跑连①都过不去（"等不到 PDF 面板挂载"、`#root` 空子），`Runtime.exceptionThrown` 抓到 `ReferenceError: require is not defined`、bundle 里有 `require("zlib")`——渲染层 import 了 `pdf-io` 主入口，而 `pnpm build` 与 `pnpm test` 一路全绿。拆出 `@office-copilot/pdf-io/pure`（只含类型、判定与 AI 读面）后 bundle 0 命中、面板挂上，并补 `rendererIoEntry.test.ts` 作机检 | `[x]` 阶段 5 的 pdf 那一半闭环：模型只交引用与页号/runIndex、引擎坐标不上送、只提案不落地（§2.8）、失败条目逐条给中文理由（§2.4 整批语义不被拖坏）；`[!]` 模型行为未验（本机无端点），`oc pdf check`、`print:pdf` 旁路、逻辑行拼接（W2 前置）仍缺 |
 
 ---
 
