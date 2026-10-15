@@ -22,7 +22,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@cantoo/pdf-lib": "^2.11.1"
+    "@cantoo/pdf-lib": "^2.11.1",
+    "@office-copilot/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
