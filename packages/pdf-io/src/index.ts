@@ -12,4 +12,5 @@ export * from "./content-stream.js";
 export * from "./strings.js";
 export * from "./pdf-model.js";
 export * from "./pdf-file.js";
+export * from "./check.js";
 export * from "./analysis.js";

@@ -16,6 +16,7 @@
   "dependencies": {
     "@clack/prompts": "^0.7.0",
     "@office-copilot/docx-io": "workspace:*",
+    "@office-copilot/pdf-io": "workspace:*",
     "@office-copilot/pptx-io": "workspace:*",
     "@office-copilot/sheet-io": "workspace:*",
     "@office-copilot/shared": "workspace:*",
