@@ -13,7 +13,7 @@
  */
 import { children, findChildren, firstChild, loadPackage, parseDocument, readText, resolveTarget, text, type Element, type OpcPackage } from "@office-copilot/opc";
 import { createGeometryInheritance, readExplicitBoxAxes, type BoxAxisSource, type GeometryInheritance, type PlaceholderKey } from "./inherit.js";
-import { PRESENTATION_PART } from "./parts.js";
+import { PRESENTATION_PART, isNotesSlideRelationship } from "./parts.js";
 import { halfPointToPt, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
 /** 一个形状（`<p:sp>` / `<p:pic>` / `<p:graphicFrame>` / `<p:grpSp>`）的只读快照。 */
@@ -76,6 +76,14 @@ import { type SlideReadFailure } from "@office-copilot/shared";
 
 export type { SlideReadFailure };
 
+/** 一张幻灯片的演讲者备注（`ppt/notesSlides/notesSlideN.xml` 里那个 `type="body"` 占位符）。 */
+export interface SlideNotes {
+  /** 备注部件的包内路径，便于排查（不是关系 id，关系解析在我们这边已经完成）。 */
+  partPath: string;
+  /** 备注正文逐段文字（只取 `p:ph type="body"` 那一个形状；页码、幻灯片缩略图那些占位符不算备注）。 */
+  paragraphTexts: string[];
+}
+
 /** 一张幻灯片。 */
 export interface Slide {
   /** 包内路径，如 `ppt/slides/slide1.xml`。 */
@@ -94,6 +102,14 @@ export interface Slide {
    * （实测撞到的，spec line 439）。
    */
   readFailure?: SlideReadFailure;
+  /**
+   * 这一页的演讲者备注（`<p:ph type="body">` 那个占位符，逐段文字）。
+   *
+   * 没有指向备注部件的关系时整格 undefined；有备注部件但没写字时仍是这一格，只是段落文字是空串
+   * （WPS 自带模板那份实测：`<a:p><a:endParaRPr/></a:p>` 读回来就是 `[""]`）。
+   * 这两件事必须分得开：AI 问"这页有备注吗"时，缺部件回"没有备注页"、空备注回"有备注页但没写字"。
+   */
+  notes?: SlideNotes;
 }
 
 /** 整份演示文稿的只读模型。 */
@@ -154,6 +170,7 @@ export async function readModelFromPackage(pkg: OpcPackage): Promise<Presentatio
       slideId: Number(sldId.attributes["id"] ?? 0),
       shapes,
       ...(readFailure ? { readFailure } : {}),
+      notes: await readSlideNotes(pkg, partPath),
     });
   }
   return { slideSizeEmu, slides };
@@ -191,6 +208,45 @@ async function readSlideShapes(
     shapes.push(await readShape(el, kind, partPath, inheritance));
   }
   return { shapes };
+}
+
+/**
+ * 读一张幻灯片的演讲者备注（经它自己的关系表找 `<p:notes>` 部件）。
+ *
+ * @param pkg 已加载的包。
+ * @param slidePartPath 幻灯片部件路径，关系表在 `ppt/slides/_rels/` 下按它查。
+ * @returns 备注正文（逐段）；这页没有指向备注部件的关系时 undefined（"没有备注页"），
+ *   有部件但 `type="body"` 那个占位符没写字时返回空数组（"有备注页但没写字"）。部件缺失或解析失败一律 undefined，
+ *   与 `readSlideShapes` 同一条宽容规则：备注读不动不许把整页判成读不懂。
+ */
+async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<SlideNotes | undefined> {
+  const rels = pkg.relsBySourcePart.get(slidePartPath) ?? [];
+  const rel = rels.find((entry) => isNotesSlideRelationship(entry.type));
+  if (!rel) return undefined;
+  const partPath = resolveTarget(slidePartPath, rel.target);
+  const xml = await readText(pkg.zip, partPath);
+  if (xml === undefined) return undefined;
+  let notesRoot: Element;
+  try {
+    notesRoot = parseDocument(xml);
+  } catch {
+    return undefined;
+  }
+  const cSld = firstChild(notesRoot, "p:cSld");
+  const spTree = cSld ? firstChild(cSld, "p:spTree") : undefined;
+  if (!spTree) return undefined;
+  for (const el of children(spTree)) {
+    if (el.name !== "p:sp") continue;
+    const nvPr = firstChild(el, "p:nvSpPr");
+    const phHost = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
+    const ph = phHost ? firstChild(phHost, "p:ph") : undefined;
+    // 只认备注正文那一格：sldImg（幻灯片缩略图）、sldNum/hdr/ftr（页码页眉页脚，正文是 `<a:fld>` 算出来的）都不是用户写的备注。
+    if (ph?.attributes["type"] !== "body") continue;
+    const txBody = firstChild(el, "p:txBody");
+    const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
+    return { partPath, paragraphTexts: paragraphs.map((p) => text(p)) };
+  }
+  return { partPath, paragraphTexts: [] };
 }
 
 /**

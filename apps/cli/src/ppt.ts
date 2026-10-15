@@ -71,6 +71,12 @@ export function registerPptCommands(program: Command): void {
             const text = clip(shape.paragraphTexts.join(" / "), opts.maxText);
             log(`    ${pc.yellow(`id=${shape.shapeId}`)} ${shape.name}（${tags}）${text ? `  ${pc.dim(text)}` : ""}`);
           }
+          // 没有备注页时这行不打（跟"形状没文字就不打"同一个口径）；有备注页时把"没写字"如实说出来，
+          // 免得读的人以为备注页是读不动。
+          if (slide.notes) {
+            const notes = slide.notes.paragraphTexts.join(" / ").trim();
+            log(pc.dim(`    备注（${slide.notes.partPath}）：${notes === "" ? "有备注页但没写字" : clip(notes, opts.maxText)}`));
+          }
         }
       });
     });

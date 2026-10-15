@@ -81,6 +81,15 @@ export interface SlideOutlineEntry {
   /** 形状清单是否被 `maxShapesPerSlide` 截断。 */
   shapesTruncated: boolean;
   /**
+   * 这一页的演讲者备注概要（各段用 `⏎` 隔开，超长已截）；没有备注部件时 null。
+   *
+   * 与"有备注页但一个字都没写"的差别靠 `notesPartPath` 分：后者是空串。模型回答"这页有没有备注"时
+   * 不许把"没有备注页"说成"备注是空的"。
+   */
+  notes: string | null;
+  /** 备注部件路径；没有该部件时 null。 */
+  notesPartPath: string | null;
+  /**
    * 这一页**读不懂**的码（`missing-part` / `invalid-xml` / `no-sp-tree`），读得懂时 null。
    *
    * 与 `shapeCount: 0` 的区别必须让模型看得见：后者才是"这页真的没形状"，前者要说成"这页读不动"。
@@ -162,6 +171,8 @@ function outlineOfSlide(slide: Slide, slideNumber: number, maxShapesPerSlide: nu
     })),
     shapesTruncated: slide.shapes.length > listed.length,
     readFailure: slide.readFailure ?? null,
+    notes: slide.notes ? clipText(slide.notes.paragraphTexts.join("⏎"), RUN_TEXT_LIMIT).text : null,
+    notesPartPath: slide.notes?.partPath ?? null,
   };
 }
 

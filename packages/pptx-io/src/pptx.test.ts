@@ -8,14 +8,18 @@ import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeSha
  *
  * @param slideXml 要写进 `ppt/slides/slide1.xml` 的文本；传 `null` 表示**这个部件干脆不存在**
  *   （关系表仍指向它），用来验读侧的失败码；不传用默认那份三形状幻灯片。
+ * @param notesText 给定时额外挂一个备注部件（`ppt/notesSlides/notesSlide1.xml`，带关系与内容类型 Override，
+ *   照 §2.10 那三处一起登记），段落用它拼出来；不给就没有备注页。
  * @returns zip 的 Uint8Array。含一张 4:3 幻灯片、三种形状（标题占位符、正文占位符、自带几何的文本框）
  *   与一个二进制部件，用来同时验读模型与保真回写。
  */
-async function minimalDeck(slideXml?: string | null): Promise<Uint8Array> {
+async function minimalDeck(slideXml?: string | null, notesText?: string): Promise<Uint8Array> {
   const zip = new JSZip();
+  const notesOverride =
+    '<Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>';
   zip.file(
     "[Content_Types].xml",
-    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>',
+    `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>${notesText === undefined ? "" : notesOverride}</Types>`,
   );
   zip.file(
     "_rels/.rels",
@@ -32,6 +36,21 @@ async function minimalDeck(slideXml?: string | null): Promise<Uint8Array> {
   const defaultSlideXml =
     '<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>标题甲</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content Placeholder 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>副标题乙</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="TextBox 3"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="914400" y="3657600"/><a:ext cx="2743200" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>正文丙</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>';
   if (slideXml !== null) zip.file("ppt/slides/slide1.xml", slideXml ?? defaultSlideXml);
+  if (notesText !== undefined) {
+    // 备注部件照 WPS 自带模板里那份的真实形状：sldImg + body + sldNum 三个占位符，页码那格正文是 `<a:fld>`，
+    // 读侧只许取 body 那一格的文字（把页码念成备注就是编内容）。
+    zip.file(
+      "ppt/slides/_rels/slide1.xml.rels",
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>',
+    );
+    zip.file(
+      "ppt/notesSlides/notesSlide1.xml",
+      `<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="幻灯片图像占位符 1"/><p:cNvSpPr/><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>缩略图里不该被读到的字</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="备注占位符 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/>${notesText
+        .split("⏎")
+        .map((line) => `<a:p><a:r><a:t>${line}</a:t></a:r></a:p>`)
+        .join("")}</p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="灯片编号占位符 3"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" sz="quarter" idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="{85D0DACE-38E0-42D2-9336-2B707D34BC6D}" type="slidenum"><a:r><a:t>1</a:t></a:r></a:fld></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>`,
+    );
+  }
   zip.file("ppt/printerSettings/printerSettings1.bin", new Uint8Array([1, 2, 3, 4, 5]));
   return zip.generateAsync({ type: "uint8array" });
 }
@@ -101,6 +120,32 @@ describe("pptx-io：一页读不懂时的失败码（spec line 439）", () => {
     const normal = (await readPresentation(await minimalDeck())).model.slides[0]!;
     expect(normal.readFailure).toBeUndefined();
     expect(normal.shapes).toHaveLength(3);
+  });
+});
+
+describe("pptx-io：演讲者备注的读侧（spec 阶段 2 那条「notes 仍缺」）", () => {
+  it("只取 type=\"body\" 那一格：缩略图占位符与页码字段都不算备注正文", async () => {
+    const slide = (await readPresentation(await minimalDeck(undefined, "第一句备注⏎第二句备注"))).model.slides[0]!;
+    expect(slide.notes?.partPath).toBe("ppt/notesSlides/notesSlide1.xml");
+    expect(slide.notes?.paragraphTexts).toEqual(["第一句备注", "第二句备注"]);
+  });
+
+  it("没有备注部件与有部件但没写字是两件事，不许混着报", async () => {
+    const none = (await readPresentation(await minimalDeck())).model.slides[0]!;
+    expect(none.notes).toBeUndefined();
+    const empty = (await readPresentation(await minimalDeck(undefined, ""))).model.slides[0]!;
+    expect(empty.notes?.partPath).toBe("ppt/notesSlides/notesSlide1.xml");
+    expect(empty.notes?.paragraphTexts).toEqual([""]);
+  });
+
+  it("备注部件是未建模部件：一条都不改地存回去，字节与段落都原样", async () => {
+    const bytes = await minimalDeck(undefined, "原样带过的备注");
+    const out = await (await PptxFile.open(bytes)).toBytes();
+    const zip = await JSZip.loadAsync(out);
+    expect(await zip.file("ppt/notesSlides/notesSlide1.xml")!.async("string")).toBe(
+      await (await JSZip.loadAsync(bytes)).file("ppt/notesSlides/notesSlide1.xml")!.async("string"),
+    );
+    expect((await readPresentation(out)).model.slides[0]!.notes?.paragraphTexts).toEqual(["原样带过的备注"]);
   });
 });
 

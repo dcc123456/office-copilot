@@ -131,3 +131,30 @@ describe("readSlideText：逐 run 的文字与格式", () => {
     expect(describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 }).slides[0]!.readFailure).toBeNull();
   });
 });
+
+describe("演讲者备注：模型看到的这一页有没有备注", () => {
+  it("没有备注部件时 notes 与 notesPartPath 都是 null（不许说成\"备注是空的\"）", async () => {
+    const { model } = await readPresentation(await analysisDeck());
+    const slide = describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 }).slides[0]!;
+    expect(slide.notes).toBeNull();
+    expect(slide.notesPartPath).toBeNull();
+  });
+
+  it("有备注部件时给出逐段拼起来的概要，页码字段不进概要", async () => {
+    const parts = minimalDeckParts();
+    parts["ppt/slides/_rels/slide1.xml.rels"] = parts["ppt/slides/_rels/slide1.xml.rels"]!.replace(
+      "</Relationships>",
+      '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/></Relationships>',
+    );
+    parts["ppt/notesSlides/notesSlide1.xml"] =
+      '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="2" name="幻灯片图像占位符 1"/><p:cNvSpPr/><p:nvPr><p:ph type="sldImg"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>缩略图</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="备注占位符 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>先讲背景</a:t></a:r></a:p><a:p><a:r><a:t>再讲结论</a:t></a:r></a:p></p:txBody></p:sp>' +
+      '<p:sp><p:nvSpPr><p:cNvPr id="4" name="灯片编号占位符 3"/><p:cNvSpPr/><p:nvPr><p:ph type="sldNum" idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:fld id="{85D0DACE-38E0-42D2-9336-2B707D34BC6D}" type="slidenum"><a:r><a:t>7</a:t></a:r></a:fld></a:p></p:txBody></p:sp>' +
+      "</p:spTree></p:cSld></p:notes>";
+    const { model } = await readPresentation(await buildDeckBytes(parts));
+    const slide = describeDeck(model, { maxSlides: 20, maxShapesPerSlide: 20 }).slides[0]!;
+    expect(slide.notes).toBe("先讲背景⏎再讲结论");
+    expect(slide.notesPartPath).toBe("ppt/notesSlides/notesSlide1.xml");
+  });
+});

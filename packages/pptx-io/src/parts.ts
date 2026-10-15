@@ -12,6 +12,11 @@ export function isSlideRelationship(type: string): boolean {
   return type.endsWith("/relationships/slide");
 }
 
+/** 一条关系 `@Type` 是不是"指向演讲者备注页"（`notesSlide` 结尾比 `slide` 长，不会被上面那条误收）。 */
+export function isNotesSlideRelationship(type: string): boolean {
+  return type.endsWith("/relationships/notesSlide");
+}
+
 /** 关系类型 URI 的公共前缀，新建关系时拼上具体角色名。 */
 export const PPTX_REL_TYPE_PREFIX = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
