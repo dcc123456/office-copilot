@@ -299,6 +299,12 @@ python-pptx 读回形状名/占位符类型/文字全等，Keynote 打开后 `co
 这条同时是 §7.4⑥ 的"第三方办公软件真读过"与 §7.2 的"画面看得到"两层证据，pptx 线到这里不再有目视 BLOCKED。
 **已落齐**：D3/D4 同一条红线下的三档全落——几何逐轴继承见下段，颜色（`packages/pptx-io/src/theme.ts`：`a:schemeClr` 沿母版 `p:clrMap` 与主题 `a:clrScheme` 解成 `#rrggbb` 交 UI，带 `lumMod`/`tint` 这类变换子元素与 `phClr` 一律不解、回 `undefined`，本机没有能核对 PowerPoint 画面的通道，算错的颜色比没有颜色更坏），字号（`packages/pptx-io/src/text-styles.ts`：run 没写 `sz` 时沿 段落 `a:pPr/a:defRPr` → 形状 `a:lstStyle` → 版式那一格 → 母版那一格 → 母版 `p:txStyles` 逐层问，交 `effectiveSizePt` + `effectiveSizeSource`，`sizePt` 仍只表示"自己写了 `sz`"，链上查不到就不给数、不拿 18pt 这类常见默认凑）。notes 部件的解析已落（`162cb38`，只读侧：`Slide.notes` 逐段文字 + 画像里的 `notes`/`notesPartPath`，只取 `p:ph type="body"` 那一格，页码 `<a:fld>` 与缩略图占位符不算备注；写侧那条备注 op 仍缺）。审计与 CLI 那条已落，见 D10 的"已落"段。
 
+**备注写侧的前置取证（2026-10-15，`zipfile` 直读 WPS 自带模板与 python-pptx 产物，不拿我们的读侧自证）**：结论是**写侧几乎一定要新建部件**，而不是"改已有备注那一格"。
+本机 WPS 的 106 份 `.pptx` 模板里，抽样能打开的 8 份真文件（`normal.pptx`、`normal_mac.pptx`、`normal_gray_mac.pptx`、`new_wpp.pptx`、`newfile*.pptx`、`default.pptx`）**notesSlide 部件数全为 0**——模板只给版式与母版，不给备注页；
+其中**有 notesMaster 的只有 4 份**（`normal_mac` / `normal_gray_mac` / `normal_black_mac` / `new_wpp`），另外 4 份连备注母版都没有。python-pptx 侧同样：默认模板产的 deck `notesMaster=0`，从 WPS `new_wpp.pptx` 生成的那份 `notesMaster=1`、`notesSlide=0`。
+所以那条 op 的**第一档只能是"这页已有备注页时改它"**（改动只在已建模的 `p:txBody` 里，走现成的 `toOp` 前像通道）；**第二档是新建 `notesSlide`**——按 §2.10 要三处一起登记（部件本体 + 幻灯片侧 `<Relationship>` + `[Content_Types].xml` 的 Override，另加备注页自己那两份 `.rels` 指向幻灯片与 notesMaster），而**指向 notesMaster 这一条在 4/8 的真文件里根本无从指向**。
+据此定的最小范围（不动手，留给写侧那批）：**没有 notesMaster 就整条拒绝并给一句中文理由**，不许自己造一份备注母版——那等于凭空发明版式，与 D3"读不懂宁可不写"同一条线。
+
 **D3 几何继承链已落（2026-10-15，`packages/pptx-io/src/inherit.ts`）**：一手依据是本机读到的 python-pptx 1.0.2
 `shapes/placeholder.py` —— `_InheritsDimensions._effective_value` 是**逐轴**回退（自己有就用，没有才问上一层），
 `_BaseSlidePlaceholder._base_placeholder` 用 `layout.placeholders.get(idx=)` 按 **idx** 匹配幻灯片→版式，
