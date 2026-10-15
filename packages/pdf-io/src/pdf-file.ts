@@ -213,6 +213,8 @@ function walkStream(doc: PDFDocument, key: unknown, pageIndex: number, withinFor
       tokenLength: run.operand.end - run.operand.start,
       baseFont: font ? plainName(font.get(PDFName.of("BaseFont"))) : null,
       composite: font ? plainName(font.get(PDFName.of("Subtype"))) === "Type0" : false,
+      fontSizePt: run.fontSizePt,
+      origin: run.origin,
       codes,
       text: decodeOperandText(run.operand, codes),
       stream: ref ? stream : null,

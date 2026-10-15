@@ -24,6 +24,8 @@ function run(overrides: Partial<PdfTextRun> = {}): PdfTextRun {
     tokenLength: 23,
     baseFont: "Helvetica",
     composite: false,
+    fontSizePt: 11,
+    origin: { x: 72, y: 720 },
     text: "Quarterly Report 2026",
     ...overrides,
   };

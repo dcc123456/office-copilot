@@ -32,6 +32,22 @@ export interface PdfTextRun {
   baseFont: string | null;
   /** 是不是 Type0/CID 复合字体（中文产物基本都是）。 */
   composite: boolean;
+  /**
+   * 生效字号（**pt，PDF 用户空间**，不是 CSS px）：`Tf` 字面那个数**已经乘过**文字矩阵与 CTM 的缩放。
+   *
+   * 乘缩放是因为 WPS 一类产物写 `0.05 0 0 -0.05 x y Tm` + `/FT8 439 Tf`，看到的其实是 22pt；
+   * 直接把 439 交出去会让下一个读这个字段的人（视图、AI 概要）按 439pt 排版。没出现过 `Tf` 时为 null。
+   */
+  fontSizePt: number | null;
+  /**
+   * 字形原点（**PDF 用户空间单位，pt**，y 轴朝上、页面左下角是 (0,0)）。
+   *
+   * 取自最近一次显式定位算子（`Tm`/`Td`/`TD`/`T*`/`'`/`"`）再叠上 `cm`，**不是这条 run 的左边界**：
+   * Word 一行一条 `Tj` 时同一行共享原点，WPS 一字一条 `TD` 时每个字形原点都不同，但两种形态下**同一行的 y 相同**，
+   * 所以拼行按 y（带容差）、分栏再看 x 是否断开。跨内容流/跨 Form 层相比没有意义（Form 的 `/Matrix` 映射这里不做）。
+   * 从没出现过定位算子时按规范就是身份矩阵，于是 `(0, 0)` 是**真值**。
+   */
+  origin: { x: number; y: number };
   /** 解出来的文字；字体认不出或子集缺码时为 null。 */
   text: string | null;
 }
