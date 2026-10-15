@@ -358,6 +358,9 @@ importers:
 
   packages/pptx-tools:
     dependencies:
+      '@office-copilot/shared':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -370,6 +373,10 @@ importers:
         version: 2.1.9(@types/node@20.19.43)(jsdom@30.0.1)(terser@5.50.0)
 
   packages/shared:
+    dependencies:
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       typescript:
         specifier: ^5.5.4
@@ -405,6 +412,9 @@ importers:
 
   packages/sheet-tools:
     dependencies:
+      '@office-copilot/shared':
+        specifier: workspace:*
+        version: link:../shared
       zod:
         specifier: ^3.23.8
         version: 3.25.76

@@ -6,7 +6,7 @@
  * 它的七类改动（改 run 文字 / 改 run 字体 / 改 run 颜色 / 移动缩放形状 / 调整叠放次序 / 加文本框 / 删形状）与
  * `pptx-io/edit.ts` 里**自带逆操作**的七个 op 一一对应——表达不了的（改版式与母版）宁可不提供，
  * 也不发一批没有逆操作的直写（§2.5）。
- * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `pptx-io`**——它只管"这套入参合不合法"，
+ * 按 spec §三 的包边界，本包只依赖 `zod` 与 `@office-copilot/shared`（那条入参判定共用一份）、**不 import `pptx-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 slideAgent）拿校验过的入参去调引擎函数：把 `slideNumber` 翻成部件路径、
  * 把 `{shapeId,paraIndex,runIndex}` 交给 `setShapeRunText`/`setRunFont`/`setRunColor`、
  * 把 `{shapeId}` 交给 `setShapeGeometry`/`moveShapeLayer`/`removeShape`、把整页路径交给 `addTextBox`。
@@ -15,6 +15,7 @@
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
  */
 import { z } from "zod";
+import { parseToolArguments as parseToolArgumentsAgainst, type ToolArgsOutcome } from "@office-copilot/shared";
 
 /** 幻灯片页号，1 基（模型数页从 1 开始，和界面上"第 N 页"一致）。 */
 const SlideNumber = z.number().int().min(1).max(500).describe("幻灯片页号，1 基（第 1 页就是 1）。来自 ppt_describe 列出的页号，别自己猜。");
@@ -202,29 +203,18 @@ export type ReadSlideTextArgsT = z.infer<typeof ReadSlideTextArgs>;
 export type SubmitProposalArgsT = z.infer<typeof SubmitProposalArgs>;
 export type PptxEditT = z.infer<typeof PptxEdit>;
 
-/** 入参解析结果：`ok:false` 时 `reason` 是直接回给模型的错误串（验收 B9）。 */
-export type ToolArgsOutcome<T> = { ok: true; args: T } | { ok: false; reason: string };
-
 /**
- * 解析模型给的入参：JSON 语法错、缺字段、多字段、越界都变成错误串，**永不抛异常**。
+ * 解析模型给的入参：JSON 语法错、缺字段、多字段、越界都换成给模型看的错误串，**永不抛异常**（验收 B9）。
+ *
+ * 判定本身在 `@office-copilot/shared`——几个工具面用的是同一条，抽出来只留一份（`AGENTS.md` §3.2）；
+ * 这里只把本包那张 schema 表接上，让调用方拿到按工具名收窄过的入参类型。
  *
  * @param name 工具名；不在 `PPTX_TOOL_SCHEMAS` 里时给"不认识的工具"。
  * @param rawArguments 模型回包里的 `function.arguments` 原文（JSON 字符串）。
  * @returns 校验过的入参，或给模型看的失败理由。
  */
 export function parseToolArguments<T extends PptxToolName>(name: T, rawArguments: string): ToolArgsOutcome<z.infer<(typeof PPTX_TOOL_SCHEMAS)[T]>> {
-  const schema = PPTX_TOOL_SCHEMAS[name];
-  if (!schema) return { ok: false, reason: `不认识的工具：${String(name)}` };
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(rawArguments);
-  } catch {
-    return { ok: false, reason: `工具 ${name} 的入参不是合法 JSON，请按 schema 重写。` };
-  }
-  const result = schema.safeParse(parsedJson);
-  if (result.success) return { ok: true, args: result.data as z.infer<(typeof PPTX_TOOL_SCHEMAS)[T]> };
-  const details = result.error.issues.map((issue) => `${issue.path.join(".") || "(根对象)"}：${issue.message}`).join("；");
-  return { ok: false, reason: `工具 ${name} 的入参不合：${details}` };
+  return parseToolArgumentsAgainst(PPTX_TOOL_SCHEMAS, name, rawArguments);
 }
 
 /** 一条工具定义（OpenAI function-calling 形状，与 `SHEET_TOOLS`/`WORD_TOOLS` 同形）。 */

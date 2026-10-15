@@ -6,11 +6,12 @@
  * 写面只有 `sheet_submit_proposal` 一个出口，它的五类改动（改格 / 列宽 / 插行 / 删行 / 按列重排整行）
  * 与 `sheet-edit.ts` 里**自带逆操作**的五类 op 一一对应——表达不了的（拆合列、统一数字格式）
  * 宁可不提供，也不发一批没有逆操作的直写（§2.5，spec §七"整理写侧缺 op"；排序按决策 D7 立项后才有 op）。
- * 按 spec §三 的包边界，本包只依赖 `zod`、**不 import `sheet-io`**——它只管"这套入参合不合法"，
+ * 按 spec §三 的包边界，本包只依赖 `zod` 与 `@office-copilot/shared`（那条入参判定共用一份）、**不 import `sheet-io`**——它只管"这套入参合不合法"，
  * 执行由调用方（桌面 `sheetAgent`，提交 13）拿校验过的入参去调引擎函数。
  * 非法入参一律换成给模型看的错误串，永不抛异常（验收 B9）：入口只有 `parseToolArguments`。
  */
 import { z } from "zod";
+import { parseToolArguments as parseToolArgumentsAgainst, type ToolArgsOutcome } from "@office-copilot/shared";
 
 /**
  * 列引用：列字母（`C`）或表头原文（`销售额`）；同名表头用 `销售额#2` 取第二个。
@@ -237,29 +238,18 @@ export type CreateChartArgsT = z.infer<typeof CreateChartArgs>;
 export type SubmitProposalArgsT = z.infer<typeof SubmitProposalArgs>;
 export type SheetEditT = z.infer<typeof SheetEdit>;
 
-/** 入参解析结果：`ok:false` 时 `reason` 是直接回给模型的错误串（验收 B9）。 */
-export type ToolArgsOutcome<T> = { ok: true; args: T } | { ok: false; reason: string };
-
 /**
- * 解析模型给的入参：JSON 语法错、缺字段、多字段、越界都变成错误串，**永不抛异常**。
+ * 解析模型给的入参：JSON 语法错、缺字段、多字段、越界都换成给模型看的错误串，**永不抛异常**（验收 B9）。
+ *
+ * 判定本身在 `@office-copilot/shared`——几个工具面用的是同一条，抽出来只留一份（`AGENTS.md` §3.2）；
+ * 这里只把本包那张 schema 表接上，让调用方拿到按工具名收窄过的入参类型。
  *
  * @param name 工具名；不在 `SHEET_TOOL_SCHEMAS` 里时给"不认识的工具"。
  * @param rawArguments 模型回包里的 `function.arguments` 原文（JSON 字符串）。
  * @returns 校验过的入参，或给模型看的失败理由。
  */
 export function parseToolArguments<T extends SheetToolName>(name: T, rawArguments: string): ToolArgsOutcome<z.infer<(typeof SHEET_TOOL_SCHEMAS)[T]>> {
-  const schema = SHEET_TOOL_SCHEMAS[name];
-  if (!schema) return { ok: false, reason: `不认识的工具：${String(name)}` };
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(rawArguments);
-  } catch {
-    return { ok: false, reason: `工具 ${name} 的入参不是合法 JSON，请按 schema 重写。` };
-  }
-  const result = schema.safeParse(parsedJson);
-  if (result.success) return { ok: true, args: result.data as z.infer<(typeof SHEET_TOOL_SCHEMAS)[T]> };
-  const details = result.error.issues.map((issue) => `${issue.path.join(".") || "(根对象)"}：${issue.message}`).join("；");
-  return { ok: false, reason: `工具 ${name} 的入参不合：${details}` };
+  return parseToolArgumentsAgainst(SHEET_TOOL_SCHEMAS, name, rawArguments);
 }
 
 /** 一条工具定义（OpenAI function-calling 形状，与 `WORD_TOOLS` 同形）。 */
