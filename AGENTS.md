@@ -130,7 +130,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
 | 5.4 | 样式：桌面端只用 `src/styles/*.css`（`tokens.css` 存设计变量）这一套；任务窗格只用 Fluent UI（`@fluentui/react-components`）。**禁止**新增 CSS-in-JS、CSS Modules、第四套样式入口或内联 `style={}` 做视觉布局。 | `[纪律]` |
 | 5.5 | 需要固定/浮层的交互控件时，注意横向滚动容器会裁掉 `position: absolute` 子元素——这类菜单/弹层用 `position: fixed` 挂到视口坐标（工具栏颜色弹层、段落设置弹层既有先例），并保证不出屏（`hooks/useAnchoredMenu`）。 | `[机检]` `useAnchoredMenu` 单测 |
 | 5.6 | 指针拖拽（改宽度、改窗口尺寸）一律走 `hooks/usePointerDrag.ts` 的 `setPointerCapture` + 元素上的 `pointerup/pointercancel`，禁止再用 `window` 上的 `mousemove/mouseup`（松手不送达会留下"下次划过还在改"的缺陷）。热区必须带 `-webkit-app-region: no-drag`。 | `[机检]` `usePointerDrag` 单测 |
-| 5.7 | 页面文案：当前产品 UI 为**中文单语**，允许中文字面量；但不得把用户可见文案散进新的工具函数/引擎层（引擎只输出结构化 op 与错误码，文案在渲染层组装）。若未来要加第二语言，必须先立 i18n 方案再动。 | `[纪律]` |
+| 5.7 | 页面文案：当前产品 UI 为**中文单语**，允许中文字面量；但不得把用户可见文案散进新的工具函数/引擎层（引擎只输出结构化 op 与错误码，文案在渲染层组装）。**当两个装配层要念同一套话**（CLI 与桌面，如 `.pdf` 体检的那七句），句子放 `packages/shared`——既不留第二份在 app 里（§3.2），也不沉进 `packages/*-io`；shared 保持无 Node 能力，渲染层可以直接 import（§5.2 那条红线只挡 `pdf-io` 总入口这类）。若未来要加第二语言，必须先立 i18n 方案再动。 | `[纪律]` |
 | 5.8 | 目录不允许长期存在孤儿文件与"临时"目录；未完成的实现不进主干，或在验收条目里明确标 `[ ]`。 | `[纪律]` |
 
 ---
@@ -220,7 +220,7 @@ fix(desktop): 修复拖拽窗口边缘松手后仍在改尺寸
   所以⌘S（原生菜单 accelerator）在 CDP 合成键盘事件下根本到不了渲染层；实跑验收走命令面板（⌘K 是渲染层
   `window` 上的 keydown，能合成）点「保存」。幻灯片与 PDF 面板同理——它们各自是模式下的独立视图，实跑验收要先切进那个模式。
 - **`pnpm test` 根命令是 `passWithNoTests: true` + `pnpm -r`**：某个包没测试也会"全绿"。**必须逐包核对通过数**
-  （`packages/shared` 当前没有测试文件；`apps/cli` 逐次递增，2026-10-15 起是 6 条：sheet 4 + `oc ppt` 文案 1 + `oc pdf` 文案 1），不要只看总退出码就声称测过了。
+  （`packages/shared` 自 2026-10-15 起有 3 条——`parseToolArguments` 那一条判定与 PDF 体检文案；`apps/cli` 是 5 条：sheet 4 + `oc ppt` 文案 1，`oc pdf` 的那条跟着文案一起搬进了 shared），不要只看总退出码就声称测过了。
 - 类型检查没有独立脚本，**它藏在 build 里**（`desktop` 的 `build:renderer` 是 `tsc --noEmit && vite build`，
   `task-pane` 的 build 是 `tsc --noEmit`）。改完至少跑 `pnpm build`，只跑 `pnpm test` 不等于类型过。
 - `pnpm-workspace.yaml` 的 `allowBuilds` 里 `keytar`、`@azure/msal-node-extensions`、
