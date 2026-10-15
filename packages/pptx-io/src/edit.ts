@@ -69,6 +69,16 @@ export interface RunFontFormat {
   sizePt?: number;
 }
 
+/**
+ * 字体与颜色那两条 op 的落点：普通形状的 run 或表格里某一格的 run。
+ *
+ * 为什么只有一条 op 而不是再开第十、第十一条：两者改的是同一个 `<a:rPr>`（`b`/`sz`/`solidFill`），
+ * 差别只在"往下走到哪一条 `<a:r>`"，而那一步 `locateTableCellRun` 已经有了。开新 kind 会把这段
+ * 属性逻辑复制第二份（§3.2），还会让写侧的填充组顺序约束（同一 run 只能一个填充）散成两处。
+ * 判别方式：带了 `row`/`col` 就是表格那一格。
+ */
+export type RunTarget = ShapeRunTarget | TableCellRunTarget;
+
 const SHAPE_HOST_TAGS = ["p:sp", "p:pic", "p:graphicFrame", "p:grpSp", "p:cxnSp"];
 
 /** 目标形状的定位坐标（几何与叠放两条 op 只到形状粒度，不需要段/run）。 */
@@ -109,8 +119,8 @@ export interface SlideNotesTarget {
 export type PptxEditRequest =
   | { kind: "text"; target: ShapeRunTarget; text: string }
   | { kind: "table_text"; target: TableCellRunTarget; text: string }
-  | { kind: "font"; target: ShapeRunTarget; format: RunFontFormat }
-  | { kind: "color"; target: ShapeRunTarget; hex: string }
+  | { kind: "font"; target: RunTarget; format: RunFontFormat }
+  | { kind: "color"; target: RunTarget; hex: string }
   | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch }
   | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection }
   | { kind: "add_text_box"; target: SlidePartTarget; box: ShapeBoxPx; text: string }
@@ -189,21 +199,42 @@ function replaceRunText(located: { beforeXml: string; root: Element; run: Elemen
 }
 
 /**
+ * 这条字体/颜色坐标指的是表格里那一格吗（带了行与列两个下标就算）。
+ *
+ * @param target {@link RunTarget}，普通形状那一支没有 `row`。
+ * @returns true 表示走表格那一条定位链。
+ */
+function isTableCellTarget(target: RunTarget): target is TableCellRunTarget {
+  return (target as TableCellRunTarget).row !== undefined;
+}
+
+/**
+ * 定位一条 run：普通形状的 `p:txBody` 或表格里某一格的 `a:txBody`，两条链在字体/颜色那两条 op 里汇成一条。
+ *
+ * @param file 读写器。
+ * @param target run 定位坐标；带 `row`/`col` 时走表格那一格（续格、非表、行列越界的理由由 `locateTableCellRun` 给）。
+ * @returns 成功带 `{ beforeXml, root, run }`；任一层失败带 `{ ok:false, reason }`。
+ */
+async function locateRunTarget(file: PptxFile, target: RunTarget): Promise<LocatedRun> {
+  return isTableCellTarget(target) ? locateTableCellRun(file, target) : locateRun(file, target);
+}
+
+/**
  * 产出一条"改指定 run 的字体（粗体 / 字号）"的编辑提案，**不落地**。
  *
  * @param file 已打开的读写器。
- * @param target run 定位坐标。
+ * @param target run 定位坐标；带 `row`/`col` 时是表格里那一格的那条 run。
  * @param format 要改的字体属性；`bold` 与 `sizePt` 至少给一个，否则视为无操作拒绝。
  * @returns `{ ok, op }`：定位失败或属性非法时 `{ ok:false, reason }`。rPr 不存在时会新建一个 `<a:rPr/>` 插到 `<a:r>` 首位。
  */
-export async function setRunFont(file: PptxFile, target: ShapeRunTarget, format: RunFontFormat): Promise<SlideEditResult> {
+export async function setRunFont(file: PptxFile, target: RunTarget, format: RunFontFormat): Promise<SlideEditResult> {
   if (format.bold === undefined && format.sizePt === undefined) {
     return { ok: false, reason: "没有要改的字体属性（bold / sizePt 至少给一个）。" };
   }
   if (format.sizePt !== undefined && !(format.sizePt > 0)) {
     return { ok: false, reason: `字号必须是正数 pt：${format.sizePt}` };
   }
-  const located = await locateRun(file, target);
+  const located = await locateRunTarget(file, target);
   if (!located.ok) return located;
   const rPr = getOrCreateRunPr(located.run);
   if (format.bold !== undefined) rPr.attributes["b"] = format.bold ? "1" : "0";
@@ -215,14 +246,14 @@ export async function setRunFont(file: PptxFile, target: ShapeRunTarget, format:
  * 产出一条"改指定 run 的字体颜色"的编辑提案，**不落地**。
  *
  * @param file 已打开的读写器。
- * @param target run 定位坐标。
+ * @param target run 定位坐标；带 `row`/`col` 时是表格里那一格的那条 run。
  * @param hex 颜色，`#rrggbb`（编辑器内一律 hex，§2.2）；写进 OOXML 时去 `#` 存进 `<a:srgbClr val>`，是这一层唯一的颜色形态转换。
  * @returns `{ ok, op }`：定位失败或颜色非法时 `{ ok:false, reason }`。会替换该 run 已有的填充色，不动其它 run。
  */
-export async function setRunColor(file: PptxFile, target: ShapeRunTarget, hex: string): Promise<SlideEditResult> {
+export async function setRunColor(file: PptxFile, target: RunTarget, hex: string): Promise<SlideEditResult> {
   const val = normalizeHexColor(hex);
   if (!val) return { ok: false, reason: `颜色必须是 #rrggbb：${hex}` };
-  const located = await locateRun(file, target);
+  const located = await locateRunTarget(file, target);
   if (!located.ok) return located;
   const rPr = getOrCreateRunPr(located.run);
   // 替换现有填充：删掉填充组里的其它成员，只留新的 solidFill（同一 run 只能有一个填充）。

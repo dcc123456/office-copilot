@@ -1024,4 +1024,46 @@ describe("pptx-io：幻灯片里的表（读侧逐格 + 改某一格的一条 ru
     expect(notTable.ok).toBe(false);
     if (!notTable.ok) expect(notTable.reason).toContain("不是一张表");
   });
+
+  it("表格那一格的字体与颜色走的是同那两条 op：只补那一截自己的 rPr，同段另一截与隔壁格逐字不动（§2.3）", async () => {
+    const file = await PptxFile.open(await tableDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const font = await setRunFont(file, { partPath, shapeId: 5, row: 0, col: 1, paraIndex: 0, runIndex: 0 }, { bold: false, sizePt: 20 });
+    if (!font.ok) throw new Error(font.reason);
+    expect(font.op.beforeXml).toBe(original);
+    expect(font.op.afterXml).toContain('<a:rPr b="0" sz="2000"/><a:t>城</a:t>');
+    expect(font.op.afterXml).toContain("<a:r><a:t>市</a:t></a:r>"); // 同段另一截没被牵连
+    expect(font.op.afterXml).toContain("<a:r><a:t>姓名</a:t></a:r>"); // 隔壁那格没被牵连
+    applySlideEdit(file, font.op);
+    expect((await file.partText(partPath))!).toBe(font.op.afterXml);
+    revertSlideEdit(file, font.op);
+    expect((await file.partText(partPath))!).toBe(original);
+
+    const color = await setRunColor(file, { partPath, shapeId: 5, row: 1, col: 0, paraIndex: 1, runIndex: 0 }, "#00cc00");
+    if (!color.ok) throw new Error(color.reason);
+    expect(color.op.afterXml).toContain('<a:rPr><a:solidFill><a:srgbClr val="00CC00"/></a:solidFill></a:rPr><a:t>上海</a:t>');
+    expect(color.op.afterXml).toContain("<a:t>张三</a:t>"); // 同一格里上一段没被牵连
+    applySlideEdit(file, color.op);
+    const afterColor = (await file.partText(partPath))!;
+    expect(afterColor.match(/<a:solidFill>/g)?.length).toBe(1); // 全页只此一个填充：没给别的格子叠加填充
+    revertSlideEdit(file, color.op);
+    expect((await file.partText(partPath))!).toBe(original);
+  });
+
+  it("字体/颜色指向合并续格或非表形状时，各回一句表格那条的理由，不抛异常也不落盘", async () => {
+    const file = await PptxFile.open(await tableDeck());
+    const partPath = file.model.slides[0]!.partPath;
+    const original = (await file.partText(partPath))!;
+    const continuation = await setRunFont(file, { partPath, shapeId: 5, row: 1, col: 1, paraIndex: 0, runIndex: 0 }, { bold: true });
+    expect(continuation.ok).toBe(false);
+    if (!continuation.ok) expect(continuation.reason).toContain("它不画自己的字");
+    const notTable = await setRunColor(file, { partPath, shapeId: 2, row: 0, col: 0, paraIndex: 0, runIndex: 0 }, "#ff0000");
+    expect(notTable.ok).toBe(false);
+    if (!notTable.ok) expect(notTable.reason).toContain("不是一张表");
+    const rowOut = await setRunFont(file, { partPath, shapeId: 5, row: 7, col: 0, paraIndex: 0, runIndex: 0 }, { sizePt: 12 });
+    expect(rowOut.ok).toBe(false);
+    if (!rowOut.ok) expect(rowOut.reason).toBe("行号越界：7（这张表有 2 行）");
+    expect((await file.partText(partPath))!).toBe(original);
+  });
 });
