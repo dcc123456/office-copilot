@@ -1,6 +1,6 @@
 /**
  * `.pptx` 结构化编辑 op：改某个形状某段某 run 的文字、字体、颜色，改形状的位置/尺寸与叠放次序，
- * 在这一页新建文本框、删掉一个形状，全部产出可撤销的前/后像。
+ * 在这一页新建文本框、删掉一个形状，把某一页的演讲者备注整篇换掉，全部产出可撤销的前/后像。
  *
  * 与 `sheet-io` 的 `runSheetOps`/`revertSheetOps` 同一套契约（`AGENTS.md` §2.8、§3 不许第二套撤销栈）：
  * 引擎只**产出提案**（带 `beforeXml`/`afterXml` 的 op），落地与撤销由上层在用户确认后调用 `apply`/`revert`。
@@ -11,6 +11,7 @@
  * 实测：`serialize` 对本机真实幻灯片的往返**逐字一致**（仅声明后换行差异），所以重序列化不会误伤同段其它格式。
  */
 import { XML_DECLARATION, children, escapeText, firstChild, findChildren, isElement, isText, parseDocument, serialize, type Element, type XmlNode } from "@office-copilot/opc";
+import { findNotesBodyShape } from "./read.js";
 import { PptxFile } from "./pptx-file.js";
 import { ptToHalfPoint, pxToEmu, type ShapeBoxPx, type ShapeGeometryPatch } from "./units.js";
 
@@ -66,7 +67,18 @@ export interface SlidePartTarget {
 }
 
 /**
- * 一条要落地的幻灯片改动：`kind` 与本文件那七个 op 生产者一一对应，坐标原样交给它们。
+ * 备注的落点坐标：备注部件自己的包内路径（读模型 `Slide.notes.partPath` 给的就是它）。
+ *
+ * 为什么不用"页号 + 形状号"：备注正文那一格在**另一个部件**里，`SlideEditOp` 是部件粒度的前/后像，
+ * 拿备注部件路径当坐标，落地与撤销就完全走现成那一条通道，不需要第二种 op 形状（§3.4 扩展现有接口）。
+ */
+export interface SlideNotesTarget {
+  /** 备注部件路径，如 `ppt/notesSlides/notesSlide1.xml`。 */
+  notesPartPath: string;
+}
+
+/**
+ * 一条要落地的幻灯片改动：`kind` 与本文件那八个 op 生产者一一对应，坐标原样交给它们。
  *
  * 这是**跨界契约**（渲染层 → 主进程）放在引擎侧的理由：两边都按它构造与解析，
  * 写第二份就会有人改一边忘一边（`AGENTS.md` §3.2）。里面只有坐标与值，没有幻灯片原文，
@@ -79,7 +91,8 @@ export type PptxEditRequest =
   | { kind: "geometry"; target: ShapeGeometryTarget; box: ShapeGeometryPatch }
   | { kind: "layer"; target: ShapeGeometryTarget; direction: SlideLayerDirection }
   | { kind: "add_text_box"; target: SlidePartTarget; box: ShapeBoxPx; text: string }
-  | { kind: "remove_shape"; target: ShapeGeometryTarget };
+  | { kind: "remove_shape"; target: ShapeGeometryTarget }
+  | { kind: "set_notes"; target: SlideNotesTarget; paragraphTexts: string[] };
 
 /** 保存请求：只带坐标与值，底包由主进程自己从磁盘重读。 */
 export interface PptxEditPayload {
@@ -333,10 +346,54 @@ export async function removeShape(file: PptxFile, target: ShapeGeometryTarget): 
 }
 
 /**
+ * 产出一条"把某页的演讲者备注整篇换成给定的几段"的编辑提案，**不落地**。
+ *
+ * 只改**文件里已经存在**的备注部件。新建一份 `notesSlide` 按 §2.10 要三处一起登记（部件本体 + 幻灯片侧 `<Relationship>`
+ * + `[Content_Types].xml` 的 Override，另加备注页自己指向幻灯片与 notesMaster 的两份关系），而本机 WPS 的 8 份真模板里
+ * 只有 4 份带 notesMaster 可指（取证见 spec 阶段 2）——没有备注母版时宁可回一句理由，也不凭空造一份母版。
+ *
+ * @param file 已打开的读写器。
+ * @param target 备注部件路径（读模型的 `Slide.notes.partPath`）。
+ * @param paragraphTexts 新的备注逐段文字，一段一个字符串（空串 = 那一行没字）。
+ * @returns `{ ok, op }`：部件缺失、没有 `type="body"` 那一格、现有备注带多种格式（整篇覆盖会拍平，§2.3）时 `{ ok:false, reason }`。
+ *   成功时 op 的前/后像是**备注部件**的，幻灯片部件一个字节都不动。
+ */
+export async function setSlideNotes(file: PptxFile, target: SlideNotesTarget, paragraphTexts: string[]): Promise<SlideEditResult> {
+  if (paragraphTexts.length === 0) return { ok: false, reason: "没有要写的备注段落。" };
+  const loaded = await loadSlidePart(file, target.notesPartPath, "备注部件");
+  if (!loaded.ok) return loaded;
+  const bodyShape = findNotesBodyShape(loaded.root);
+  const txBody = bodyShape ? firstChild(bodyShape, "p:txBody") : undefined;
+  if (!txBody) return { ok: false, reason: `这份备注里没有正文那一格（<p:ph type="body">）：${target.notesPartPath}` };
+  const paragraphs = findChildren(txBody, "a:p");
+  const multiRun = paragraphs.filter((p) => findChildren(p, "a:r").length > 1);
+  if (multiRun.length > 0) {
+    return { ok: false, reason: `备注里有 ${multiRun.length} 段带多截不同格式的文字，整篇覆盖会把它们压平，这一档不改。` };
+  }
+  // 带字符格式（`<a:rPr>`：颜色、加粗、字号）的备注同理：新写的 run 只有 `<a:t>`，把那些格式带不过来就是拍平（§2.3）。
+  const styledRuns = paragraphs.flatMap((p) => findChildren(p, "a:r")).filter((run) => firstChild(run, "a:rPr"));
+  if (styledRuns.length > 0) {
+    return { ok: false, reason: `备注里有 ${styledRuns.length} 截带字符格式的文字，整篇覆盖会把它们压平，这一档不改。` };
+  }
+  // 段落自己的 `<a:pPr>`（项目符号、层级）与段末 `<a:endParaRPr>` 从第一段带过来：只换文字，不动这一页已有的版式意图（§2.7）。
+  const template = paragraphs[0];
+  const pPrXml = template ? firstChild(template, "a:pPr") : undefined;
+  const endParaXml = template ? children(template).find((el) => el.name === "a:endParaRPr") : undefined;
+  const heads = children(txBody).filter((el) => el.name !== "a:p");
+  const built = paragraphTexts.map((line) =>
+    parseFragmentElement(
+      `<root><a:p>${pPrXml ? serialize(pPrXml) : ""}<a:r><a:t>${escapeText(line)}</a:t></a:r>${endParaXml ? serialize(endParaXml) : ""}</a:p></root>`,
+    ),
+  );
+  txBody.children = [...heads, ...built];
+  return { ok: true, op: toOp(target.notesPartPath, loaded.beforeXml, loaded.root) };
+}
+
+/**
  * 落地一条编辑提案：把后像写回部件。
  *
  * @param file 读写器。
- * @param op 由本文件那七个 op 生产者（`setShapeRunText` … `addTextBox`/`removeShape`）产出的 op。
+ * @param op 由本文件那八个 op 生产者（`setShapeRunText` … `addTextBox`/`removeShape`/`setSlideNotes`）产出的 op。
  */
 export function applySlideEdit(file: PptxFile, op: SlideEditOp): void {
   file.writePartText(op.partPath, op.afterXml);
@@ -404,19 +461,20 @@ type LocatedShape = { ok: true; beforeXml: string; root: Element; shape: Element
 type LocatedRun = { ok: true; beforeXml: string; root: Element; run: Element } | { ok: false; reason: string };
 
 /**
- * 读部件并解析成根元素——所有 op 共用的第一层（§3.2：`locateShape` 与新页粒度的 `addTextBox` 都要这一步）。
+ * 读部件并解析成根元素——所有 op 共用的第一层（§3.2：`locateShape`、页粒度的 `addTextBox` 与备注那一档都要这一步）。
  *
  * @param file 读写器。
- * @param partPath 幻灯片部件路径。
+ * @param partPath 部件路径（幻灯片或备注部件）。
+ * @param partLabel 理由里怎么称呼这个部件：默认"幻灯片部件"，备注那一档传"备注部件"（同一份代码，两种说法，§5.7）。
  * @returns 成功带 `{ beforeXml, root }`（`beforeXml` 就是 op 的前像）；部件缺失或解析失败带 `{ ok:false, reason }`。
  */
-async function loadSlidePart(file: PptxFile, partPath: string): Promise<LoadedSlidePart> {
+async function loadSlidePart(file: PptxFile, partPath: string, partLabel = "幻灯片部件"): Promise<LoadedSlidePart> {
   const beforeXml = await file.partText(partPath);
-  if (beforeXml === undefined) return { ok: false, reason: `幻灯片部件不存在：${partPath}` };
+  if (beforeXml === undefined) return { ok: false, reason: `${partLabel}不存在：${partPath}` };
   try {
     return { ok: true, beforeXml, root: parseDocument(beforeXml) };
   } catch {
-    return { ok: false, reason: "幻灯片部件解析失败。" };
+    return { ok: false, reason: `${partLabel}解析失败。` };
   }
 }
 

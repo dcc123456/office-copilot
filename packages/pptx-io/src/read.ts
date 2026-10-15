@@ -251,6 +251,24 @@ async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<S
     return undefined;
   }
   const cSld = firstChild(notesRoot, "p:cSld");
+  if (!cSld || !firstChild(cSld, "p:spTree")) return undefined;
+  const bodyShape = findNotesBodyShape(notesRoot);
+  const txBody = bodyShape ? firstChild(bodyShape, "p:txBody") : undefined;
+  const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
+  return { partPath, paragraphTexts: paragraphs.map((p) => text(p)) };
+}
+
+/**
+ * 在备注部件里找出正文那一格占位符（`<p:sp>` 且 `p:nvPr/p:ph/@type === "body"`）。
+ *
+ * 读侧与写侧共用这一份判定（§3.2）：备注页上还有 `sldImg`（幻灯片缩略图）与 `sldNum`/`hdr`/`ftr`（正文是 `<a:fld>` 算出来的），
+ * 把它们念成备注是编内容，把它们写成备注是改坏了不该动的东西。
+ *
+ * @param notesRoot 备注部件（`<p:notes>`）的根元素。
+ * @returns 正文那一格 `<p:sp>`；没有形状树或没有 body 占位符时 undefined。
+ */
+export function findNotesBodyShape(notesRoot: Element): Element | undefined {
+  const cSld = firstChild(notesRoot, "p:cSld");
   const spTree = cSld ? firstChild(cSld, "p:spTree") : undefined;
   if (!spTree) return undefined;
   for (const el of children(spTree)) {
@@ -258,13 +276,9 @@ async function readSlideNotes(pkg: OpcPackage, slidePartPath: string): Promise<S
     const nvPr = firstChild(el, "p:nvSpPr");
     const phHost = nvPr ? firstChild(nvPr, "p:nvPr") : undefined;
     const ph = phHost ? firstChild(phHost, "p:ph") : undefined;
-    // 只认备注正文那一格：sldImg（幻灯片缩略图）、sldNum/hdr/ftr（页码页眉页脚，正文是 `<a:fld>` 算出来的）都不是用户写的备注。
-    if (ph?.attributes["type"] !== "body") continue;
-    const txBody = firstChild(el, "p:txBody");
-    const paragraphs = txBody ? findChildren(txBody, "a:p") : [];
-    return { partPath, paragraphTexts: paragraphs.map((p) => text(p)) };
+    if (ph?.attributes["type"] === "body") return el;
   }
-  return { partPath, paragraphTexts: [] };
+  return undefined;
 }
 
 /**

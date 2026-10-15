@@ -16,6 +16,7 @@ import {
   auditPptxPackage,
   moveShapeLayer,
   removeShape,
+  setSlideNotes,
   revertSlideEdits,
   setRunColor,
   setRunFont,
@@ -218,6 +219,8 @@ async function makeEdit(file: PptxFile, edit: PptxEditRequest): Promise<{ ok: tr
       return await addTextBox(file, edit.target, edit.box, edit.text);
     case "remove_shape":
       return await removeShape(file, edit.target);
+    case "set_notes":
+      return await setSlideNotes(file, edit.target, edit.paragraphTexts);
   }
 }
 

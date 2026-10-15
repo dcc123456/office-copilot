@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import JSZip from "jszip";
+import { newlyIntroducedIssues } from "@office-copilot/opc";
 import { PptxFile } from "./pptx-file.js";
-import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText } from "./index.js";
+import { addTextBox, applySlideEdit, moveShapeLayer, readPresentation, removeShape, revertSlideEdit, revertSlideEdits, setRunColor, setRunFont, setShapeGeometry, setShapeRunText, setSlideNotes } from "./index.js";
 import { auditPptxPackage } from "./audit.js";
 import { buildDeckBytes, colorDeckParts, inheritanceDeckParts, textStyleDeckParts } from "./test-deck.js";
 
@@ -732,5 +733,99 @@ describe("pptx-io：有效字号的继承链（run → 段落 → 形状 lstStyl
     expect(await reopened.partText(slidePath)).toBe(before);
     expect(await reopened.partText("ppt/slideMasters/slideMaster1.xml")).toBe((await file.partText("ppt/slideMasters/slideMaster1.xml"))!);
     expect(before).not.toContain('sz="4400"'); // 母版 titleStyle 那一档只进模型，不进部件
+  });
+});
+
+/**
+ * 造一份只有备注部件正文不同的 deck，用来验写侧那几条拒绝分支。
+ *
+ * @param bodyInner 备注正文那一格 `<a:txBody>` 里 `a:bodyPr`/`a:lstStyle` 之后的内容（段落原文）。
+ * @returns 最小 deck 的字节：备注部件被换成这一份正文，其余部件照 {@link minimalDeck}。
+ */
+async function notesDeckWithBody(bodyInner: string): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await minimalDeck(undefined, "占位"));
+  zip.file(
+    "ppt/notesSlides/notesSlide1.xml",
+    '<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">' +
+      "<p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id=\"1\" name=\"\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>" +
+      '<p:sp><p:nvSpPr><p:cNvPr id="3" name="备注占位符 2"/><p:cNvSpPr/><p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr><p:spPr/>' +
+      `<p:txBody><a:bodyPr/><a:lstStyle/>${bodyInner}</p:txBody></p:sp>` +
+      "</p:spTree></p:cSld></p:notes>",
+  );
+  return await zip.generateAsync({ type: "uint8array" });
+}
+
+describe("pptx-io：演讲者备注的写侧（只改已存在的备注部件，幻灯片部件不许被牵连）", () => {
+  const NOTES = "ppt/notesSlides/notesSlide1.xml";
+
+  it("整篇换成新的三段：op 的前/后像是备注部件的，幻灯片部件逐字不变，读回是新三段", async () => {
+    const file = await PptxFile.open(await minimalDeck(undefined, "先讲背景⏎再讲结论"));
+    const slideBefore = (await file.partText("ppt/slides/slide1.xml"))!;
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["开场 30 秒", "", "结尾留提问"]);
+    if (!result.ok) throw new Error(result.reason);
+    expect(result.op.partPath).toBe(NOTES);
+    applySlideEdit(file, result.op);
+    expect(await file.partText("ppt/slides/slide1.xml")).toBe(slideBefore);
+    const { model } = await readPresentation(await file.toBytes());
+    expect(model.slides[0]!.notes?.paragraphTexts).toEqual(["开场 30 秒", "", "结尾留提问"]);
+  });
+
+  it("撤销把备注部件写回前像：字节逐字一致，读回还是原来那两句", async () => {
+    const file = await PptxFile.open(await minimalDeck(undefined, "先讲背景⏎再讲结论"));
+    const original = (await file.partText(NOTES))!;
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["只留一句"]);
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const { applied, skipped } = await revertSlideEdits(file, [result.op]);
+    expect(applied).toHaveLength(1);
+    expect(skipped).toEqual([]);
+    expect((await file.partText(NOTES))).toBe(original);
+    const reopened = await PptxFile.open(await file.toBytes());
+    expect(await reopened.partText(NOTES)).toBe(original);
+  });
+
+  it("段落自带的 a:pPr（项目符号/层级）与段末 endParaRPr 带进新写的每一段：只换文字，不动这一页已有的版式意图", async () => {
+    const file = await PptxFile.open(
+      await notesDeckWithBody('<a:p><a:pPr marL="342900" indent="-342900"/><a:r><a:t>旧的一句</a:t></a:r><a:endParaRPr lang="zh-CN"/></a:p>'),
+    );
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["第一行", "第二行"]);
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    const written = (await file.partText(NOTES))!;
+    expect(written.match(/<a:pPr marL="342900" indent="-342900"/g)).toHaveLength(2); // 两段都带上原来的项目符号
+    expect(written.match(/<a:endParaRPr lang="zh-CN"/g)).toHaveLength(2);
+    expect(written).not.toContain("旧的一句");
+  });
+
+  it("备注里有一段带两截不同格式的文字时整篇拒绝：覆盖会把它们压平（§2.3）", async () => {
+    const file = await PptxFile.open(
+      await notesDeckWithBody("<a:p><a:r><a:t>甲</a:t></a:r><a:r><a:t>乙</a:t></a:r></a:p>"),
+    );
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["新的一句"]);
+    expect(result).toEqual({ ok: false, reason: "备注里有 1 段带多截不同格式的文字，整篇覆盖会把它们压平，这一档不改。" });
+  });
+
+  it("备注 run 带字符格式（a:rPr）时也拒绝：新写的 run 只有 <a:t>，把颜色加粗带不过来就是拍平", async () => {
+    const file = await PptxFile.open(
+      await notesDeckWithBody('<a:p><a:r><a:rPr b="1"/><a:t>加粗的一句</a:t></a:r></a:p>'),
+    );
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["新的一句"]);
+    expect(result).toEqual({ ok: false, reason: "备注里有 1 截带字符格式的文字，整篇覆盖会把它们压平，这一档不改。" });
+  });
+
+  it("这一页没有备注部件时点名是备注部件缺失，不含糊成幻灯片读不动", async () => {
+    const file = await PptxFile.open(await minimalDeck());
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["新的一句"]);
+    expect(result).toEqual({ ok: false, reason: `备注部件不存在：${NOTES}` });
+  });
+
+  it("落地后的产物不引入新的审计问题：这一档不新增部件，登记面一个字都不动（§2.10）", async () => {
+    const bytes = await minimalDeck(undefined, "先讲背景");
+    const file = await PptxFile.open(bytes);
+    const result = await setSlideNotes(file, { notesPartPath: NOTES }, ["换成一句新的"]);
+    if (!result.ok) throw new Error(result.reason);
+    applySlideEdit(file, result.op);
+    // 判据是"本次事务引入的"，不是"绝对 0 条"：最小夹具本身没有备注页与备注母版之间的关系，那两条底包就有。
+    expect(newlyIntroducedIssues(await auditPptxPackage(bytes), await auditPptxPackage(await file.toBytes()))).toEqual([]);
   });
 });
